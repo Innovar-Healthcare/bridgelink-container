@@ -1,0 +1,6 @@
+version: '3.1'
+services:
+    mc:
+        image: innovar-mirth:latest
+        volumes:
+            - ./appdata:/opt/connect/appdata
