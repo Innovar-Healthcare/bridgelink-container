@@ -1,6 +1,9 @@
-FROM --platform=linux/amd64 amazoncorretto:17
+# FROM --platform=linux/amd64 amazoncorretto:17
+FROM --platform=linux/amd64 rockylinux:9
 
-RUN yum install -y tar gzip openssl shadow-utils
+RUN yum install -y tar gzip openssl shadow-utils java-17-openjdk java-17-openjdk-devel
+RUN yum install https://download.postgresql.org/pub/repos/yum/reporpms/EL-8-x86_64/pgdg-redhat-repo-latest.noarch.rpm -y
+RUN yum install postgresql14 postgresql14-server -y
 
 RUN useradd -u 1000 mirth
 
