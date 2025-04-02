@@ -1,30 +1,29 @@
 version: '3.1'
 services:
-    mc:
-        image: mirth-container:latest
+    bl:
+        image: bridgelink-container:latest
         stdin_open: true # docker run -i
         tty: true
         user: 1000:1000
         ports:
             - "8443:8443"
         networks:
-            mirth:
+            bridgelink:
                 ipv4_address: 10.5.0.6
         volumes:
-            - ./appdata:/opt/connect/appdata
+            - ./appdata:/opt/bridgelink/appdata
         environment:
             - MP_DATABASE=postgres
-            - MP_DATABASE_URL=jdbc:postgresql://10.5.0.5:5432/mirthtest
+            - MP_DATABASE_URL=jdbc:postgresql://10.5.0.5:5432/mirthdb
+            - MP_DB_SCHEMA=mirthdb
             - MP_DATABASE_USERNAME=mirthtest
             - MP_DATABASE_PASSWORD=mirthtest
-            - MP_KEYSTORE_KEYPASS=test
-            - MP_KEYSTORE_STOREPASS=test
-            - EXTENSIONS_DOWNLOAD=https://innovar-userdocuments.s3.us-east-2.amazonaws.com/mirth_plugins/ssl-settings/ssl-settings-4.5.0.zip,https://innovar-userdocuments.s3.us-east-2.amazonaws.com/mirth_plugins/channelHistory/innovarhealthcare-channelHistory-4.5.0.zip
-    
+            - MP_DATABASE_DBNAME=mirthdb
+ 
     postgres:
         image: postgres:14-alpine
         networks:
-            mirth:
+            bridgelink:
                 ipv4_address: 10.5.0.5
         ports:
             - 5432:5432
@@ -33,10 +32,10 @@ services:
         environment:
             - POSTGRES_PASSWORD=mirthtest
             - POSTGRES_USER=mirthtest
-            - POSTGRES_DB=mirthtest
+            - POSTGRES_DB=mirthdb
 
 networks:
-    mirth:
+    bridgelink:
         driver: bridge
         ipam:
             config:

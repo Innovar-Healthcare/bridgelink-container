@@ -1,13 +1,13 @@
 #!/bin/bash
 
 # URL of the .tar.gz file
-URL="https://s3.amazonaws.com/downloads.mirthcorp.com/connect/4.5.0.b3012/mirthconnect-4.5.0.b3012-unix.tar.gz"
+URL="https://innovar-oss-mirth-mirror.s3.us-east-2.amazonaws.com/mirth-arch/BridgeLink/BridgeLink_unix_4_5_3.tar.gz"
 
 # Destination folder path
 DESTINATION_FOLDER="/opt"
 
 # Name of the downloaded file
-FILE_NAME="mirthconnect-4.5.0.b3012-unix.tar.gz"
+FILE_NAME="BridgeLink_unix_4_5_3.tar.gz"
 
 # Log file for debugging
 LOG_FILE="/opt/scripts/download_and_extract.log"
@@ -38,8 +38,8 @@ if [ $? -ne 0 ]; then
 fi
 
 # Rename the extracted folder to "connect"
-echo "Renaming folder to 'connect'..." | tee -a "$LOG_FILE"
-mv "$DESTINATION_FOLDER/Mirth Connect" "$DESTINATION_FOLDER/connect"
+echo "Renaming folder to 'bridgelink'..." | tee -a "$LOG_FILE"
+mv "$DESTINATION_FOLDER/BridgeLink" "$DESTINATION_FOLDER/bridgelink"
 if [ $? -ne 0 ]; then
   echo "Rename failed" | tee -a "$LOG_FILE"
   rm -rf "$TEMP_DIR"

@@ -1,13 +1,14 @@
 #!/bin/bash
 
 # Files to be modified
-PROPERTIES_FILE="/opt/connect/conf/mirth.properties"
-VMOPTIONS_FILE="/opt/connect/vmoptions.properties"
-SERVER_ID_FILE="/opt/connect/appdata/server.id"
-EXTENSIONS_DIR="/opt/connect/extensions"
-CUSTOM_JARS_DIR="/opt/connect/custom-jars"
+PROPERTIES_FILE="/opt/bridgelink/conf/mirth.properties"
+VMOPTIONS_FILE="/opt/bridgelink/blserver.vmoptions"
+SERVER_ID_FILE="/opt/bridgelink/appdata/server.id"
+EXTENSIONS_DIR="/opt/bridgelink/extensions"
+CUSTOM_JARS_DIR="/opt/bridgelink/custom-jars"
+S3_CUSTOM_JARS_DIR="/opt/bridgelink/S3_custom-jars"
 
-# Function to update a property in the file
+Function to update a property in the file
 update_property() {
   local file=$1
   local property=$2
@@ -41,12 +42,30 @@ if [ ! -z "$SERVER_ID" ]; then
   echo -e "server.id = ${SERVER_ID//\//\\/}" > "$SERVER_ID_FILE"
 fi
 
-PGPASSWORD=$MASTER_DATABASE_PASSWORD psql -h $DATABASE_URL -p 5432 -U $MASTER_DATABASE_USERNAME -d postgres -c "DO \$\$ BEGIN IF EXISTS (SELECT FROM pg_catalog.pg_roles WHERE  rolname = '$MP_DATABASE_USERNAME') THEN RAISE NOTICE 'Role $MP_DATABASE_USERNAME already exists. Skipping.'; ELSE CREATE ROLE $MP_DATABASE_USERNAME LOGIN PASSWORD '$MP_DATABASE_PASSWORD'; END IF; END \$\$;"
-if PGPASSWORD=$MASTER_DATABASE_PASSWORD psql -h $DATABASE_URL -p 5432 -U $MASTER_DATABASE_USERNAME -d postgres -lqt | cut -d \| -f 1 | grep -qw "$MP_DATABASE_DBNAME"; then     echo "Database $MP_DATABASE_DBNAME already exists. Skipping creation."; else    PGPASSWORD=$MASTER_DATABASE_PASSWORD createdb -h $DATABASE_URL -U $MASTER_DATABASE_USERNAME '$MP_DATABASE_DBNAME';     echo "Database $MP_DATABASE_DBNAME has been created."; fi
-PGPASSWORD=$MASTER_DATABASE_PASSWORD psql -h $DATABASE_URL -p 5432 -U $MASTER_DATABASE_USERNAME -d $MP_DATABASE_DBNAME -c "GRANT ALL PRIVILEGES ON DATABASE $MP_DATABASE_DBNAME TO $MP_DATABASE_USERNAME;"
+# #Create pg user ,database, schema
+# python3 /opt/scripts/dbScript.py
 
-PGPASSWORD=$MP_DATABASE_PASSWORD psql -h $DATABASE_URL -p 5432 -U $MP_DATABASE_USERNAME -d $MP_DATABASE_DBNAME -c "DO \$\$ BEGIN IF NOT EXISTS ( SELECT 1 FROM information_schema.schemata WHERE schema_name = '$MP_DB_SCHEMA') THEN EXECUTE 'CREATE SCHEMA $MP_DB_SCHEMA'; RAISE NOTICE 'Schema "$MP_DB_SCHEMA" has been created.'; ELSE RAISE NOTICE 'Schema "$MP_DB_SCHEMA" already exists.'; END IF; END \$\$;"
+# #AWS Marketplace usage registration
+# # python3 /opt/scripts/registerUsage.py registerUsage
 
+# #Get information from secret manager
+# python3 /opt/scripts/updatePropertiesFromSecretManager.py
+
+
+
+
+# Calculate 75% of total ECS task def
+# xmx_value_mb=$(($TOTAL_MEMORY * 80 / 100))
+# rounded_xmx_value_mb=$((xmx_value_mb / 1024 * 1024))
+# sed -i "s/-Xmx[0-9]*m/-Xmx${rounded_xmx_value_mb}m/" $VMOPTIONS_FILE
+
+
+# # Use aws cli command to download custom mcserver.vmoption to container
+# if [ -n "${S3_VPMOPTIONS_URL}" ]; then
+#   echo "Download vmoptions file from url... ${S3_VPMOPTIONS_URL}"
+
+#   aws s3 cp ${S3_VPMOPTIONS_URL} ${VMOPTIONS_FILE}
+# fi
 
 # Loop over environment variables with prefix MP_
 for var in $(env | grep '^MP_' | sed 's/=.*//'); do
@@ -67,54 +86,62 @@ for var in $(env | grep '^MP_' | sed 's/=.*//'); do
   fi
 done
 
-# Download and extract extensions if EXTENSIONS_DOWNLOAD is set
-if [ -n "${EXTENSIONS_DOWNLOAD}" ]; then
-  echo "Downloading extensions from ${EXTENSIONS_DOWNLOAD}"
-  cd ${EXTENSIONS_DIR}
+# # Download and extract extensions if EXTENSIONS_DOWNLOAD is set
+# if [ -n "${EXTENSIONS_DOWNLOAD}" ]; then
+#   echo "Downloading extensions from ${EXTENSIONS_DOWNLOAD}"
+#   cd ${EXTENSIONS_DIR}
 
-  CURL_OPTS="-sSLf"
-  [ "${ALLOW_INSECURE}" = "true" ] && CURL_OPTS="-ksSLf"
+#   CURL_OPTS="-sSLf"
+#   [ "${ALLOW_INSECURE}" = "true" ] && CURL_OPTS="-ksSLf"
 
-  # Split URLs by space and iterate over them
-  IFS=',' read -r -a urls <<< "${EXTENSIONS_DOWNLOAD}"
-  for url in "${urls[@]}"; do
-    echo "Downloading from ${url}"
-    # Extract filename from URL
-    filename=$(basename "$url")
-    curl ${CURL_OPTS} "${url}" -o "$filename" || { echo "Problem with extensions download from ${url}"; continue; }
+#   # Split URLs by space and iterate over them
+#   IFS=',' read -r -a urls <<< "${EXTENSIONS_DOWNLOAD}"
+#   for url in "${urls[@]}"; do
+#     echo "Downloading from ${url}"
+#     # Extract filename from URL
+#     filename=$(basename "$url")
+#     curl ${CURL_OPTS} "${url}" -o "$filename" || { echo "Problem with extensions download from ${url}"; continue; }
 
-    echo "Extracting contents of $filename"
+#     echo "Extracting contents of $filename"
 
-    jar xf "$filename" || { echo "Problem extracting contents of $filename"; continue; }
-    rm "$filename"
-  done
-fi
+#     jar xf "$filename" || { echo "Problem extracting contents of $filename"; continue; }
+#     rm "$filename"
+#   done
+# fi
 
-# Download and extract jars if CUSTOM_JARS_DOWNLOAD is set
-if [ -n "${CUSTOM_JARS_DOWNLOAD}" ]; then
-  echo "Downloading jars from ${CUSTOM_JARS_DOWNLOAD}"
+# # Download and extract jars if CUSTOM_JARS_DOWNLOAD is set
+# if [ -n "${CUSTOM_JARS_DOWNLOAD}" ]; then
+#   echo "Downloading jars from ${CUSTOM_JARS_DOWNLOAD}"
 
-  mkdir ${CUSTOM_JARS_DIR}
+#   mkdir ${CUSTOM_JARS_DIR}
 
-  cd ${CUSTOM_JARS_DIR}
+#   cd ${CUSTOM_JARS_DIR}
 
-  CURL_OPTS="-sSLf"
-  [ "${ALLOW_INSECURE}" = "true" ] && CURL_OPTS="-ksSLf"
+#   CURL_OPTS="-sSLf"
+#   [ "${ALLOW_INSECURE}" = "true" ] && CURL_OPTS="-ksSLf"
 
-  # Split URLs by space and iterate over them
-  IFS=',' read -r -a urls <<< "${CUSTOM_JARS_DOWNLOAD}"
-  for url in "${urls[@]}"; do
-    echo "Downloading from ${url}"
-    # Extract filename from URL
-    filename=$(basename "$url")
-    curl ${CURL_OPTS} "${url}" -o "$filename" || { echo "Problem with jars download from ${url}"; continue; }
+#   # Split URLs by space and iterate over them
+#   IFS=',' read -r -a urls <<< "${CUSTOM_JARS_DOWNLOAD}"
+#   for url in "${urls[@]}"; do
+#     echo "Downloading from ${url}"
+#     # Extract filename from URL
+#     filename=$(basename "$url")
+#     curl ${CURL_OPTS} "${url}" -o "$filename" || { echo "Problem with jars download from ${url}"; continue; }
 
-    jar xf "$filename" || { echo "Problem extracting contents of $filename"; continue; }
-    rm "$filename"
-  done
-fi
+#     jar xf "$filename" || { echo "Problem extracting contents of $filename"; continue; }
+#     rm "$filename"
+#   done
+# fi
 
-cd /opt/connect
+# # Use aws cli command to sync the S3 folder
+# if [ -n "${S3_URL}" ]; then
+#   mkdir ${S3_CUSTOM_JARS_DIR}
+#   echo "S3 sync from ${S3_URL}"
+
+#   aws s3 sync ${S3_URL} ${S3_CUSTOM_JARS_DIR}
+# fi
+
+cd /opt/bridgelink
 
 exec "$@"
 
