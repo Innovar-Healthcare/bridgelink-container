@@ -8,7 +8,7 @@ EXTENSIONS_DIR="/opt/bridgelink/extensions"
 CUSTOM_JARS_DIR="/opt/bridgelink/custom-jars"
 S3_CUSTOM_JARS_DIR="/opt/bridgelink/S3_custom-jars"
 
-Function to update a property in the file
+# Function to update a property in the file
 update_property() {
   local file=$1
   local property=$2
