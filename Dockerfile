@@ -7,9 +7,9 @@ FROM --platform=linux/amd64 rockylinux:9 AS builder
 RUN yum install -y tar gzip openssl shadow-utils unzip python3 wget && \
     yum install -y https://download.postgresql.org/pub/repos/yum/reporpms/EL-8-x86_64/pgdg-redhat-repo-latest.noarch.rpm
 
-# Install OpenJDK 21 (runtime & development) and set JAVA_HOME
-RUN yum -y install java-21-openjdk java-21-openjdk-devel
-ENV JAVA_HOME=/usr/lib/jvm/java-21-openjdk
+# Install OpenJDK 17 (runtime & development) and set JAVA_HOME
+RUN yum -y install java-17-openjdk java-17-openjdk-devel
+ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk
 ENV PATH=$JAVA_HOME/bin:$PATH
 
 # Install python3-pip and required Python packages
@@ -55,10 +55,10 @@ RUN chmod 755 /opt/scripts/entrypoint.sh && \
 FROM --platform=linux/amd64 rockylinux:9 AS final
 
 # Install only the runtime dependencies. (Python3 may be needed by your app.)
-RUN yum install -y java-21-openjdk python3 && yum clean all
+RUN yum install -y java-17-openjdk python3 && yum clean all
 
 # Set JAVA_HOME and update PATH for runtime
-ENV JAVA_HOME=/usr/lib/jvm/java-21-openjdk
+ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk
 ENV PATH=$JAVA_HOME/bin:$PATH
 
 # Recreate the bridgelink user (ensuring the same UID as in the builder)
