@@ -55,7 +55,7 @@ RUN chmod 755 /opt/scripts/entrypoint.sh && \
 FROM --platform=linux/amd64 rockylinux:9 AS final
 
 # Install only the runtime dependencies. (Python3 may be needed by your app.)
-RUN yum install -y java-17-openjdk python3 && yum clean all
+RUN yum install -y java-17-openjdk java-17-openjdk-devel python3 && yum clean all
 
 # Set JAVA_HOME and update PATH for runtime
 ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk
@@ -67,6 +67,9 @@ RUN useradd -u 1000 bridgelink
 # Copy the built application and entrypoint script from the builder stage
 COPY --from=builder /opt/bridgelink /opt/bridgelink
 COPY --from=builder /opt/scripts/entrypoint.sh /opt/scripts/entrypoint.sh
+
+# add the java9+ vmoptions to blserver.vmoptions
+RUN cat /opt/bridgelink/docs/mcservice-java9+.vmoptions >> /opt/bridgelink/blserver.vmoptions 
 
 # Ensure proper permissions for the entrypoint and application files
 RUN chmod 755 /opt/scripts/entrypoint.sh && \

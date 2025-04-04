@@ -19,6 +19,9 @@ services:
             - MP_DATABASE_USERNAME=mirthtest
             - MP_DATABASE_PASSWORD=mirthtest
             - MP_DATABASE_DBNAME=mirthdb
+            - SERVER_ID=7d760af2-680a-4a19-b9a2-c4685df61ebc
+            - MP_VMOPTIONS=512
+            - CUSTOM_JARS_DOWNLOAD=https://innovar-awsmarketplace.s3.us-east-1.amazonaws.com/AWS_Jar/docker-test-jar.zip
  
     postgres:
         image: postgres:14-alpine

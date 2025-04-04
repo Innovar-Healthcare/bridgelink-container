@@ -109,29 +109,29 @@ done
 #   done
 # fi
 
-# # Download and extract jars if CUSTOM_JARS_DOWNLOAD is set
-# if [ -n "${CUSTOM_JARS_DOWNLOAD}" ]; then
-#   echo "Downloading jars from ${CUSTOM_JARS_DOWNLOAD}"
+# Download and extract jars if CUSTOM_JARS_DOWNLOAD is set
+if [ -n "${CUSTOM_JARS_DOWNLOAD}" ]; then
+  echo "Downloading jars from ${CUSTOM_JARS_DOWNLOAD}"
 
-#   mkdir ${CUSTOM_JARS_DIR}
+  mkdir ${CUSTOM_JARS_DIR}
 
-#   cd ${CUSTOM_JARS_DIR}
+  cd ${CUSTOM_JARS_DIR}
 
-#   CURL_OPTS="-sSLf"
-#   [ "${ALLOW_INSECURE}" = "true" ] && CURL_OPTS="-ksSLf"
+  CURL_OPTS="-sSLf"
+  [ "${ALLOW_INSECURE}" = "true" ] && CURL_OPTS="-ksSLf"
 
-#   # Split URLs by space and iterate over them
-#   IFS=',' read -r -a urls <<< "${CUSTOM_JARS_DOWNLOAD}"
-#   for url in "${urls[@]}"; do
-#     echo "Downloading from ${url}"
-#     # Extract filename from URL
-#     filename=$(basename "$url")
-#     curl ${CURL_OPTS} "${url}" -o "$filename" || { echo "Problem with jars download from ${url}"; continue; }
+  # Split URLs by space and iterate over them
+  IFS=',' read -r -a urls <<< "${CUSTOM_JARS_DOWNLOAD}"
+  for url in "${urls[@]}"; do
+    echo "Downloading from ${url}"
+    # Extract filename from URL
+    filename=$(basename "$url")
+    curl ${CURL_OPTS} "${url}" -o "$filename" || { echo "Problem with jars download from ${url}"; continue; }
 
-#     jar xf "$filename" || { echo "Problem extracting contents of $filename"; continue; }
-#     rm "$filename"
-#   done
-# fi
+    jar xf "$filename" || { echo "Problem extracting contents of $filename"; continue; }
+    rm "$filename"
+  done
+fi
 
 # # Use aws cli command to sync the S3 folder
 # if [ -n "${S3_URL}" ]; then
