@@ -204,7 +204,50 @@ if ! [ -z "${DATABASE_RETRY_WAIT+x}" ]; then
 	sed -i "s/^database\.connection\.retrywaitinmilliseconds\s*=\s*.*\$/database.connection.retrywaitinmilliseconds = ${DATABASE_RETRY_WAIT//\//\\/}/" /opt/bridgelink/conf/mirth.properties
 fi
 
+# merge extra environment variables starting with _MP_ into mirth.properties
+while read -r keyvalue; do
+	KEY="${keyvalue%%=*}"
+	VALUE="${keyvalue#*=}"
+	VALUE=$(tr -dc '\40-\176' <<< "$VALUE")
 
+	if ! [ -z "${KEY}" ] && ! [ -z "${VALUE}" ] && ! [[ ${VALUE} =~ ^\ +$ ]]; then
+
+		# filter for variables starting with "_MP_"
+		if [[ ${KEY} == _MP_* ]]; then
+
+			# echo "found mirth property ${KEY}=${VALUE}"
+
+			# example: _MP_DATABASE_MAX__CONNECTIONS -> database.max-connections
+
+			# remove _MP_
+			# example:  DATABASE_MAX__CONNECTIONS
+			ACTUAL_KEY=${KEY:4}
+
+			# switch '__' to '-'
+			# example:  DATABASE_MAX-CONNECTIONS
+			ACTUAL_KEY="${ACTUAL_KEY//__/-}"
+
+			# switch '_' to '.'
+			# example:  DATABASE.MAX-CONNECTIONS
+			ACTUAL_KEY="${ACTUAL_KEY//_/.}"
+
+			# lower case
+			# example:  database.max-connections
+			ACTUAL_KEY="${ACTUAL_KEY,,}"
+
+			# if key does not exist in mirth.properties append it at bottom
+			LINE_COUNT=`grep "^${ACTUAL_KEY}" $PROPERTIES_FILE | wc -l`
+			if [ $LINE_COUNT -lt 1 ]; then
+				# echo "key ${ACTUAL_KEY} not found in mirth.properties, appending. Value = ${VALUE}"
+				echo -e "\n${ACTUAL_KEY} = ${VALUE//\//\\/}" >> $PROPERTIES_FILE
+			else # otherwise key exists, overwrite it
+				# echo "key ${ACTUAL_KEY} exists, overwriting. Value = ${VALUE}"
+				ESCAPED_KEY="${ACTUAL_KEY//./\\.}"
+				sed -i "s/^${ESCAPED_KEY}\s*=\s*.*\$/${ACTUAL_KEY} = ${VALUE//\//\\/}/" $PROPERTIES_FILE
+			fi
+		fi
+	fi
+done <<< "`printenv`"
 
 
 cd /opt/bridgelink
