@@ -12,10 +12,6 @@ RUN yum -y install java-17-openjdk java-17-openjdk-devel
 ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk
 ENV PATH=$JAVA_HOME/bin:$PATH
 
-# Install python3-pip and required Python packages
-RUN yum install -y python3-pip && \
-    pip3 install boto3 && \
-    pip3 install --no-cache-dir psycopg2-binary
 
 # Install AWS CLI
 RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip" && \
