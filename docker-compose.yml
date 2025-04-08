@@ -14,14 +14,24 @@ services:
             - ./appdata:/opt/bridgelink/appdata
         environment:
             - MP_DATABASE=postgres
-            - MP_DATABASE_URL=jdbc:postgresql://10.5.0.5:5432/mirthdb
-            - MP_DB_SCHEMA=mirthdb
-            - MP_DATABASE_USERNAME=mirthtest
-            - MP_DATABASE_PASSWORD=mirthtest
-            - MP_DATABASE_DBNAME=mirthdb
+            - MP_DATABASE_URL=jdbc:postgresql://10.5.0.5:5432/bridgelinkdb
+            - MP_DB_SCHEMA=bridgelinkdb
+            - MP_DATABASE_USERNAME=bridgelinktest
+            - MP_DATABASE_PASSWORD=bridgelinktest
+            - MP_DATABASE_DBNAME=bridgelinkdb
+            - DATABASE_MAX_CONNECTIONS=21
+            - DATABASE_MAX_RETRY=3
+            - DATABASE_RETRY_WAIT=10001
             - SERVER_ID=7d760af2-680a-4a19-b9a2-c4685df61ebc
+            - MP_KEYSTORE_KEYPASS=bridgelinkKeystore
+            - MP_KEYSTORE_STOREPASS=bridgelinkKeypass
+            - KEYSTORE_DOWNLOAD=https://innovar-awsmarketplace.s3.us-east-1.amazonaws.com/plugins/keystore.jks
+            - ALLOW_INSECURE=true
+            - CUSTOM_VMOPTIONS=https://innovar-awsmarketplace.s3.us-east-1.amazonaws.com/AWS_Jar/blserver.vmoptions
             - MP_VMOPTIONS=512
+            - CUSTOM_PROPERTIES=https://innovar-awsmarketplace.s3.us-east-1.amazonaws.com/AWS_Jar/mirth.properties.copy
             - CUSTOM_JARS_DOWNLOAD=https://innovar-awsmarketplace.s3.us-east-1.amazonaws.com/AWS_Jar/docker-test-jar.zip
+            - EXTENSIONS_DOWNLOAD=https://innovar-awsmarketplace.s3.us-east-1.amazonaws.com/plugins/cognito-auth.zip,https://innovar-awsmarketplace.s3.us-east-1.amazonaws.com/plugins/innovarhealthcare-channel-History-4.5.3.zip,https://innovar-awsmarketplace.s3.us-east-1.amazonaws.com/plugins/innovarhealthcare-ssl-settings-4.5.3.zip
  
     postgres:
         image: postgres:14-alpine
@@ -33,9 +43,9 @@ services:
         # volumes:
         #     - ~/apps/postgres:/var/lib/postgresql/data
         environment:
-            - POSTGRES_PASSWORD=mirthtest
-            - POSTGRES_USER=mirthtest
-            - POSTGRES_DB=mirthdb
+            - POSTGRES_PASSWORD=bridgelinktest
+            - POSTGRES_USER=bridgelinktest
+            - POSTGRES_DB=bridgelinkdb
 
 networks:
     bridgelink:
