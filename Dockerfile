@@ -1,11 +1,11 @@
 # ============================================================
 # Stage 1: Builder
 # ============================================================
-FROM --platform=linux/amd64 rockylinux:9 AS builder
+FROM rockylinux:9 AS builder
 
+RUN yum update -y
 # Install build tools and repositories
-RUN yum install -y tar gzip openssl shadow-utils unzip python3 wget && \
-    yum install -y https://download.postgresql.org/pub/repos/yum/reporpms/EL-8-x86_64/pgdg-redhat-repo-latest.noarch.rpm
+RUN yum install -y tar gzip openssl shadow-utils unzip python3 wget
 
 # Install OpenJDK 17 (runtime & development) and set JAVA_HOME
 RUN yum -y install java-17-openjdk java-17-openjdk-devel
@@ -48,7 +48,7 @@ RUN chmod 755 /opt/scripts/entrypoint.sh && \
 # ============================================================
 # Stage 2: Runtime
 # ============================================================
-FROM --platform=linux/amd64 rockylinux:9 AS final
+FROM rockylinux:9 AS final
 
 # Install only the runtime dependencies. (Python3 may be needed by your app.)
 RUN yum install -y java-17-openjdk java-17-openjdk-devel python3 && yum clean all
