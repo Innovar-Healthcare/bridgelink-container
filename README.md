@@ -124,9 +124,10 @@ services:
         - MP_DATABASE_USERNAME=bridgelinktest
         - MP_DATABASE_PASSWORD=bridgelinktest
         - MP_DATABASE_DBNAME=bridgelinkdb
-        - DATABASE_MAX_RETRY=2
-        - DATABASE_RETRY_WAIT=10000
-        - SERVER_ID=7d760af2-680a-4a19-b9a2-c4685df61ebc
+        - MP_DATABASE_MAX__CONNECTIONS=20
+        - MP_DATABASE_CONNECTION_MAXRETRY=2
+        - MP_DATABASE_RETRY_WAIT=10000
+        - SERVER_ID=xxxxxx-xxxxx-xxxxxx-xxxxxx
         - MP_KEYSTORE_KEYPASS=bridgelinkKeystore
         - MP_KEYSTORE_STOREPASS=bridgelinkKeypass
         - MP_VMOPTIONS=512
@@ -168,8 +169,8 @@ MP_DATABASE_URL=jdbc:postgresql://10.5.0.5:5432/bridgelinkdb
 MP_DATABASE_USERNAME=bridgelinktest
 MP_DATABASE_PASSWORD=bridgelinktest
 MP_DATABASE_DBNAME=bridgelinkdb
-DATABASE_MAX_RETRY=2
-DATABASE_RETRY_WAIT=10000
+MP_DATABASE_CONNECTION_MAXRETRY=2
+MP_DATABASE_RETRY_WAIT=10000
 SERVER_ID=xxxxx-xxxxxx-xxxxxx-xxxxx
 MP_KEYSTORE_KEYPASS=bridgelinkKeystore
 MP_KEYSTORE_STOREPASS=bridgelinkKeypass
@@ -213,17 +214,17 @@ The username to use when connecting to the database. If you don't want to use an
 The password to use when connecting to the database. If you don't want to use an environment variable to store sensitive information like this, look at the [Using Docker Secrets](#using-docker-secrets) section below.
 
 <a name="env-database-max-connections"></a>
-#### `DATABASE_MAX_CONNECTIONS`
+#### `MP_DATABASE_MAX__CONNECTIONS`
 
 The maximum number of connections to use for the internal messaging engine connection pool.
 
 <a name="env-database-max-retry"></a>
-#### `DATABASE_MAX_RETRY`
+#### `MP_DATABASE_MAX_RETRY`
 
 On startup, if a database connection cannot be made for any reason, Connect will wait and attempt again this number of times. By default, will retry 2 times (so 3 total attempts).
 
 <a name="env-database-retry-wait"></a>
-#### `DATABASE_RETRY_WAIT`
+#### `MP_DATABASE_RETRY_WAIT`
 
 The amount of time (in milliseconds) to wait between database connection attempts. By default, will wait 10 seconds between attempts.
 
@@ -265,6 +266,18 @@ A URL location of a zip file containing BridgeLink extension zip files. The exte
 #### `CUSTOM_JARS_DOWNLOAD`
 
 A URL location of a zip file containing JAR files. The JAR files will be installed into the `server-launcher-lib` folder on the BridgeLink server, so they will be added to the server's classpath.
+
+<a name ="env-custom-properties"></a>
+#### `CUSTOM_PROPERTIES`
+
+A URL location of a mirth.properties file. The properties file will replace the /opt/bridgelink/conf/mirth.properties file.
+other MP_ variables still can be added into the custom mirth.properties.
+
+<a name ="env-custom-vmoptions"></a>
+#### `CUSTOM_VMOPTIONS`
+
+A URL location of a blserver.vmoptions file. The vmoptions file will replace the /opt/bridgelink/blserver.vmoptions.
+
 
 <a name="env-allow-insecure"></a>
 #### `ALLOW_INSECURE`
@@ -339,7 +352,7 @@ services:
       - 8443:8443/tcp
 secrets:
   mirth_properties:
-    file: /local/path/to/addTo_mirth_properties
+    file: /local/path/to/mirth_properties
 ```
 
 The **secrets** section at the bottom specifies the local file location for each secret.  Change `/local/path/to/secret.properties` to the correct local path and filename.
@@ -414,5 +427,3 @@ Example:
 # License [↑](#top)
 
 The Dockerfiles, entrypoint script, and any other files used to build these Docker images are Copyright © Innovar Healthcare and licensed under the [Mozilla Public License 2.0](https://www.mozilla.org/en-US/MPL/2.0/).
-
-You can find a copy of the Innovar Connect license in [server/docs/LICENSE.txt](https://github.com/nextgenhealthcare/connect/blob/development/server/docs/LICENSE.txt). All licensing information regarding third-party libraries is located in the [server/docs/thirdparty](https://github.com/nextgenhealthcare/connect/tree/development/server/docs/thirdparty) folder.
