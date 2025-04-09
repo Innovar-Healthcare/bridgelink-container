@@ -96,22 +96,29 @@ fi
 
 # Loop over environment variables with prefix MP_
 for var in $(env | grep '^MP_' | sed 's/=.*//'); do
-  # Extract the value of the environment variable
-  value=${!var}
+  value=${!var}                                # Extract the value of the variable
+  var_without_prefix=${var#MP_}                # Remove the MP_ prefix
+
+
+  # Handle custom mapping logic for specific variables using if statement
+  if [ "$var_without_prefix" == "DATABASE_RETRY_WAIT" ]; then
+    # Overwrite the environment variable with the new name
+    export DATABASE_CONNECTION_RETRYWAITINMILLISECONDS="$value"
+    var_without_prefix="DATABASE_CONNECTION_RETRYWAITINMILLISECONDS"
   
-  # Remove the prefix
-  var_without_prefix=${var#MP_}
-  
-  # Replace double underscores with dash and single underscores with dots
+  fi
+  # Replace double underscores with dashes and single underscores with dots
   property=$(echo "$var_without_prefix" | tr '[:upper:]' '[:lower:]' | sed 's/__/-/g; s/_/./g')
 
-  # Determine which file to update
+
+  # Choose file to update
   if [ "$var_without_prefix" == "VMOPTIONS" ]; then
     update_property "$VMOPTIONS_FILE" "$property" "$value"
   else
     update_property "$PROPERTIES_FILE" "$property" "$value"
   fi
 done
+
 
 # # Download and extract extensions if EXTENSIONS_DOWNLOAD is set
 if [ -n "${EXTENSIONS_DOWNLOAD}" ]; then
@@ -184,77 +191,54 @@ else
 fi
 
 
-if ! [ -z "${KEYSTORE_TYPE+x}" ]; then
-	sed -i "s/^keystore\.type\s*=\s*.*\$/keystore.type = ${KEYSTORE_TYPE//\//\\/}/" /opt/bridgelink/conf/mirth.properties
+
+# merge the user's secret mirth.properties
+# takes a whole mirth.properties file and merges line by line with /opt/bridgelink/conf/mirth.properties
+if [ -f /run/secrets/mirth_properties ]; then
+
+    # add new line in case /opt/bridgelinkconf/mirth.properties doesn't end with one
+    echo "" >> /opt/bridgelink/conf/mirth.properties
+    # Loop through each line in the source properties file
+    while IFS='=' read -r key value; do
+        # Skip empty lines or comments
+        [[ -z "$key" || "$key" == \#* ]] && continue
+
+        # Escape special characters for use in sed
+        escaped_key=$(printf '%s\n' "$key" | sed 's/[.[\*^$/]/\\&/g')
+        escaped_value=$(printf '%s\n' "$value" | sed 's/[\/&]/\\&/g')
+
+        if grep -q "^$escaped_key\s*=" "$PROPERTIES_FILE"; then
+            # Key exists – replace value
+            sed -i "s/^$escaped_key\s*=.*/$key = $escaped_value/" "$PROPERTIES_FILE"
+        else
+            # Key doesn't exist – append to bottom
+            echo -e "\n$key = $value" >> "$PROPERTIES_FILE"
+        fi
+    done < "/run/secrets/mirth_properties"
 fi
 
 
-# database max connections
-if ! [ -z "${DATABASE_MAX_CONNECTIONS+x}" ]; then
-	sed -i "s/^database\.max-connections\s*=\s*.*\$/database.max-connections = ${DATABASE_MAX_CONNECTIONS//\//\\/}/" /opt/bridgelink/conf/mirth.properties
+# merge the user's secret vmoptions
+# takes a whole blserver.vmoptions file and merges line by line with /opt/bridgelink/blserver.vmoptions
+if [ -f /run/secrets/blserver_vmoptions ]; then
+    (cat /run/secrets/blserver_vmoptions ; echo "") >> /opt/bridgelink/blserver.vmoptions
 fi
 
-# database max retries
-if ! [ -z "${DATABASE_MAX_RETRY+x}" ]; then
-	sed -i "s/^database\.connection\.maxretry\s*=\s*.*\$/database.connection.maxretry = ${DATABASE_MAX_RETRY//\//\\/}/" /opt/bridgelink/conf/mirth.properties
+# Enable nullglob so *.zip returns empty if no matches
+shopt -s nullglob
+zip_files=("/opt/bridgelink/custom-extensions"/*.zip)
+shopt -u nullglob
+
+# Check if zip_files array has any files
+if [ ${#zip_files[@]} -gt 0 ]; then
+  for zip_file in "${zip_files[@]}"; do
+    unzip -o "$zip_file" -d "$EXTENSIONS_DIR"
+  done
 fi
-
-# database retry wait time
-if ! [ -z "${DATABASE_RETRY_WAIT+x}" ]; then
-	sed -i "s/^database\.connection\.retrywaitinmilliseconds\s*=\s*.*\$/database.connection.retrywaitinmilliseconds = ${DATABASE_RETRY_WAIT//\//\\/}/" /opt/bridgelink/conf/mirth.properties
-fi
-
-# merge extra environment variables starting with _MP_ into mirth.properties
-while read -r keyvalue; do
-	KEY="${keyvalue%%=*}"
-	VALUE="${keyvalue#*=}"
-	VALUE=$(tr -dc '\40-\176' <<< "$VALUE")
-
-	if ! [ -z "${KEY}" ] && ! [ -z "${VALUE}" ] && ! [[ ${VALUE} =~ ^\ +$ ]]; then
-
-		# filter for variables starting with "_MP_"
-		if [[ ${KEY} == _MP_* ]]; then
-
-			# echo "found mirth property ${KEY}=${VALUE}"
-
-			# example: _MP_DATABASE_MAX__CONNECTIONS -> database.max-connections
-
-			# remove _MP_
-			# example:  DATABASE_MAX__CONNECTIONS
-			ACTUAL_KEY=${KEY:4}
-
-			# switch '__' to '-'
-			# example:  DATABASE_MAX-CONNECTIONS
-			ACTUAL_KEY="${ACTUAL_KEY//__/-}"
-
-			# switch '_' to '.'
-			# example:  DATABASE.MAX-CONNECTIONS
-			ACTUAL_KEY="${ACTUAL_KEY//_/.}"
-
-			# lower case
-			# example:  database.max-connections
-			ACTUAL_KEY="${ACTUAL_KEY,,}"
-
-			# if key does not exist in mirth.properties append it at bottom
-			LINE_COUNT=`grep "^${ACTUAL_KEY}" $PROPERTIES_FILE | wc -l`
-			if [ $LINE_COUNT -lt 1 ]; then
-				# echo "key ${ACTUAL_KEY} not found in mirth.properties, appending. Value = ${VALUE}"
-				echo -e "\n${ACTUAL_KEY} = ${VALUE//\//\\/}" >> $PROPERTIES_FILE
-			else # otherwise key exists, overwrite it
-				# echo "key ${ACTUAL_KEY} exists, overwriting. Value = ${VALUE}"
-				ESCAPED_KEY="${ACTUAL_KEY//./\\.}"
-				sed -i "s/^${ESCAPED_KEY}\s*=\s*.*\$/${ACTUAL_KEY} = ${VALUE//\//\\/}/" $PROPERTIES_FILE
-			fi
-		fi
-	fi
-done <<< "`printenv`"
-
 
 cd /opt/bridgelink
 
 exec "$@"
-
-
 
 
 

@@ -4,9 +4,9 @@
 * [Supported tags and respective Dockerfile links](#supported-tags)
 * [Supported Architectures](#supported-architectures)
 * [Quick Reference](#quick-reference)
-* [What is NextGen Connect (formerly Mirth Connect)](#what-is-connect)
+* [What is BridgeLink (formerly Mirth Connect)](#what-is-connect)
 * [How to use this image](#how-to-use)
-  * [Start a Connect instance](#start-connect)
+  * [Start a BridgeLink instance](#start-bridgelink)
   * [Using `docker stack deploy` or `docker-compose`](#using-docker-compose)
   * [Environment Variables](#environment-variables)
     * [Common mirth.properties options](#common-mirth-properties-options)
@@ -31,9 +31,9 @@
 <a name="supported-architectures"></a>
 # Supported Architectures [↑](#top)
 
-Docker images for Mirth Connect 4.4.0 and later versions support both `linux/amd64` and `linux/arm64` architectures. Earlier versions only support `linux/amd64`. As an example, to pull the latest `linux/arm64` image, use the command
+Docker images for BridgeLink 4.5.3 and later versions support both `linux/amd64` and `linux/arm64` architectures. 
 ```
-docker pull --platform linux/arm64 nextgenhealthcare/connect:latest
+docker pull --platform linux/arm64 innovarhealthcare/bridgelink:latest
 ```
 
 ------------
@@ -69,7 +69,7 @@ An open-source message integration engine focused on healthcare. For more inform
 <a name="how-to-use"></a>
 # How to use this image [↑](#top)
 
-<a name="start-Bridgelink"></a>
+<a name="start-bridgelink"></a>
 ## Start a Bridgelink instance [↑](#top)
 
 Quickly start Bridgelink using embedded Derby database and all configuration defaults. At a minimum you will likely want to use the `-p` option to expose the 8443 port so that you can login with the Administrator GUI or CLI:
@@ -103,7 +103,7 @@ Look at the [Environment Variables](#environment-variables) section for more ava
 <a name="using-docker-compose"></a>
 ## Using [`docker stack deploy`](https://docs.docker.com/engine/reference/commandline/stack_deploy/) or [`docker-compose`](https://github.com/docker/compose) [↑](#top)
 
-With `docker stack` or `docker-compose` you can easily setup and launch multiple related containers. For example you might want to launch both Connect *and* a PostgreSQL database to run alongside it.
+With `docker stack` or `docker-compose` you can easily setup and launch multiple related containers. For example you might want to launch both BridgeLink *and* a PostgreSQL database to run alongside it.
 
 ```bash
 docker-compose -f stack.yml up
@@ -145,18 +145,14 @@ services:
       - 5432
 ```
 
-[![Try in PWD](https://raw.githubusercontent.com/play-with-docker/stacks/master/assets/images/button.png)](http://play-with-docker.com/?stack=https://raw.githubusercontent.com/nextgenhealthcare/connect-docker/master/examples/play-with-docker-example.yml)
 
-Try it out with Play With Docker! Note that in order to access the 8080/8443 ports from your workstation, follow [their guide](https://github.com/play-with-docker/play-with-docker#how-can-i-connect-to-a-published-port-from-the-outside-world) to format the URL correctly. When you login via the Administrator GUI, use port 443 on the end instead of 8443.
-
-There are other example stack files in the [examples directory](https://github.com/nextgenhealthcare/connect-docker/tree/master/examples)!
 
 ------------
 
 <a name="environment-variables"></a>
 ## Environment Variables [↑](#top)
 
-You can use environment variables to configure the [mirth.properties](https://github.com/nextgenhealthcare/connect/blob/development/server/conf/mirth.properties) file or to add custom JVM options. More information on the available mirth.properties options can be found in the [Connect User Guide](http://downloads.mirthcorp.com/connect-user-guide/latest/mirth-connect-user-guide.pdf).
+You can use environment variables to configure the [mirth.properties](https://github.com/nextgenhealthcare/connect/blob/development/server/conf/mirth.properties) file or to add custom JVM options.
 
 To set environment variables, use the `-e` option for each variable on the command line:
 
@@ -169,13 +165,12 @@ You can also use a separate file containing all of your environment variables us
 ```bash
 MP_DATABASE=postgres
 MP_DATABASE_URL=jdbc:postgresql://10.5.0.5:5432/bridgelinkdb
-MP_DB_SCHEMA=bridgelinkdb
 MP_DATABASE_USERNAME=bridgelinktest
 MP_DATABASE_PASSWORD=bridgelinktest
 MP_DATABASE_DBNAME=bridgelinkdb
 DATABASE_MAX_RETRY=2
 DATABASE_RETRY_WAIT=10000
-SERVER_ID=7d760af2-680a-4a19-b9a2-c4685df61ebc
+SERVER_ID=xxxxx-xxxxxx-xxxxxx-xxxxx
 MP_KEYSTORE_KEYPASS=bridgelinkKeystore
 MP_KEYSTORE_STOREPASS=bridgelinkKeypass
 MP_VMOPTIONS=512
@@ -191,9 +186,9 @@ docker run --env-file=myenvfile.txt -p 8443:8443 innovarhealthcare/bridgelink
 ### Common mirth.properties options [↑](#top)
 
 <a name="env-database"></a>
-#### `DATABASE`
+#### `MP_DATABASE`
 
-The database type to use for the NextGen Connect Integration Engine backend database. Options:
+The database type to use for the BridgeLink Integration Engine backend database. Options:
 
 * derby
 * mysql
@@ -202,18 +197,18 @@ The database type to use for the NextGen Connect Integration Engine backend data
 * sqlserver
 
 <a name="env-database-url"></a>
-#### `DATABASE_URL`
+#### `MP_DATABASE_URL`
 
 The JDBC URL to use when connecting to the database. For example:
 * `jdbc:postgresql://serverip:5432/mirthdb`
 
 <a name="env-database-username"></a>
-#### `DATABASE_USERNAME`
+#### `MP_DATABASE_USERNAME`
 
 The username to use when connecting to the database. If you don't want to use an environment variable to store sensitive information like this, look at the [Using Docker Secrets](#using-docker-secrets) section below.
 
 <a name="env-database-password"></a>
-#### `DATABASE_PASSWORD`
+#### `MP_DATABASE_PASSWORD`
 
 The password to use when connecting to the database. If you don't want to use an environment variable to store sensitive information like this, look at the [Using Docker Secrets](#using-docker-secrets) section below.
 
@@ -233,51 +228,43 @@ On startup, if a database connection cannot be made for any reason, Connect will
 The amount of time (in milliseconds) to wait between database connection attempts. By default, will wait 10 seconds between attempts.
 
 <a name="env-keystore-storepass"></a>
-#### `KEYSTORE_STOREPASS`
+#### `MP_KEYSTORE_STOREPASS`
 
 The password for the keystore file itself. If you don't want to use an environment variable to store sensitive information like this, look at the [Using Docker Secrets](#using-docker-secrets) section below.
 
 <a name="env-keystore-keypass"></a>
-#### `KEYSTORE_KEYPASS`
+#### `MP_KEYSTORE_KEYPASS`
 
 The password for the keys within the keystore, including the server certificate and the secret encryption key. If you don't want to use an environment variable to store sensitive information like this, look at the [Using Docker Secrets](#using-docker-secrets) section below.
 
 <a name="env-keystore-type"></a>
-#### `KEYSTORE_TYPE`
+#### `MP_KEYSTORE_TYPE`
 
 The type of keystore.
 
-<a name="env-session-store"></a>
-#### `SESSION_STORE`
-
-If set to true, the web server sessions are stored in the database. This can be useful in situations where you have multiple Connect servers (connecting to the same database) clustered behind a load balancer.
 
 <a name="env-vmoptions"></a>
-#### `VMOPTIONS`
+#### `MP_VMOPTIONS`
 
 A comma-separated list of JVM command-line options to place in the `.vmoptions` file. For example to set the max heap size:
 
-* -Xmx512m
+* 512
 
-<a name="env-delay"></a>
-#### `DELAY`
-
-This tells the entrypoint script to wait for a certain amount of time (in seconds). The entrypoint script will automatically use a command-line SQL client to check connectivity and wait until the database is up before starting Connect, but only when using PostgreSQL or MySQL. If you are using Oracle or SQL Server and the database is being started up at the same time as Connect, you may want to use this option to tell Connect to wait a bit to allow the database time to startup.
 
 <a name="env-keystore-download"></a>
 #### `KEYSTORE_DOWNLOAD`
 
-A URL location of a Connect keystore file. This file will be downloaded into the container and Connect will use it as its keystore.
+A URL location of a BridgeLink keystore file. This file will be downloaded into the container and BridgeLink will use it as its keystore.
 
 <a name ="env-extensions-download"></a>
 #### `EXTENSIONS_DOWNLOAD`
 
-A URL location of a zip file containing Connect extension zip files. The extensions will be installed on the Connect server.
+A URL location of a zip file containing BridgeLink extension zip files. The extensions will be installed on the BridgeLink server.
 
 <a name ="env-custom-jars-download"></a>
 #### `CUSTOM_JARS_DOWNLOAD`
 
-A URL location of a zip file containing JAR files. The JAR files will be installed into the `server-launcher-lib` folder on the Connect server, so they will be added to the server's classpath.
+A URL location of a zip file containing JAR files. The JAR files will be installed into the `server-launcher-lib` folder on the BridgeLink server, so they will be added to the server's classpath.
 
 <a name="env-allow-insecure"></a>
 #### `ALLOW_INSECURE`
@@ -321,9 +308,9 @@ For sensitive information such as the database/keystore credentials, instead of 
 
 If present, any properties in this secret will be merged into the mirth.properties file.
 
-##### mcserver_vmoptions
+##### blserver_vmoptions
 
-If present, any JVM options in this secret will be appended onto the mcserver.vmoptions file.
+If present, any JVM options in this secret will be appended onto the blserver.vmoptions file.
 
 ------------
 
@@ -344,7 +331,7 @@ services:
   mc:
     image: innovarhealthcare/bridgelink
     environment:
-      - VMOPTIONS=-Xmx512m
+      - MP_VMOPTIONS=512
     secrets:
       - mirth_properties
     ports:
@@ -352,12 +339,12 @@ services:
       - 8443:8443/tcp
 secrets:
   mirth_properties:
-    file: /local/path/to/secret.properties
+    file: /local/path/to/addTo_mirth_properties
 ```
 
 The **secrets** section at the bottom specifies the local file location for each secret.  Change `/local/path/to/secret.properties` to the correct local path and filename.
 
-Inside the configuration for the Connect container there is also a **secrets** section that lists the secrets you want to include for that container.
+Inside the configuration for the BridgeLink container there is also a **secrets** section that lists the secrets you want to include for that container.
 
 ------------
 
@@ -367,10 +354,10 @@ Inside the configuration for the Connect container there is also a **secrets** s
 <a name="the-appdata-folder"></a>
 #### The appdata folder [↑](#top)
 
-The application data directory (appdata) stores configuration files and temporary data created by Connect after starting up. This usually includes the keystore file and the `server.id` file that stores your server ID. If you are launching Connect as part of a stack/swarm, it's possible the container filesystem is already being preserved. But if not, you may want to consider mounting a **volume** to preserve the appdata folder.
+The application data directory (appdata) stores configuration files and temporary data created by BridgeLink after starting up. This usually includes the keystore file and the `server.id` file that stores your server ID. If you are launching BridgeLink as part of a stack/swarm, it's possible the container filesystem is already being preserved. But if not, you may want to consider mounting a **volume** to preserve the appdata folder.
 
 ```bash
-docker run -v /local/path/to/appdata:/opt/connect/appdata -p 8443:8443 innovarhealthcare/bridgelink
+docker run -v /local/path/to/appdata:/opt/bridgelink/appdata -p 8443:8443 innovarhealthcare/bridgelink
 ```
 
 The `-v` option makes a local directory from your filesystem available to the Docker container. Create a folder on your local filesystem, then change the `/local/path/to/appdata` part in the example above to the correct local path.
@@ -383,7 +370,7 @@ services:
   mc:
     image: innovarhealthcare/bridgelink
     volumes:
-      - ~/Documents/appdata:/opt/connect/appdata
+      - ~/Documents/appdata:/opt/bridgelink/appdata
 ```
 
 ------------
@@ -391,10 +378,10 @@ services:
 <a name="additional-extensions"></a>
 #### Additional extensions [↑](#top)
 
-The entrypoint script will automatically look for any ZIP files in the `/opt/connect/custom-extensions` folder and unzip them into the extensions folder before Connect starts up. So to launch Connect with any additional extensions not included in the base application, do this:
+The entrypoint script will automatically look for any ZIP files in the `/opt/bridgelink/custom-extensions` folder and unzip them into the extensions folder before BridgeLink starts up. So to launch BridgeLink with any additional extensions not included in the base application, do this:
 
 ```bash
-docker run -v /local/path/to/custom-extensions:/opt/connect/custom-extensions -p 8443:8443 innovarhealthcare/bridgelink
+docker run -v /local/path/to/custom-extensions:/opt/bridgelink/custom-extensions -p 8443:8443 innovarhealthcare/bridgelink
 ```
 
 Create a folder on your local filesystem containing the ZIP files for your additional extensions. Then change the `/local/path/to/custom-extensions` part in the example above to the correct local path.
@@ -426,6 +413,6 @@ Example:
 <a name="license"></a>
 # License [↑](#top)
 
-The Dockerfiles, entrypoint script, and any other files used to build these Docker images are Copyright © NextGen Healthcare and licensed under the [Mozilla Public License 2.0](https://www.mozilla.org/en-US/MPL/2.0/).
+The Dockerfiles, entrypoint script, and any other files used to build these Docker images are Copyright © Innovar Healthcare and licensed under the [Mozilla Public License 2.0](https://www.mozilla.org/en-US/MPL/2.0/).
 
-You can find a copy of the NextGen Connect license in [server/docs/LICENSE.txt](https://github.com/nextgenhealthcare/connect/blob/development/server/docs/LICENSE.txt). All licensing information regarding third-party libraries is located in the [server/docs/thirdparty](https://github.com/nextgenhealthcare/connect/tree/development/server/docs/thirdparty) folder.
+You can find a copy of the Innovar Connect license in [server/docs/LICENSE.txt](https://github.com/nextgenhealthcare/connect/blob/development/server/docs/LICENSE.txt). All licensing information regarding third-party libraries is located in the [server/docs/thirdparty](https://github.com/nextgenhealthcare/connect/tree/development/server/docs/thirdparty) folder.
