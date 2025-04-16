@@ -3,7 +3,7 @@
 # ============================================================
 FROM rockylinux:9 AS builder
 
-RUN yum update -y
+RUN yum update -y --nogpgcheck
 # Install build tools and repositories
 RUN yum install -y tar gzip openssl shadow-utils unzip python3 wget
 
