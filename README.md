@@ -24,7 +24,7 @@
 
 ##### Rockylinux9 OpenJDK 17
 
-* [4.5, 4.5.2, latest](https://github.com/nextgenhealthcare/connect-docker/blob/master/Dockerfile)
+* [4.5.3, latest](https://github.com/Innovar-Healthcare/bridgelink-container/blob/bl_4.5.3/Dockerfile)
 
 ------------
 
@@ -46,12 +46,12 @@ docker pull --platform linux/arm64 innovarhealthcare/bridgelink:latest
 
 * [Slack Channel](https://join.slack.com/t/bridgelink01/shared_invite/zt-338scfesm-06MB6s7SggDMc7PIYKs4cw)
 * [BridgeLink GitHub](https://github.com/Innovar-Healthcare/BridgeLink/tree/bridgelink_development)
-* [BridgeLink Docker GitHub](https://github.com/Innovar-Healthcare/BridgeLink/tree/bridgelink_development)
+* [BridgeLink Docker GitHub](https://github.com/Innovar-Healthcare/bridgelink-container/tree/main)
 
 #### Where to file issues:
 
 * For issues relating to these Docker images:
-  * https://github.com/nextgenhealthcare/connect-docker/issues
+  * https://github.com/Innovar-Healthcare/bridgelink-container/issues
 * For issues relating to the Connect application itself:
   * https://github.com/Innovar-Healthcare/BridgeLink/issues
 
