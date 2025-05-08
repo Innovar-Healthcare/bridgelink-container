@@ -265,7 +265,7 @@ A URL location of a zip file containing BridgeLink extension zip files. The exte
 <a name ="env-custom-jars-download"></a>
 #### `CUSTOM_JARS_DOWNLOAD`
 
-A URL location of a zip file containing JAR files. The JAR files will be installed into the `server-launcher-lib` folder on the BridgeLink server, so they will be added to the server's classpath.
+A URL location of a zip file containing JAR files. The JAR files will be installed into the `custom-jars` folder on the BridgeLink server, so they will be added to the server's classpath.
 
 <a name ="env-custom-properties"></a>
 #### `CUSTOM_PROPERTIES`

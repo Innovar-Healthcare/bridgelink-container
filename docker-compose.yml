@@ -1,7 +1,7 @@
 version: '3.1'
 services:
     bl:
-        image: ziminjimweng/jimtest:latest
+        image: innovarhealthcare/bridgelink:4.5.3
         stdin_open: true # docker run -i
         tty: true
         user: 1000:1000
@@ -13,7 +13,7 @@ services:
         volumes:
             - ./appdata:/opt/bridgelink/appdata
         secrets:
-        - source: mirth_properties
+        - source: blserver_vmoptions
         environment:
             - MP_DATABASE=postgres
             - MP_DATABASE_URL=jdbc:postgresql://10.5.0.5:5432/bridgelinkdb
@@ -21,19 +21,9 @@ services:
             - MP_DATABASE_USERNAME=bridgelinktest
             - MP_DATABASE_PASSWORD=bridgelinktest
             - MP_DATABASE_DBNAME=bridgelinkdb
-            - MP_DATABASE_MAX__CONNECTIONS=21
-            - MP_DATABASE_CONNECTION_MAXRETRY=3
-            - MP_DATABASE_RETRY_WAIT=10001
-            - SERVER_ID=7d760af2-680a-4a19-b9a2-c4685df61ebc
+            - SERVER_ID=xxxxxx-xxxxxxx-xxxxxxxxxxx
             - MP_KEYSTORE_KEYPASS=bridgelinkKeystore
             - MP_KEYSTORE_STOREPASS=bridgelinkKeypass
-            # - KEYSTORE_DOWNLOAD=https://innovar-awsmarketplace.s3.us-east-1.amazonaws.com/plugins/keystore.jks
-            - ALLOW_INSECURE=true
-            - CUSTOM_VMOPTIONS=https://innovar-awsmarketplace.s3.us-east-1.amazonaws.com/AWS_Jar/blserver.vmoptions
-            - MP_VMOPTIONS=512
-            # - CUSTOM_PROPERTIES=https://innovar-awsmarketplace.s3.us-east-1.amazonaws.com/AWS_Jar/mirth.properties.copy
-            - CUSTOM_JARS_DOWNLOAD=https://innovar-awsmarketplace.s3.us-east-1.amazonaws.com/AWS_Jar/docker-test-jar.zip
-            - EXTENSIONS_DOWNLOAD=https://innovar-awsmarketplace.s3.us-east-1.amazonaws.com/plugins/cognito-auth.zip,https://innovar-awsmarketplace.s3.us-east-1.amazonaws.com/plugins/innovarhealthcare-channel-History-4.5.3.zip,https://innovar-awsmarketplace.s3.us-east-1.amazonaws.com/plugins/innovarhealthcare-ssl-settings-4.5.3.zip
 
     postgres:
         image: postgres:14-alpine
@@ -51,7 +41,8 @@ services:
 secrets:
     mirth_properties:
         file: appdata/secret.properties
-
+    blserver_vmoptions:
+        file: appdata/custom_blserver.vmoptions
 networks:
     bridgelink:
         driver: bridge
