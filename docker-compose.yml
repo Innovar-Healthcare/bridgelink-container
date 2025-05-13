@@ -17,13 +17,12 @@ services:
         environment:
             - MP_DATABASE=postgres
             - MP_DATABASE_URL=jdbc:postgresql://10.5.0.5:5432/bridgelinkdb
-            - MP_DB_SCHEMA=bridgelinkdb
             - MP_DATABASE_USERNAME=bridgelinktest
             - MP_DATABASE_PASSWORD=bridgelinktest
-            - MP_DATABASE_DBNAME=bridgelinkdb
-            - SERVER_ID=xxxxxx-xxxxxxx-xxxxxxxxxxx
+            - SERVER_ID=7d760af2-680a-4a19-b9a2-c4685df61ebc
             - MP_KEYSTORE_KEYPASS=bridgelinkKeystore
             - MP_KEYSTORE_STOREPASS=bridgelinkKeypass
+            - MP_CONFIGURATIONMAP_LOCATION=database
 
     postgres:
         image: postgres:14-alpine

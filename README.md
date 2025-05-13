@@ -294,7 +294,7 @@ Set the `server.id` to a specific value. Use this to preserve or set the server 
 <a name="other-mirth-properties-options"></a>
 ### Other mirth.properties options [↑](#top)
 
-Other options in the mirth.properties file can also be changed. Any environment variable starting with the `_MP_` prefix will set the corresponding value in mirth.properties. Replace `.` with a single underscore `_` and `-` with two underscores `__`.
+Other options in the mirth.properties file can also be changed. Any environment variable starting with the `MP_` prefix will set the corresponding value in mirth.properties. Replace `.` with a single underscore `_` and `-` with two underscores `__`.
 
 Examples:
 
