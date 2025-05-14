@@ -265,7 +265,7 @@ A URL location of a zip file containing BridgeLink extension zip files. The exte
 <a name ="env-custom-jars-download"></a>
 #### `CUSTOM_JARS_DOWNLOAD`
 
-A URL location of a zip file containing JAR files. The JAR files will be installed into the `server-launcher-lib` folder on the BridgeLink server, so they will be added to the server's classpath.
+A URL location of a zip file containing JAR files. The JAR files will be installed into the `custom-jars` folder on the BridgeLink server, so they will be added to the server's classpath.
 
 <a name ="env-custom-properties"></a>
 #### `CUSTOM_PROPERTIES`
@@ -294,7 +294,7 @@ Set the `server.id` to a specific value. Use this to preserve or set the server 
 <a name="other-mirth-properties-options"></a>
 ### Other mirth.properties options [↑](#top)
 
-Other options in the mirth.properties file can also be changed. Any environment variable starting with the `_MP_` prefix will set the corresponding value in mirth.properties. Replace `.` with a single underscore `_` and `-` with two underscores `__`.
+Other options in the mirth.properties file can also be changed. Any environment variable starting with the `MP_` prefix will set the corresponding value in mirth.properties. Replace `.` with a single underscore `_` and `-` with two underscores `__`.
 
 Examples:
 
@@ -302,13 +302,13 @@ Examples:
   * In the mirth.properties file:
     * `https.server.protocols = TLSv1.3,TLSv1.2`
   * As a Docker environment variable:
-    * `_MP_HTTPS_SERVER_PROTOCOLS='TLSv1.3,TLSv1.2'`
+    * `MP_HTTPS_SERVER_PROTOCOLS='TLSv1.3,TLSv1.2'`
 
 * Set the max connections for the read-only database connection pool:
   * In the mirth.properties file:
     * `database-readonly.max-connections = 20`
   * As a Docker environment variable:
-    * `_MP_DATABASE__READONLY_MAX__CONNECTIONS='20'`
+    * `MP_DATABASE__READONLY_MAX__CONNECTIONS='20'`
 
 ------------
 
