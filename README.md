@@ -302,13 +302,13 @@ Examples:
   * In the mirth.properties file:
     * `https.server.protocols = TLSv1.3,TLSv1.2`
   * As a Docker environment variable:
-    * `_MP_HTTPS_SERVER_PROTOCOLS='TLSv1.3,TLSv1.2'`
+    * `MP_HTTPS_SERVER_PROTOCOLS='TLSv1.3,TLSv1.2'`
 
 * Set the max connections for the read-only database connection pool:
   * In the mirth.properties file:
     * `database-readonly.max-connections = 20`
   * As a Docker environment variable:
-    * `_MP_DATABASE__READONLY_MAX__CONNECTIONS='20'`
+    * `MP_DATABASE__READONLY_MAX__CONNECTIONS='20'`
 
 ------------
 
