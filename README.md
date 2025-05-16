@@ -158,7 +158,7 @@ You can use environment variables to configure the [mirth.properties](https://gi
 To set environment variables, use the `-e` option for each variable on the command line:
 
 ```bash
-docker run -e DATABASE='derby' -p 8443:8443 innovarhealthcare/bridgelink
+docker run -e MP_DATABASE='derby' -p 8443:8443 innovarhealthcare/bridgelink
 ```
 
 You can also use a separate file containing all of your environment variables using the `--env-file` option. For example let's say you create a file **myenvfile.txt**:
@@ -247,9 +247,9 @@ The type of keystore.
 <a name="env-vmoptions"></a>
 #### `MP_VMOPTIONS`
 
-A comma-separated list of JVM command-line options to place in the `.vmoptions` file. For example to set the max heap size:
+A comma-separated list of JVM command-line options to place in the `.vmoptions` file. For example to set the max heap size and HTTPS proxy ports:
 
-* 512
+* 512,-Dhttp.proxyPort=9001,-Dhttps.proxyHost=9002,-Dhttps.proxyPort=9003
 
 
 <a name="env-keystore-download"></a>

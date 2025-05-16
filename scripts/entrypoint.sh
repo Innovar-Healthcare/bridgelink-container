@@ -39,6 +39,26 @@ update_property() {
   fi
 }
 
+apply_mp_vmoptions() {
+  IFS=',' read -ra OPTIONS <<< "$MP_VMOPTIONS"
+
+  sed -i -e '$a\' "$VMOPTIONS_FILE"
+  for raw_opt in "${OPTIONS[@]}"; do
+    opt=$(echo "$raw_opt" | sed -e 's/^ *//' -e 's/ *$//')
+    opt=$(echo "$opt" | sed -E 's/ *= */=/g')
+
+    if [[ "$opt" =~ ^[0-9]+$ ]]; then
+      update_property "$VMOPTIONS_FILE" "vmoptions" "$opt"
+    else
+      if ! grep -Fxq "$opt" "$VMOPTIONS_FILE"; then
+        echo "$opt" >> "$VMOPTIONS_FILE"
+      fi
+    fi
+  done
+  # Ensure file ends with a newline
+  sed -i -e '$a\' "$VMOPTIONS_FILE"
+}
+
 # Check and write SERVER_ID to the specified file
 if [ ! -z "$SERVER_ID" ]; then
   echo -e "server.id = ${SERVER_ID//\//\\/}" > "$SERVER_ID_FILE"
@@ -113,7 +133,7 @@ for var in $(env | grep '^MP_' | sed 's/=.*//'); do
 
   # Choose file to update
   if [ "$var_without_prefix" == "VMOPTIONS" ]; then
-    update_property "$VMOPTIONS_FILE" "$property" "$value"
+    apply_mp_vmoptions
   else
     update_property "$PROPERTIES_FILE" "$property" "$value"
   fi
