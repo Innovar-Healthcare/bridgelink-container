@@ -44,18 +44,18 @@ apply_mp_vmoptions() {
 
   sed -i -e '$a\' "$VMOPTIONS_FILE"
   for raw_opt in "${OPTIONS[@]}"; do
-    opt=$(echo "$raw_opt" | sed -e 's/^ *//' -e 's/ *$//')
-    opt=$(echo "$opt" | sed -E 's/ *= */=/g')
+    opt=$(echo "$raw_opt" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+    opt=$(echo "$opt" | sed -E 's/[[:space:]]*=[[:space:]]*/=/g')
 
     if [[ "$opt" =~ ^[0-9]+$ ]]; then
       update_property "$VMOPTIONS_FILE" "vmoptions" "$opt"
     else
-      if ! grep -Fxq "$opt" "$VMOPTIONS_FILE"; then
+      # Quote the string to handle odd characters safely
+      if ! grep -Fxq -- "$opt" "$VMOPTIONS_FILE"; then
         echo "$opt" >> "$VMOPTIONS_FILE"
       fi
     fi
   done
-  # Ensure file ends with a newline
   sed -i -e '$a\' "$VMOPTIONS_FILE"
 }
 
