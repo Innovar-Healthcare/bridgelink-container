@@ -252,7 +252,7 @@ shopt -u nullglob
 # Check if zip_files array has any files
 if [ ${#zip_files[@]} -gt 0 ]; then
   for zip_file in "${zip_files[@]}"; do
-    unzip -o "$zip_file" -d "$EXTENSIONS_DIR"
+    (cd "$EXTENSIONS_DIR" && jar xf "$zip_file")
   done
 fi
 
