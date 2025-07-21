@@ -24,14 +24,14 @@
 
 ##### Rockylinux9 OpenJDK 17
 
-* [4.5.3, latest](https://github.com/Innovar-Healthcare/bridgelink-container/blob/bl_4.5.3/Dockerfile)
+* [4.5.4, latest](https://github.com/Innovar-Healthcare/bridgelink-container/blob/bl_4.5.4/Dockerfile)
 
 ------------
 
 <a name="supported-architectures"></a>
 # Supported Architectures [↑](#top)
 
-Docker images for BridgeLink 4.5.3 and later versions support both `linux/amd64` and `linux/arm64` architectures. 
+Docker images for BridgeLink 4.5.4 and later versions support both `linux/amd64` and `linux/arm64` architectures. 
 ```
 docker pull --platform linux/arm64 innovarhealthcare/bridgelink:latest
 ```
@@ -87,13 +87,13 @@ docker run --name mybridgelink -d -p 8443:8443 innovarhealthcare/bridgelink
 To run a specific version of Connect, specify a tag at the end:
 
 ```bash
-docker run --name mybridgelink -d -p 8443:8443 innovarhealthcare/bridgelink:4.5.3
+docker run --name mybridgelink -d -p 8443:8443 innovarhealthcare/bridgelink:4.5.4
 ```
 
 To run using a specific architecture, specify it using the `--platform` argument:
 
 ```bash
-docker run --name mybridgelink -d -p 8443:8443 --platform linux/arm64 innovarhealthcare/bridgelink:4.5.3
+docker run --name mybridgelink -d -p 8443:8443 --platform linux/arm64 innovarhealthcare/bridgelink:4.5.4
 ```
 
 Look at the [Environment Variables](#environment-variables) section for more available configuration options.
@@ -115,7 +115,7 @@ Here's an example `stack.yml` file you can use:
 version: "3.1"
 services:
   mc:
-    image: innovarhealthcare/bridgelink
+    image: innovarhealthcare/bridgelink:4.5.4
     platform: linux/amd64
     environment:
         - MP_DATABASE=postgres
@@ -158,7 +158,7 @@ You can use environment variables to configure the [mirth.properties](https://gi
 To set environment variables, use the `-e` option for each variable on the command line:
 
 ```bash
-docker run -e DATABASE='derby' -p 8443:8443 innovarhealthcare/bridgelink
+docker run -e MP_DATABASE='derby' -p 8443:8443 innovarhealthcare/bridgelink
 ```
 
 You can also use a separate file containing all of your environment variables using the `--env-file` option. For example let's say you create a file **myenvfile.txt**:
@@ -247,9 +247,9 @@ The type of keystore.
 <a name="env-vmoptions"></a>
 #### `MP_VMOPTIONS`
 
-A comma-separated list of JVM command-line options to place in the `.vmoptions` file. For example to set the max heap size:
+A comma-separated list of JVM command-line options to place in the `.vmoptions` file. For example to set the max heap size and HTTPS proxy ports:
 
-* 512
+* 512,-Dhttp.proxyPort=9001,-Dhttps.proxyHost=9002,-Dhttps.proxyPort=9003
 
 
 <a name="env-keystore-download"></a>

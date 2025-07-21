@@ -39,6 +39,26 @@ update_property() {
   fi
 }
 
+apply_mp_vmoptions() {
+  IFS=',' read -ra OPTIONS <<< "$MP_VMOPTIONS"
+
+  sed -i -e '$a\' "$VMOPTIONS_FILE"
+  for raw_opt in "${OPTIONS[@]}"; do
+    opt=$(echo "$raw_opt" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+    opt=$(echo "$opt" | sed -E 's/[[:space:]]*=[[:space:]]*/=/g')
+
+    if [[ "$opt" =~ ^[0-9]+$ ]]; then
+      update_property "$VMOPTIONS_FILE" "vmoptions" "$opt"
+    else
+      # Quote the string to handle odd characters safely
+      if ! grep -Fxq -- "$opt" "$VMOPTIONS_FILE"; then
+        echo "$opt" >> "$VMOPTIONS_FILE"
+      fi
+    fi
+  done
+  sed -i -e '$a\' "$VMOPTIONS_FILE"
+}
+
 # Check and write SERVER_ID to the specified file
 if [ ! -z "$SERVER_ID" ]; then
   echo -e "server.id = ${SERVER_ID//\//\\/}" > "$SERVER_ID_FILE"
@@ -113,7 +133,7 @@ for var in $(env | grep '^MP_' | sed 's/=.*//'); do
 
   # Choose file to update
   if [ "$var_without_prefix" == "VMOPTIONS" ]; then
-    update_property "$VMOPTIONS_FILE" "$property" "$value"
+    apply_mp_vmoptions
   else
     update_property "$PROPERTIES_FILE" "$property" "$value"
   fi
@@ -232,7 +252,7 @@ shopt -u nullglob
 # Check if zip_files array has any files
 if [ ${#zip_files[@]} -gt 0 ]; then
   for zip_file in "${zip_files[@]}"; do
-    unzip -o "$zip_file" -d "$EXTENSIONS_DIR"
+    (cd "$EXTENSIONS_DIR" && jar xf "$zip_file")
   done
 fi
 

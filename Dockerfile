@@ -3,15 +3,19 @@
 # ============================================================
 FROM rockylinux:9 AS builder
 
-RUN yum update -y --nogpgcheck
-# Install build tools and repositories
-RUN yum install -y tar gzip openssl shadow-utils unzip python3 wget
+# Update and install system tools and language support
+RUN yum update -y --nogpgcheck && \
+    yum install -y tar gzip openssl shadow-utils unzip python3 wget glibc-langpack-en
 
-# Install OpenJDK 17 (runtime & development) and set JAVA_HOME
+# Set UTF-8 locale environment variables
+ENV LANG=en_US.UTF-8
+ENV LANGUAGE=en_US:en
+ENV LC_ALL=en_US.UTF-8
+
+# Install OpenJDK 17 and set JAVA_HOME
 RUN yum -y install java-17-openjdk java-17-openjdk-devel
 ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk
 ENV PATH=$JAVA_HOME/bin:$PATH
-
 
 # Install AWS CLI
 RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip" && \
@@ -50,10 +54,16 @@ RUN chmod 755 /opt/scripts/entrypoint.sh && \
 # ============================================================
 FROM rockylinux:9 AS final
 
-# Install only the runtime dependencies. (Python3 may be needed by your app.)
-RUN yum install -y java-17-openjdk java-17-openjdk-devel python3 && yum clean all
+# Install runtime dependencies and locale support
+RUN yum install -y java-17-openjdk java-17-openjdk-devel python3 glibc-langpack-en && \
+    yum clean all
 
-# Set JAVA_HOME and update PATH for runtime
+# Set UTF-8 locale environment variables
+ENV LANG=en_US.UTF-8
+ENV LANGUAGE=en_US:en
+ENV LC_ALL=en_US.UTF-8
+
+# Set Java environment
 ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk
 ENV PATH=$JAVA_HOME/bin:$PATH
 
@@ -63,9 +73,6 @@ RUN useradd -u 1000 bridgelink
 # Copy the built application and entrypoint script from the builder stage
 COPY --from=builder /opt/bridgelink /opt/bridgelink
 COPY --from=builder /opt/scripts/entrypoint.sh /opt/scripts/entrypoint.sh
-
-# add the java9+ vmoptions to blserver.vmoptions
-RUN cat /opt/bridgelink/docs/mcservice-java9+.vmoptions >> /opt/bridgelink/blserver.vmoptions 
 
 # Ensure proper permissions for the entrypoint and application files
 RUN chmod 755 /opt/scripts/entrypoint.sh && \
@@ -80,5 +87,7 @@ VOLUME /opt/bridgelink/custom-extensions
 
 # Switch to the bridgelink user and define the container’s entrypoint and command
 USER bridgelink
+
+# Entrypoint
 ENTRYPOINT ["/opt/scripts/entrypoint.sh"]
 CMD ["./blserver"]
