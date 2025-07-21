@@ -74,9 +74,6 @@ RUN useradd -u 1000 bridgelink
 COPY --from=builder /opt/bridgelink /opt/bridgelink
 COPY --from=builder /opt/scripts/entrypoint.sh /opt/scripts/entrypoint.sh
 
-# Add the java9+ vmoptions to blserver.vmoptions
-RUN cat /opt/bridgelink/docs/mcservice-java9+.vmoptions >> /opt/bridgelink/blserver.vmoptions 
-
 # Ensure proper permissions for the entrypoint and application files
 RUN chmod 755 /opt/scripts/entrypoint.sh && \
     chown -R bridgelink:bridgelink /opt/bridgelink

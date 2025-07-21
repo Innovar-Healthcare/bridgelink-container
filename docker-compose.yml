@@ -1,7 +1,7 @@
 version: '3.1'
 services:
     bl:
-        image: innovarhealthcare/bridgelink:4.5.3
+        image: innovarhealthcare/bridgelink:4.5.4
         stdin_open: true # docker run -i
         tty: true
         user: 1000:1000
