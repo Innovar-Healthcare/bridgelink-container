@@ -25,6 +25,7 @@
 ##### Rockylinux9 OpenJDK 17
 
 * [4.5.4, latest](https://github.com/Innovar-Healthcare/bridgelink-container/blob/bl_4.5.4/Dockerfile)
+* [4.5.3](https://github.com/Innovar-Healthcare/bridgelink-container/blob/bl_4.5.3/Dockerfile)
 
 ------------
 
