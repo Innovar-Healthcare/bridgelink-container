@@ -1,51 +1,36 @@
-version: '3.1'
 services:
-    bl:
-        image: innovarhealthcare/bridgelink:4.5.4
-        stdin_open: true # docker run -i
-        tty: true
-        user: 1000:1000
-        ports:
-            - "8443:8443"
-        networks:
-            bridgelink:
-                ipv4_address: 10.5.0.6
-        volumes:
-            - ./appdata:/opt/bridgelink/appdata
-        secrets:
-        - source: blserver_vmoptions
-        environment:
-            - MP_DATABASE=postgres
-            - MP_DATABASE_URL=jdbc:postgresql://10.5.0.5:5432/bridgelinkdb
-            - MP_DATABASE_USERNAME=bridgelinktest
-            - MP_DATABASE_PASSWORD=bridgelinktest
-            - SERVER_ID=7d760af2-680a-4a19-b9a2-c4685df61ebc
-            - MP_KEYSTORE_KEYPASS=bridgelinkKeystore
-            - MP_KEYSTORE_STOREPASS=bridgelinkKeypass
-            - MP_CONFIGURATIONMAP_LOCATION=database
+  bl:
+    image: innovarhealthcare/bridgelink:4.5.4
+    stdin_open: true
+    tty: true
+    user: 1000:1000
+    ports:
+      - "8443:8443"
+    volumes:
+      - ./appdata:/opt/bridgelink/appdata
+    secrets:
+      - blserver_vmoptions
+    environment:
+      MP_DATABASE: postgres
+      MP_DATABASE_URL: jdbc:postgresql://postgres:5432/bridgelinkdb
+      MP_DATABASE_USERNAME: bridgelinktest
+      MP_DATABASE_PASSWORD: bridgelinktest
+      SERVER_ID: 7d760af2-680a-4a19-b9a2-c4685df61ebc
+      MP_KEYSTORE_KEYPASS: bridgelinkKeystore
+      MP_KEYSTORE_STOREPASS: bridgelinkKeypass
+      MP_CONFIGURATIONMAP_LOCATION: database
+    depends_on:
+      - postgres
 
-    postgres:
-        image: postgres:14-alpine
-        networks:
-            bridgelink:
-                ipv4_address: 10.5.0.5
-        ports:
-            - 5432:5432
-        # volumes:
-        #     - ~/apps/postgres:/var/lib/postgresql/data
-        environment:
-            - POSTGRES_PASSWORD=bridgelinktest
-            - POSTGRES_USER=bridgelinktest
-            - POSTGRES_DB=bridgelinkdb
+  postgres:
+    image: postgres:14-alpine
+    ports:
+      - 5432:5432
+    environment:
+      POSTGRES_PASSWORD: bridgelinktest
+      POSTGRES_USER: bridgelinktest
+      POSTGRES_DB: bridgelinkdb
+
 secrets:
-    mirth_properties:
-        file: appdata/secret.properties
-    blserver_vmoptions:
-        file: appdata/custom_blserver.vmoptions
-networks:
-    bridgelink:
-        driver: bridge
-        ipam:
-            config:
-                - subnet: 10.5.0.0/16
-                  gateway: 10.5.0.1
+  blserver_vmoptions:
+    file: appdata/custom_blserver.vmoptions

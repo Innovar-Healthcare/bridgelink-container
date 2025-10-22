@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "bridgelink.fullname" . }}-bl
+  labels:
+    {{- include "bridgelink.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.bridgelink.service.type }}
+  ports:
+    - port: {{ .Values.bridgelink.service.ports.https }}
+      targetPort: https
+      protocol: TCP
+      name: https
+    - port: {{ .Values.bridgelink.service.ports.http }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "bridgelink.selectorLabels" . | nindent 4 }}
