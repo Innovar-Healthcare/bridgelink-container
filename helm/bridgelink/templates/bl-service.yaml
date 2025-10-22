@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-bl
+  labels:
+    app: bl
+    release: {{ .Release.Name }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: bl
+      release: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app: bl
+        release: {{ .Release.Name }}
+    spec:
+      containers:
+        - name: bl
+          image: "your-image-repo/your-image:tag"
+          ports:
+            - containerPort: 8443
+              protocol: TCP
+              name: https
+            - containerPort: 8080
+              protocol: TCP
+              name: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-bl
+  labels:
+    app: bl
+    release: {{ .Release.Name }}
+spec:
+  type: {{ .Values.bridgelink.service.type }}
+  ports:
+    - port: {{ .Values.bridgelink.service.ports.https }}
+      targetPort: {{ .Values.bridgelink.service.ports.https }}
+      protocol: TCP
+      name: https
+    - port: {{ .Values.bridgelink.service.ports.http }}
+      targetPort: {{ .Values.bridgelink.service.ports.http }}
+      protocol: TCP
+      name: http
+  selector:
+    app: bl
+    release: {{ .Release.Name }}

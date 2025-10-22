@@ -1,0 +1,114 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-bl
+  labels:
+    app: bl
+    release: {{ .Release.Name }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: bl
+      release: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app: bl
+        release: {{ .Release.Name }}
+    spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+      initContainers:
+        - name: init-appdata
+          image: busybox
+          command: ["/bin/sh"]
+          args:
+            - -xec
+            - |
+              echo "Setting up workspace..."
+              cd /
+              rm -rf /appdata/*
+              mkdir -p /appdata
+              cd /appdata
+              mkdir -p temp
+              
+              echo "Creating config files..."
+              echo "$SERVER_ID" > server.id
+              cat server.id
+              
+              echo "Copying additional files..."
+              if [ -d "/tmp/appdata" ]; then
+                cd /tmp/appdata
+                for f in *; do
+                  if [ "$f" != "server.id" ]; then
+                    cp -Lrv "$f" "/appdata/$f"
+                  fi
+                done
+              fi
+              
+              echo "Setting final permissions..."
+              cd /appdata
+              chmod -R 755 .
+              chown -R 1000:1000 .
+              ls -la
+          env:
+            - name: SERVER_ID
+              value: {{ .Values.bridgelink.environment.SERVER_ID | quote }}
+          volumeMounts:
+            - name: appdata-config
+              mountPath: /tmp/appdata
+            - name: appdata
+              mountPath: /appdata
+          securityContext:
+            runAsUser: 0
+      containers:
+        - name: bl
+          image: "{{ .Values.bridgelink.image.repository }}:{{ .Values.bridgelink.image.tag }}"
+          imagePullPolicy: {{ .Values.bridgelink.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.bridgelink.service.ports.https }}
+              protocol: TCP
+              name: https
+            - containerPort: {{ .Values.bridgelink.service.ports.http }}
+              protocol: TCP
+              name: http
+          volumeMounts:
+            - name: appdata
+              mountPath: /opt/bridgelink/appdata
+            - name: blserver-vmoptions
+              mountPath: /opt/bridgelink/secrets/vmoptions
+              subPath: blserver-vmoptions
+          env:
+            {{- range $key, $value := .Values.bridgelink.environment }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+            - name: CUSTOM_VMOPTIONS_PATH
+              value: /opt/bridgelink/secrets/vmoptions
+          resources:
+            {{- toYaml .Values.bridgelink.resources | nindent 12 }}
+          stdin: true
+          tty: true
+      volumes:
+        - name: appdata-config
+          configMap:
+            name: {{ .Release.Name }}-bl-config
+        - name: appdata
+          emptyDir: {}
+        - name: blserver-vmoptions
+          secret:
+            secretName: {{ .Release.Name }}-blserver-vmoptions
+      {{- with .Values.bridgelink.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.bridgelink.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.bridgelink.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

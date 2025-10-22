@@ -1,0 +1,12 @@
+apiVersion: v2
+name: bridgelink
+description: A Helm chart for BridgeLink deployment
+type: application
+version: 0.1.0
+appVersion: "4.5.4"
+maintainers:
+  - name: InnovaCare Healthcare
+keywords:
+  - bridgelink
+  - healthcare
+  - integration

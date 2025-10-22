@@ -1,0 +1,61 @@
+bridgelink:
+  image:
+    repository: innovarhealthcare/bridgelink
+    tag: 4.5.4
+    pullPolicy: IfNotPresent
+  
+  service:
+    type: LoadBalancer
+    ports:
+      http: 8080
+      https: 8443
+
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: 2000m
+      memory: 2Gi
+
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+  environment:
+    MP_DATABASE: postgres
+    MP_DATABASE_URL: jdbc:postgresql://postgres:5432/bridgelinkdb
+    MP_DATABASE_USERNAME: bridgelinktest
+    MP_DATABASE_PASSWORD: bridgelinktest
+    SERVER_ID: 7d760af2-680a-4a19-b9a2-c4685df61ebc
+    MP_KEYSTORE_KEYPASS: bridgelinkKeystore
+    MP_KEYSTORE_STOREPASS: bridgelinkKeypass
+    MP_CONFIGURATIONMAP_LOCATION: database
+
+postgres:
+  enabled: true
+  image:
+    repository: postgres
+    tag: 14-alpine
+    pullPolicy: IfNotPresent
+  
+  service:
+    port: 5432
+
+  persistence:
+    enabled: true
+    size: 10Gi
+    storageClass: ""
+
+  credentials:
+    username: bridgelinktest
+    password: bridgelinktest
+    database: bridgelinkdb
+
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
