@@ -5,18 +5,15 @@ metadata:
   name: {{ include "bridgelink.fullname" . }}-postgres
   labels:
     app: postgres
-    {{- include "bridgelink.labels" . | nindent 4 }}
 spec:
   replicas: 1
   selector:
     matchLabels:
       app: postgres
-      {{- include "bridgelink.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       labels:
         app: postgres
-        {{- include "bridgelink.selectorLabels" . | nindent 8 }}
     spec:
       containers:
         - name: postgres
@@ -32,11 +29,25 @@ spec:
               value: {{ .Values.postgres.credentials.username }}
             - name: POSTGRES_DB
               value: {{ .Values.postgres.credentials.database }}
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
           resources:
             {{- toYaml .Values.postgres.resources | nindent 12 }}
           volumeMounts:
             - name: postgres-data
               mountPath: /var/lib/postgresql/data
+              subPath: pgdata
+            - name: postgres-config
+              mountPath: /etc/postgresql/postgresql.conf
+              subPath: postgresql.conf
+            - name: postgres-config
+              mountPath: /etc/postgresql/pg_hba.conf
+              subPath: pg_hba.conf
+          args:
+            - "-c"
+            - "config_file=/etc/postgresql/postgresql.conf"
+            - "-c"
+            - "hba_file=/etc/postgresql/pg_hba.conf"
       volumes:
         - name: postgres-data
           {{- if .Values.postgres.persistence.enabled }}
@@ -45,4 +56,7 @@ spec:
           {{- else }}
           emptyDir: {}
           {{- end }}
+        - name: postgres-config
+          configMap:
+            name: {{ include "bridgelink.fullname" . }}-postgres-config
 {{- end }}

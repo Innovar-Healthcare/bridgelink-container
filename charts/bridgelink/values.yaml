@@ -46,13 +46,13 @@ bridgelink:
 
   environment:
     # -- Database type (postgres, mysql, oracle, sqlserver)
-    MP_DATABASE: postgres
+    MP_DATABASE: "postgres"
     # -- Database connection URL
-    MP_DATABASE_URL: jdbc:postgresql://bridgelink-postgres:5432/bridgelinkdb
+    MP_DATABASE_URL: "jdbc:postgresql://{{ include \"bridgelink.fullname\" . }}-postgres:5432/{{ .Values.postgres.credentials.database }}"
     # -- Database username
-    MP_DATABASE_USERNAME: bridgelinktest
+    MP_DATABASE_USERNAME: "{{ .Values.postgres.credentials.username }}"
     # -- Database password
-    MP_DATABASE_PASSWORD: bridgelinktest
+    MP_DATABASE_PASSWORD: "{{ .Values.postgres.credentials.password }}"
     # -- Unique server identifier
     SERVER_ID: 7d760af2-680a-4a19-b9a2-c4685df61ebc
     # -- Keystore key password
