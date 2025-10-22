@@ -42,6 +42,25 @@ The script will:
 4. Wait for all components to be ready
 5. Display access URLs
 
+### Testing the Deployment
+
+1. Download and install [BridgeLink Administrator Launcher 1.1.0](https://www.innovarhealthcare.com/bridgelink-downloads#comp-mg0zikp4)
+
+2. Once the script completes and displays the external IP:
+   ```bash
+   # Example output:
+   BridgeLink is available at:
+   HTTP:  http://192.168.49.200:8080
+   HTTPS: https://192.168.49.200:8443
+   ```
+
+3. Launch the BridgeLink Administrator and configure:
+   - Server URL: Use the HTTPS URL displayed by the script
+   - Username: `admin`
+   - Password: `admin`
+
+Note: The HTTPS connection will show as insecure due to self-signed certificates.
+
 ### Configuration
 
 The script uses `minikube-values.yaml` for configuration. See [charts/bridgelink/README.md](charts/bridgelink/README.md) for detailed configuration options.
