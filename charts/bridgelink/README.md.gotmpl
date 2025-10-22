@@ -1,0 +1,200 @@
+# {{ .Name }}
+
+{{ template "chart.versionBadge" . }}
+{{ template "chart.typeBadge" . }}
+{{ template "chart.appVersionBadge" . }}
+
+{{ template "chart.description" . }}
+
+{{ template "chart.homepageLine" . }}
+
+## Overview
+
+BridgeLink is a healthcare integration platform that facilitates seamless communication between various healthcare systems. This Helm chart provides a production-ready Kubernetes deployment of BridgeLink.
+
+## Maintainers
+
+{{ template "chart.maintainersTable" . }}
+
+{{ template "chart.sourcesSection" . }}
+
+{{ template "chart.requirementsSection" . }}
+
+## Prerequisites
+
+* Kubernetes 1.19+
+* Helm 3.0+
+* PV provisioner support in the underlying infrastructure (for PostgreSQL persistence)
+* TLS certificates for secure communication (optional)
+
+## Installing the Chart
+
+To install the chart with the release name `bridgelink`:
+
+```bash
+# Add the BridgeLink Helm repository
+helm repo add bridgelink https://innovar-healthcare.github.io/bridgelink-helm-charts
+helm repo update
+
+# Install the chart
+helm install bridgelink bridgelink/bridgelink
+```
+
+For a custom configuration using a values file:
+
+```bash
+helm install bridgelink bridgelink/bridgelink -f values.yaml
+```
+
+## Uninstalling the Chart
+
+To uninstall/delete the `bridgelink` deployment:
+
+```bash
+helm uninstall bridgelink
+```
+
+## Testing the Deployment
+
+1. Download and install [BridgeLink Administrator Launcher](https://www.innovarhealthcare.com/bridgelink-downloads#comp-mg0zikp4)
+
+2. Once the deployment is complete, get the service URL:
+   ```bash
+   kubectl get svc -n <namespace> bridgelink-bl
+   ```
+
+3. Launch the BridgeLink Administrator and configure:
+   - Server URL: Use HTTPS with the external IP (e.g., https://EXTERNAL-IP:8443)
+   - Username: `admin` (default)
+   - Password: See instructions below for obtaining the initial password
+
+   ```bash
+   # Get the initial admin password
+   kubectl get secret -n <namespace> bridgelink-secret -o jsonpath="{.data.ADMIN_PASSWORD}" | base64 -d
+   ```
+
+## Security Considerations
+
+1. **TLS Configuration**: By default, the chart generates self-signed certificates. For production, provide your own certificates:
+   ```yaml
+   tls:
+     enabled: true
+     secretName: your-tls-secret
+   ```
+
+2. **Database Security**: 
+   - Use strong passwords
+   - Enable SSL for database connections
+   - Consider using external secrets management
+
+3. **Pod Security**:
+   - The deployment runs with a non-root user
+   - Security contexts are properly configured
+   - Network policies are available for configuration
+
+## Architecture
+
+This chart deploys BridgeLink with the following components:
+- BridgeLink application server
+- PostgreSQL database (optional)
+- Persistent storage for data and configurations
+- Service accounts and RBAC resources
+- Ingress resources (optional)
+- Monitoring and metrics endpoints (optional)
+
+## High Availability
+
+For production deployments, consider:
+1. Setting up multiple replicas
+2. Configuring pod anti-affinity
+3. Using node selectors or taints/tolerations
+4. Implementing proper backup strategies
+
+```yaml
+replicaCount: 3
+podAntiAffinity:
+  enabled: true
+```
+
+## Persistence
+
+The chart supports different types of persistence:
+
+1. **PostgreSQL Data**:
+   ```yaml
+   postgres:
+     persistence:
+       enabled: true
+       size: 10Gi
+       storageClass: "standard"
+   ```
+
+2. **Application Data**:
+   ```yaml
+   persistence:
+     enabled: true
+     size: 5Gi
+     storageClass: "standard"
+   ```
+
+## Configuration
+
+{{ template "chart.valuesTable" . }}
+
+## Environment Variables
+
+The BridgeLink application can be configured using environment variables:
+
+### Core Configuration
+- `MP_DATABASE`: Database type (default: postgres)
+- `MP_DATABASE_URL`: Database connection URL
+- `MP_DATABASE_USERNAME`: Database username
+- `MP_DATABASE_PASSWORD`: Database password
+- `SERVER_ID`: Unique server identifier
+
+### Advanced Configuration
+- `JAVA_OPTS`: JVM options
+- `MAX_HEAP_SIZE`: Maximum heap size
+- `MIN_HEAP_SIZE`: Minimum heap size
+- `DEBUG_PORT`: Remote debugging port (if enabled)
+- `ENABLE_JMX`: Enable JMX monitoring
+- `JMX_PORT`: JMX port number
+
+## Monitoring
+
+The chart can expose metrics for Prometheus:
+
+```yaml
+metrics:
+  enabled: true
+  serviceMonitor:
+    enabled: true
+```
+
+## Troubleshooting
+
+1. **Pod not starting**:
+   ```bash
+   kubectl describe pod -n <namespace> <pod-name>
+   kubectl logs -n <namespace> <pod-name>
+   ```
+
+2. **Database connection issues**:
+   - Verify credentials in the secret
+   - Check network policies
+   - Validate database URL
+
+3. **Memory issues**:
+   - Review JVM settings
+   - Check container resource limits
+   - Monitor heap usage
+
+## Support
+
+For support and documentation, visit:
+- [Official Documentation](https://docs.innovarhealthcare.com/bridgelink)
+- [GitHub Issues](https://github.com/Innovar-Healthcare/bridgelink-container/issues)
+- [Community Forums](https://community.innovarhealthcare.com)
+
+----------------------------------------------
+Autogenerated from chart metadata using [helm-docs](https://github.com/norwoodj/helm-docs)
