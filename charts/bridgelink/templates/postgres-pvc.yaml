@@ -2,10 +2,10 @@
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: {{ .Release.Name }}-postgres-pvc
+  name: {{ include "bridgelink.fullname" . }}-postgres
   labels:
     app: postgres
-    release: {{ .Release.Name }}
+    {{- include "bridgelink.labels" . | nindent 4 }}
 spec:
   accessModes:
     - ReadWriteOnce

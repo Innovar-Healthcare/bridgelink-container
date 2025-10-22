@@ -1,21 +1,22 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ .Release.Name }}-bl
+  name: {{ include "bridgelink.fullname" . }}-bl
   labels:
-    app: bl
-    release: {{ .Release.Name }}
+    {{- include "bridgelink.labels" . | nindent 4 }}
 spec:
-  replicas: 1
+  replicas: {{ .Values.bridgelink.replicaCount }}
   selector:
     matchLabels:
-      app: bl
-      release: {{ .Release.Name }}
+      {{- include "bridgelink.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       labels:
-        app: bl
-        release: {{ .Release.Name }}
+        {{- include "bridgelink.selectorLabels" . | nindent 8 }}
+      {{- with .Values.bridgelink.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
     spec:
       securityContext:
         runAsUser: 1000
@@ -30,15 +31,14 @@ spec:
               echo "Setting up workspace..."
               cd /
               rm -rf /appdata/*
-              mkdir -p /appdata
+              mkdir -p /appdata/temp
               cd /appdata
-              mkdir -p temp
               
               echo "Creating config files..."
               echo "$SERVER_ID" > server.id
               cat server.id
               
-              echo "Copying additional files..."
+              echo "Copying configuration..."
               if [ -d "/tmp/appdata" ]; then
                 cd /tmp/appdata
                 for f in *; do
@@ -48,11 +48,8 @@ spec:
                 done
               fi
               
-              echo "Setting final permissions..."
-              cd /appdata
-              chmod -R 755 .
-              chown -R 1000:1000 .
-              ls -la
+              chmod -R 755 /appdata
+              chown -R 1000:1000 /appdata
           env:
             - name: SERVER_ID
               value: {{ .Values.bridgelink.environment.SERVER_ID | quote }}
@@ -64,16 +61,16 @@ spec:
           securityContext:
             runAsUser: 0
       containers:
-        - name: bl
-          image: "{{ .Values.bridgelink.image.repository }}:{{ .Values.bridgelink.image.tag }}"
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.bridgelink.image.repository }}:{{ .Values.bridgelink.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.bridgelink.image.pullPolicy }}
           ports:
-            - containerPort: {{ .Values.bridgelink.service.ports.https }}
+            - name: https
+              containerPort: 8443
               protocol: TCP
-              name: https
-            - containerPort: {{ .Values.bridgelink.service.ports.http }}
+            - name: http
+              containerPort: 8080
               protocol: TCP
-              name: http
           volumeMounts:
             - name: appdata
               mountPath: /opt/bridgelink/appdata
@@ -89,17 +86,23 @@ spec:
               value: /opt/bridgelink/secrets/vmoptions
           resources:
             {{- toYaml .Values.bridgelink.resources | nindent 12 }}
-          stdin: true
-          tty: true
+          {{- if .Values.bridgelink.livenessProbe }}
+          livenessProbe:
+            {{- toYaml .Values.bridgelink.livenessProbe | nindent 12 }}
+          {{- end }}
+          {{- if .Values.bridgelink.readinessProbe }}
+          readinessProbe:
+            {{- toYaml .Values.bridgelink.readinessProbe | nindent 12 }}
+          {{- end }}
       volumes:
         - name: appdata-config
           configMap:
-            name: {{ .Release.Name }}-bl-config
+            name: {{ include "bridgelink.fullname" . }}-config
         - name: appdata
           emptyDir: {}
         - name: blserver-vmoptions
           secret:
-            secretName: {{ .Release.Name }}-blserver-vmoptions
+            secretName: {{ include "bridgelink.fullname" . }}-vmoptions
       {{- with .Values.bridgelink.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
