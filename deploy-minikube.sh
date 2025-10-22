@@ -63,7 +63,7 @@ EOF
     
     # Wait for MetalLB pods to be ready
     echo -e "${YELLOW}Waiting for MetalLB to be ready...${NC}"
-    kubectl wait --for=condition=ready pod -l app=metallb -n metallb-system --timeout=300s
+    kubectl wait --for=condition=ready pod -l app=metallb -n metallb-system --timeout=600s
 fi
 
 # Create bridgelink namespace if it doesn't exist
@@ -107,8 +107,8 @@ helm upgrade --install bridgelink ./charts/bridgelink -f minikube-values.yaml -n
 
 # Wait for pods to be ready
 echo -e "${YELLOW}Waiting for pods to be ready...${NC}"
-kubectl wait --for=condition=ready pod -l app=bl --timeout=300s -n bridgelink
-kubectl wait --for=condition=ready pod -l app=postgres --timeout=300s -n bridgelink
+kubectl wait --for=condition=ready pod -l app=bl --timeout=600s -n bridgelink
+kubectl wait --for=condition=ready pod -l app=postgres --timeout=600s -n bridgelink
 
 # Wait for external IP to be assigned
 echo -e "${YELLOW}Waiting for external IP assignment...${NC}"
