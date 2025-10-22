@@ -1,113 +1,79 @@
-# BridgeLink Container & Helm Chart
+# BridgeLink Helm Chart
 
 ![BridgeLink Icon](https://avatars.githubusercontent.com/u/116584698)
 
-This repository contains both the Helm chart for deploying BridgeLink and its associated Docker container configuration.
+A Helm chart for deploying BridgeLink on Kubernetes.
 
 ## Repository Structure
 
 ```
 .
-├── charts/                 # Helm charts directory
-│   └── bridgelink/        # Main BridgeLink Helm chart
-│       ├── Chart.yaml     # Chart metadata
-│       ├── values.yaml    # Default configuration values
-│       ├── values.schema.json # JSON schema for validating values
-│       └── templates/     # Kubernetes manifest templates
-│           ├── _helpers.tpl
-│           ├── bl-secret.yaml
-│           ├── configmap.yaml
-│           ├── deployment.yaml
-│           ├── postgres-deployment.yaml
-│           ├── postgres-pvc.yaml
-│           ├── postgres-service.yaml
-│           └── service.yaml
-├── docker/                # Docker container configuration
-│   ├── Dockerfile
-│   └── docker-compose.yml
-├── scripts/              # Deployment and utility scripts
-│   └── deploy-minikube.sh # Minikube deployment script
-├── docs/                # Documentation
-│   └── development.md
-└── minikube-values.yaml # Minikube-specific configuration values
+├── charts/bridgelink/     # Main Helm chart (see charts/bridgelink/README.md for details)
+├── scripts/              # Test and deployment scripts
+│   └── deploy-minikube.sh # Minikube test deployment script
+└── minikube-values.yaml  # Default values for Minikube testing
 ```
 
-## Quick Start
+## Local Testing with Minikube
 
-### Local Development with Minikube
+The repository includes a test deployment script for Minikube that:
+- Validates the Helm chart works correctly
+- Sets up required Kubernetes components
+- Provides a working test environment
 
-Deploy to Minikube:
+### Prerequisites
+
+- Minikube v1.32.0+
+- Helm v3.0.0+
+- kubectl
+
+### Quick Start
+
 ```bash
 ./scripts/deploy-minikube.sh
 ```
 
 The script will:
-1. Check for required dependencies (minikube, helm)
-2. Start Minikube if not running
-3. Enable required addons (ingress, metallb)
-4. Create or use existing `minikube-values.yaml`
-5. Deploy BridgeLink using Helm
-6. Configure load balancing
-7. Display access URLs when ready
+1. Start Minikube if not running
+2. Enable and configure required addons:
+   - Ingress controller
+   - MetalLB load balancer
+3. Deploy BridgeLink using the Helm chart
+4. Wait for all components to be ready
+5. Display access URLs
 
-### Production Deployment
+### Configuration
 
-Install using Helm:
-```bash
-helm install bridgelink ./charts/bridgelink -f /path/to/your/values.yaml
-```
+The script uses `minikube-values.yaml` for configuration. See [charts/bridgelink/README.md](charts/bridgelink/README.md) for detailed configuration options.
 
-## Development
+### Troubleshooting Test Deployment
 
-The repository follows standard Helm development practices:
+Common issues:
 
-1. Helm chart is located in `charts/bridgelink/`
-2. Docker configuration is in `docker/`
-3. Deployment scripts are in `scripts/`
-4. Documentation is in `docs/`
+1. **Pods not starting**
+   ```bash
+   # Check pod status
+   kubectl get pods -n bridgelink
+   # View pod details
+   kubectl describe pod -l app.kubernetes.io/instance=bridgelink -n bridgelink
+   ```
 
-### Testing Changes
+2. **No external access**
+   ```bash
+   # Verify MetalLB configuration
+   kubectl get svc -n bridgelink
+   kubectl describe svc bridgelink-bl -n bridgelink
+   ```
 
-Test chart changes locally:
-```bash
-# Validate chart syntax
-helm lint ./charts/bridgelink
+3. **Database issues**
+   ```bash
+   # Check PostgreSQL status
+   kubectl logs -l app.kubernetes.io/instance=bridgelink -c postgres -n bridgelink
+   ```
 
-# Validate values against schema
-helm lint ./charts/bridgelink -f minikube-values.yaml
+## Production Deployment
 
-# Preview rendered templates
-helm template ./charts/bridgelink -f minikube-values.yaml
-```
-
-## Configuration
-
-The chart supports various configuration options through values files:
-
-- Default values: [charts/bridgelink/values.yaml](charts/bridgelink/values.yaml)
-- Minikube values: [minikube-values.yaml](minikube-values.yaml)
-
-Values are validated against the JSON schema at [charts/bridgelink/values.schema.json](charts/bridgelink/values.schema.json).
-
-### Key Configuration Options
-
-```yaml
-bridgelink:
-  service:
-    type: LoadBalancer  # Service type (LoadBalancer, ClusterIP, NodePort)
-  resources:           # Container resource limits and requests
-    requests:
-      cpu: 500m
-      memory: 512Mi
-    limits:
-      cpu: 1000m
-      memory: 1Gi
-
-postgres:
-  persistence:
-    enabled: true     # Enable persistent storage for PostgreSQL
-    size: 1Gi        # Size of persistent volume
-```
+For production deployments and configuration options, see [charts/bridgelink/README.md](charts/bridgelink/README.md).
 
 ## License
 
