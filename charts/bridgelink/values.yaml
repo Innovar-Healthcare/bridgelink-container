@@ -1,0 +1,127 @@
+# -- Override the name of the chart
+nameOverride: ""
+# -- Provide a name to substitute for the full names of resources
+fullnameOverride: ""
+
+# -- BridgeLink Helm chart configuration
+# @section Global Settings
+
+bridgelink:
+  # -- Number of BridgeLink pods to run
+  replicaCount: 1
+
+  image:
+    # -- BridgeLink container image repository
+    # @default -- `innovarhealthcare/bridgelink`
+    repository: innovarhealthcare/bridgelink
+    # -- BridgeLink container image tag
+    # @default -- Chart appVersion
+    tag: 4.5.4
+    # -- Image pull policy
+    # @default -- `IfNotPresent`
+    pullPolicy: IfNotPresent
+  
+  service:
+    # -- Kubernetes Service type
+    # @default -- `LoadBalancer`
+    type: LoadBalancer
+    ports:
+      # -- HTTP port for BridgeLink web interface
+      # @default -- 8080
+      http: 8080
+      # -- HTTPS port for BridgeLink secure web interface
+      # @default -- 8443
+      https: 8443
+
+  # -- Resource limits and requests for the BridgeLink container
+  # @default -- See below
+  resources:
+    requests:
+      # -- CPU request for BridgeLink container
+      cpu: 500m
+      # -- Memory request for BridgeLink container
+      memory: 1Gi
+    limits:
+      # -- CPU limit for BridgeLink container
+      cpu: 2000m
+      # -- Memory limit for BridgeLink container
+      memory: 2Gi
+
+  # -- Node labels for pod assignment
+  # @default -- `{}`
+  nodeSelector: {}
+  # -- Tolerations for pod assignment
+  # @default -- `[]`
+  tolerations: []
+  # -- Affinity for pod assignment
+  # @default -- `{}`
+  affinity: {}
+
+  # -- Environment variables for BridgeLink configuration
+  # @default -- See below
+  environment:
+    # -- Database type to use (postgres, mysql, oracle, sqlserver)
+    MP_DATABASE: postgres
+    # -- JDBC URL for database connection
+    MP_DATABASE_URL: jdbc:postgresql://bridgelink-postgres:5432/bridgelinkdb
+    # -- Database username for authentication
+    MP_DATABASE_USERNAME: bridgelinktest
+    # -- Database password for authentication
+    MP_DATABASE_PASSWORD: bridgelinktest
+    # -- Unique server identifier
+    SERVER_ID: 7d760af2-680a-4a19-b9a2-c4685df61ebc
+    # -- Keystore key password for TLS
+    MP_KEYSTORE_KEYPASS: bridgelinkKeystore
+    # -- Keystore store password for TLS
+    MP_KEYSTORE_STOREPASS: bridgelinkKeypass
+    # -- Configuration map storage location
+    MP_CONFIGURATIONMAP_LOCATION: database
+
+# @section PostgreSQL Settings
+postgres:
+  # -- Enable bundled PostgreSQL deployment
+  # Set to false to use external database
+  enabled: true
+
+  image:
+    # -- PostgreSQL container image repository
+    repository: postgres
+    # -- PostgreSQL container image tag
+    tag: 14-alpine
+    # -- PostgreSQL image pull policy
+    pullPolicy: IfNotPresent
+  
+  service:
+    # -- PostgreSQL service port number
+    port: 5432
+
+  persistence:
+    # -- Enable persistent storage for PostgreSQL data
+    enabled: true
+    # -- Size of the persistent volume claim
+    size: 10Gi
+    # -- Storage class for PostgreSQL PVC
+    # @default -- "" (use default storage class)
+    storageClass: ""
+
+  # -- PostgreSQL database credentials
+  credentials:
+    # -- PostgreSQL username
+    username: bridgelinktest
+    # -- PostgreSQL password
+    password: bridgelinktest
+    # -- PostgreSQL database name
+    database: bridgelinkdb
+
+  # -- Resource limits and requests for PostgreSQL container
+  resources:
+    requests:
+      # -- CPU request for PostgreSQL container
+      cpu: 200m
+      # -- Memory request for PostgreSQL container
+      memory: 256Mi
+    limits:
+      # -- CPU limit for PostgreSQL container
+      cpu: 1000m
+      # -- Memory limit for PostgreSQL container
+      memory: 1Gi

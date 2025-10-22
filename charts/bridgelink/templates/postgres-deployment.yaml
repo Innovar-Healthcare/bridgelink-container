@@ -2,21 +2,21 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ .Release.Name }}-postgres
+  name: {{ include "bridgelink.fullname" . }}-postgres
   labels:
     app: postgres
-    release: {{ .Release.Name }}
+    {{- include "bridgelink.labels" . | nindent 4 }}
 spec:
   replicas: 1
   selector:
     matchLabels:
       app: postgres
-      release: {{ .Release.Name }}
+      {{- include "bridgelink.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       labels:
         app: postgres
-        release: {{ .Release.Name }}
+        {{- include "bridgelink.selectorLabels" . | nindent 8 }}
     spec:
       containers:
         - name: postgres
@@ -41,7 +41,7 @@ spec:
         - name: postgres-data
           {{- if .Values.postgres.persistence.enabled }}
           persistentVolumeClaim:
-            claimName: {{ .Release.Name }}-postgres-pvc
+            claimName: {{ include "bridgelink.fullname" . }}-postgres
           {{- else }}
           emptyDir: {}
           {{- end }}

@@ -70,11 +70,6 @@ fi
 echo -e "${YELLOW}Creating bridgelink namespace...${NC}"
 kubectl create namespace bridgelink --dry-run=client -o yaml | kubectl apply -f -
 
-# Clean up existing deployments to handle selector changes
-echo -e "${YELLOW}Cleaning up existing deployments...${NC}"
-kubectl delete deployment -n bridgelink bridgelink-bl --ignore-not-found=true
-kubectl delete deployment -n bridgelink bridgelink-postgres --ignore-not-found=true
-
 # Create values file for minikube
 cat > minikube-values.yaml << EOL
 bridgelink:
@@ -103,7 +98,7 @@ EOL
 
 # Deploy BridgeLink using Helm
 echo -e "${GREEN}Deploying BridgeLink to Minikube in bridgelink namespace...${NC}"
-helm upgrade --install bridgelink ./charts/bridgelink -f minikube-values.yaml -n bridgelink --create-namespace
+helm upgrade --install bridgelink ./helm/bridgelink -f minikube-values.yaml -n bridgelink --create-namespace
 
 # Wait for pods to be ready
 echo -e "${YELLOW}Waiting for pods to be ready...${NC}"
