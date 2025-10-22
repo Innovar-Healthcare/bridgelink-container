@@ -11,7 +11,12 @@ YELLOW='\033[1;33m'
 RED='\033[0;31m'
 NC='\033[0m' # No Color
 
+# Set namespace and release name
+NAMESPACE="bridgelink"
+RELEASE_NAME="bridgelink-$(date +%s)"
+
 echo -e "${GREEN}=== BridgeLink Minikube Deployment Script ===${NC}"
+echo -e "${GREEN}Release Name: ${RELEASE_NAME}${NC}"
 
 # Check if minikube is installed
 if ! command -v minikube &> /dev/null; then
@@ -35,22 +40,24 @@ else
     echo -e "${GREEN}Minikube is already running${NC}"
 fi
 
-# Enable required addons
-if ! minikube addons list | grep "ingress" | grep -q "enabled"; then
-    echo -e "${YELLOW}Enabling ingress addon...${NC}"
-    minikube addons enable ingress
-fi
-
+# Initialize MetalLB first
+echo -e "${YELLOW}Configuring MetalLB...${NC}"
 if ! minikube addons list | grep "metallb" | grep -q "enabled"; then
     echo -e "${YELLOW}Enabling MetalLB addon...${NC}"
     minikube addons enable metallb
-    
-    # Get minikube IP and calculate IP range for MetalLB
-    MINIKUBE_IP=$(minikube ip)
-    IP_BASE=$(echo $MINIKUBE_IP | cut -d"." -f1-3)
-    
-    echo -e "${YELLOW}Configuring MetalLB IP range...${NC}"
-    cat <<EOF | kubectl apply -f -
+
+    # Wait for MetalLB controller and speaker pods to be created
+    echo -e "${YELLOW}Waiting for MetalLB pods to be created...${NC}"
+    sleep 10
+fi
+
+# Get minikube IP and calculate IP range for MetalLB
+MINIKUBE_IP=$(minikube ip)
+IP_BASE=$(echo $MINIKUBE_IP | cut -d"." -f1-3)
+
+# Configure MetalLB with IP range
+echo -e "${YELLOW}Configuring MetalLB IP range...${NC}"
+cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -64,20 +71,82 @@ data:
       addresses:
       - ${IP_BASE}.200-${IP_BASE}.250
 EOF
-    
-    # Wait for MetalLB pods to be ready
-    echo -e "${YELLOW}Waiting for MetalLB to be ready...${NC}"
-    kubectl wait --for=condition=ready pod -l app=metallb -n metallb-system --timeout=600s
+
+# Wait for MetalLB pods to be ready and verify configuration
+echo -e "${YELLOW}Waiting for MetalLB to be ready...${NC}"
+kubectl wait --for=condition=ready pod -l app=metallb -n metallb-system --timeout=120s || true
+kubectl wait --for=condition=ready pod -l component=speaker -n metallb-system --timeout=120s || true
+kubectl wait --for=condition=ready pod -l component=controller -n metallb-system --timeout=120s || true
+
+# Verify MetalLB configuration
+echo -e "${YELLOW}Verifying MetalLB configuration...${NC}"
+if ! kubectl get configmap -n metallb-system config >/dev/null 2>&1; then
+    echo -e "${RED}MetalLB configuration not found. Retrying configuration...${NC}"
+    sleep 5
+    kubectl apply -f - <<EOF
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  namespace: metallb-system
+  name: config
+data:
+  config: |
+    address-pools:
+    - name: default
+      protocol: layer2
+      addresses:
+      - ${IP_BASE}.200-${IP_BASE}.250
+EOF
+fi
+
+# Enable other addons after MetalLB is ready
+if ! minikube addons list | grep "ingress" | grep -q "enabled"; then
+    echo -e "${YELLOW}Enabling ingress addon...${NC}"
+    minikube addons enable ingress
 fi
 
 # Create bridgelink namespace if it doesn't exist
 echo -e "${YELLOW}Creating bridgelink namespace...${NC}"
 kubectl create namespace bridgelink --dry-run=client -o yaml | kubectl apply -f -
 
-# Clean up existing deployments to handle selector changes
-echo -e "${YELLOW}Cleaning up existing deployments...${NC}"
-kubectl delete deployment -n bridgelink bridgelink-bl --ignore-not-found=true
-kubectl delete deployment -n bridgelink bridgelink-postgres --ignore-not-found=true
+# Clean up existing resources
+echo -e "${YELLOW}Cleaning up existing resources...${NC}"
+
+# Delete specific services first to avoid ownership conflicts
+echo -e "${YELLOW}Removing existing PostgreSQL service...${NC}"
+kubectl delete service -n ${NAMESPACE} -l "app=postgres" --ignore-not-found=true
+
+# List of resource types to clean up
+RESOURCES="deployment,configmap,secret,pvc,pv"
+
+# Find and delete resources with any helm release label
+echo -e "${YELLOW}Finding and removing old Helm releases...${NC}"
+for resource in $(kubectl get ${RESOURCES} -n ${NAMESPACE} -l "app.kubernetes.io/managed-by=Helm" -o name); do
+    echo -e "${YELLOW}Deleting ${resource}...${NC}"
+    kubectl delete ${resource} -n ${NAMESPACE} --ignore-not-found=true --timeout=60s
+done
+
+# Additional cleanup for any resources with postgres label
+echo -e "${YELLOW}Cleaning up PostgreSQL resources...${NC}"
+kubectl delete all -n ${NAMESPACE} -l "app=postgres" --ignore-not-found=true --timeout=60s
+
+# Wait for resources to be deleted
+echo -e "${YELLOW}Waiting for resources to be deleted...${NC}"
+kubectl wait --for=delete pod -l "app.kubernetes.io/managed-by=Helm" -n ${NAMESPACE} --timeout=120s || true
+kubectl wait --for=delete pod -l "app=postgres" -n ${NAMESPACE} --timeout=120s || true
+
+# Clean up Helm releases
+echo -e "${YELLOW}Cleaning up Helm releases...${NC}"
+helm list -n ${NAMESPACE} -q | while read release; do
+    if [ ! -z "$release" ]; then
+        echo -e "${YELLOW}Uninstalling Helm release: ${release}${NC}"
+        helm uninstall ${release} -n ${NAMESPACE} --timeout 60s
+    fi
+done
+
+# Final verification of cleanup
+echo -e "${YELLOW}Verifying cleanup...${NC}"
+kubectl delete service -n ${NAMESPACE} bridgelink-postgres --ignore-not-found=true
 
 # Wait for old pods to terminate
 echo -e "${YELLOW}Waiting for old pods to terminate...${NC}"
@@ -117,22 +186,35 @@ else
 fi
 
 # Deploy BridgeLink using Helm
-echo -e "${GREEN}Deploying BridgeLink to Minikube in bridgelink namespace...${NC}"
-helm upgrade --install bridgelink "$PROJECT_ROOT/charts/bridgelink" -f "$MINIKUBE_VALUES" -n bridgelink --create-namespace
+echo -e "${GREEN}Deploying BridgeLink to Minikube in ${NAMESPACE} namespace...${NC}"
+helm upgrade --install ${RELEASE_NAME} "$PROJECT_ROOT/charts/bridgelink" \
+    -f "$MINIKUBE_VALUES" \
+    -n ${NAMESPACE} \
+    --create-namespace \
+    --wait \
+    --timeout 10m
 
-# Wait for new pods to be ready
-echo -e "${YELLOW}Waiting for pods to be ready...${NC}"
-kubectl wait --for=condition=ready pod -l "app.kubernetes.io/instance=bridgelink" -n bridgelink --timeout=600s
-
-# Wait for external IP to be assigned
+# Wait longer for LoadBalancer IP assignment
 echo -e "${YELLOW}Waiting for external IP assignment...${NC}"
-for i in {1..30}; do
-    EXTERNAL_IP=$(kubectl get svc bridgelink-bl -n bridgelink -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
+for i in {1..60}; do
+    EXTERNAL_IP=$(kubectl get svc ${RELEASE_NAME}-bl -n ${NAMESPACE} -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
     if [ ! -z "$EXTERNAL_IP" ]; then
         break
     fi
-    sleep 2
+    echo -e "${YELLOW}Waiting for LoadBalancer IP (attempt $i/60)...${NC}"
+    sleep 5
 done
+
+# If still no external IP, check MetalLB status
+if [ -z "$EXTERNAL_IP" ]; then
+    echo -e "${YELLOW}Checking MetalLB status...${NC}"
+    echo -e "MetalLB pods:"
+    kubectl get pods -n metallb-system
+    echo -e "\nMetalLB configuration:"
+    kubectl get configmap -n metallb-system config -o yaml
+    echo -e "\nService status:"
+    kubectl get svc ${RELEASE_NAME}-bl -n ${NAMESPACE} -o yaml
+fi
 
 echo -e "${GREEN}=== BridgeLink Deployment Complete ===${NC}"
 if [ ! -z "$EXTERNAL_IP" ]; then

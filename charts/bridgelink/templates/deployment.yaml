@@ -79,7 +79,7 @@ spec:
               subPath: blserver-vmoptions
           env:
             - name: MP_DATABASE_URL
-              value: "jdbc:postgresql://bridgelink-postgres:5432/{{ .Values.postgres.credentials.database }}"
+              value: jdbc:postgresql://{{ include "bridgelink.fullname" . }}-postgres:5432/{{ .Values.postgres.credentials.database }}
             - name: MP_DATABASE_USERNAME
               value: {{ .Values.postgres.credentials.username | quote }}
             - name: MP_DATABASE_PASSWORD
