@@ -1,6 +1,10 @@
 #!/bin/bash
 set -e
 
+# Get the directory where the script is located
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+PROJECT_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
+
 # Colors for output
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -63,15 +67,28 @@ EOF
     
     # Wait for MetalLB pods to be ready
     echo -e "${YELLOW}Waiting for MetalLB to be ready...${NC}"
-    kubectl wait --for=condition=ready pod -l app=metallb -n metallb-system --timeout=300s
+    kubectl wait --for=condition=ready pod -l app=metallb -n metallb-system --timeout=600s
 fi
 
 # Create bridgelink namespace if it doesn't exist
 echo -e "${YELLOW}Creating bridgelink namespace...${NC}"
 kubectl create namespace bridgelink --dry-run=client -o yaml | kubectl apply -f -
 
-# Create values file for minikube
-cat > minikube-values.yaml << EOL
+# Clean up existing deployments to handle selector changes
+echo -e "${YELLOW}Cleaning up existing deployments...${NC}"
+kubectl delete deployment -n bridgelink bridgelink-bl --ignore-not-found=true
+kubectl delete deployment -n bridgelink bridgelink-postgres --ignore-not-found=true
+
+# Wait for old pods to terminate
+echo -e "${YELLOW}Waiting for old pods to terminate...${NC}"
+kubectl wait --for=delete pod -l "app.kubernetes.io/name=bridgelink" -n bridgelink --timeout=60s || true
+
+# Check for existing minikube-values.yaml
+MINIKUBE_VALUES="$PROJECT_ROOT/minikube-values.yaml"
+if [ ! -f "$MINIKUBE_VALUES" ]; then
+    echo -e "${YELLOW}Creating default minikube-values.yaml...${NC}"
+    # Create values file for minikube
+    cat > "$MINIKUBE_VALUES" << EOL
 bridgelink:
   service:
     type: LoadBalancer
@@ -95,15 +112,17 @@ postgres:
       cpu: 500m
       memory: 512Mi
 EOL
+else
+    echo -e "${GREEN}Using existing minikube-values.yaml${NC}"
+fi
 
 # Deploy BridgeLink using Helm
 echo -e "${GREEN}Deploying BridgeLink to Minikube in bridgelink namespace...${NC}"
-helm upgrade --install bridgelink ./helm/bridgelink -f minikube-values.yaml -n bridgelink --create-namespace
+helm upgrade --install bridgelink "$PROJECT_ROOT/charts/bridgelink" -f "$MINIKUBE_VALUES" -n bridgelink --create-namespace
 
-# Wait for pods to be ready
+# Wait for new pods to be ready
 echo -e "${YELLOW}Waiting for pods to be ready...${NC}"
-kubectl wait --for=condition=ready pod -l app=bl --timeout=300s -n bridgelink
-kubectl wait --for=condition=ready pod -l app=postgres --timeout=300s -n bridgelink
+kubectl wait --for=condition=ready pod -l "app.kubernetes.io/instance=bridgelink" -n bridgelink --timeout=600s
 
 # Wait for external IP to be assigned
 echo -e "${YELLOW}Waiting for external IP assignment...${NC}"
