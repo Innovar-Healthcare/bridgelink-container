@@ -1,13 +1,13 @@
 #!/bin/bash
 
 # URL of the .tar.gz file
-URL="https://innovar-oss-mirth-mirror.s3.us-east-2.amazonaws.com/mirth-arch/BridgeLink-4.5.4/BridgeLink_unix_4_5_4.tar.gz"
+URL="https://innovar-oss-mirth-mirror.s3.us-east-2.amazonaws.com/mirth-arch/BridgeLink-4.6.0/BridgeLink_unix_4_6_0.tar.gz"
 
 # Destination folder path
 DESTINATION_FOLDER="/opt"
 
 # Name of the downloaded file
-FILE_NAME="BridgeLink_unix_4_5_4.tar.gz"
+FILE_NAME="BridgeLink_unix_4_6_0.tar.gz"
 
 # Log file for debugging
 LOG_FILE="/opt/scripts/download_and_extract.log"
