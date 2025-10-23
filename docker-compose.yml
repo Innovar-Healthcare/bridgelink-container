@@ -1,7 +1,7 @@
 version: '3.1'
 services:
     bl:
-        image: innovarhealthcare/bridgelink:4.5.4
+        image: innovarhealthcare/bridgelink:4.6.0
         stdin_open: true # docker run -i
         tty: true
         user: 1000:1000
@@ -12,8 +12,6 @@ services:
                 ipv4_address: 10.5.0.6
         volumes:
             - ./appdata:/opt/bridgelink/appdata
-        secrets:
-        - source: blserver_vmoptions
         environment:
             - MP_DATABASE=postgres
             - MP_DATABASE_URL=jdbc:postgresql://10.5.0.5:5432/bridgelinkdb
@@ -37,11 +35,6 @@ services:
             - POSTGRES_PASSWORD=bridgelinktest
             - POSTGRES_USER=bridgelinktest
             - POSTGRES_DB=bridgelinkdb
-secrets:
-    mirth_properties:
-        file: appdata/secret.properties
-    blserver_vmoptions:
-        file: appdata/custom_blserver.vmoptions
 networks:
     bridgelink:
         driver: bridge
