@@ -1,0 +1,400 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "bridgelink": {
+      "additionalProperties": false,
+      "description": "BridgeLink Helm chart configuration @section Global Settings",
+      "properties": {
+        "affinity": {
+          "additionalProperties": false,
+          "default": "`{}`",
+          "description": "Affinity for pod assignment",
+          "required": [],
+          "title": "affinity"
+        },
+        "environment": {
+          "additionalProperties": false,
+          "default": "See below",
+          "description": "Environment variables for BridgeLink configuration",
+          "properties": {
+            "MP_CONFIGURATIONMAP_LOCATION": {
+              "default": "database",
+              "description": "Configuration map storage location",
+              "required": [],
+              "title": "MP_CONFIGURATIONMAP_LOCATION"
+            },
+            "MP_DATABASE": {
+              "default": "postgres",
+              "description": "Database type to use (postgres, mysql, oracle, sqlserver)",
+              "required": [],
+              "title": "MP_DATABASE"
+            },
+            "MP_DATABASE_PASSWORD": {
+              "default": "bridgelinktest",
+              "description": "Database password for authentication",
+              "required": [],
+              "title": "MP_DATABASE_PASSWORD"
+            },
+            "MP_DATABASE_URL": {
+              "default": "jdbc:postgresql://bridgelink-postgres:5432/bridgelinkdb",
+              "description": "JDBC URL for database connection",
+              "required": [],
+              "title": "MP_DATABASE_URL"
+            },
+            "MP_DATABASE_USERNAME": {
+              "default": "bridgelinktest",
+              "description": "Database username for authentication",
+              "required": [],
+              "title": "MP_DATABASE_USERNAME"
+            },
+            "MP_KEYSTORE_KEYPASS": {
+              "default": "bridgelinkKeystore",
+              "description": "Keystore key password for TLS",
+              "required": [],
+              "title": "MP_KEYSTORE_KEYPASS"
+            },
+            "MP_KEYSTORE_STOREPASS": {
+              "default": "bridgelinkKeypass",
+              "description": "Keystore store password for TLS",
+              "required": [],
+              "title": "MP_KEYSTORE_STOREPASS"
+            },
+            "SERVER_ID": {
+              "default": "7d760af2-680a-4a19-b9a2-c4685df61ebc",
+              "description": "Unique server identifier",
+              "required": [],
+              "title": "SERVER_ID"
+            }
+          },
+          "required": [],
+          "title": "environment"
+        },
+        "image": {
+          "additionalProperties": false,
+          "properties": {
+            "pullPolicy": {
+              "default": "`IfNotPresent`",
+              "description": "Image pull policy",
+              "required": [],
+              "title": "pullPolicy"
+            },
+            "repository": {
+              "default": "`innovarhealthcare/bridgelink`",
+              "description": "BridgeLink container image repository",
+              "required": [],
+              "title": "repository"
+            },
+            "tag": {
+              "default": "Chart appVersion",
+              "description": "BridgeLink container image tag",
+              "required": [],
+              "title": "tag"
+            }
+          },
+          "required": [],
+          "title": "image",
+          "type": "object"
+        },
+        "nodeSelector": {
+          "additionalProperties": false,
+          "default": "`{}`",
+          "description": "Node labels for pod assignment",
+          "required": [],
+          "title": "nodeSelector"
+        },
+        "replicaCount": {
+          "default": "1",
+          "description": "Number of BridgeLink pods to run",
+          "required": [],
+          "title": "replicaCount"
+        },
+        "resources": {
+          "additionalProperties": false,
+          "default": "See below",
+          "description": "Resource limits and requests for the BridgeLink container",
+          "properties": {
+            "limits": {
+              "additionalProperties": false,
+              "properties": {
+                "cpu": {
+                  "default": "2000m",
+                  "description": "CPU limit for BridgeLink container",
+                  "required": [],
+                  "title": "cpu"
+                },
+                "memory": {
+                  "default": "2Gi",
+                  "description": "Memory limit for BridgeLink container",
+                  "required": [],
+                  "title": "memory"
+                }
+              },
+              "required": [],
+              "title": "limits",
+              "type": "object"
+            },
+            "requests": {
+              "additionalProperties": false,
+              "properties": {
+                "cpu": {
+                  "default": "500m",
+                  "description": "CPU request for BridgeLink container",
+                  "required": [],
+                  "title": "cpu"
+                },
+                "memory": {
+                  "default": "1Gi",
+                  "description": "Memory request for BridgeLink container",
+                  "required": [],
+                  "title": "memory"
+                }
+              },
+              "required": [],
+              "title": "requests",
+              "type": "object"
+            }
+          },
+          "required": [
+            "requests",
+            "limits"
+          ],
+          "title": "resources"
+        },
+        "service": {
+          "additionalProperties": false,
+          "properties": {
+            "ports": {
+              "additionalProperties": false,
+              "properties": {
+                "http": {
+                  "default": "8080",
+                  "description": "HTTP port for BridgeLink web interface",
+                  "required": [],
+                  "title": "http"
+                },
+                "https": {
+                  "default": "8443",
+                  "description": "HTTPS port for BridgeLink secure web interface",
+                  "required": [],
+                  "title": "https"
+                }
+              },
+              "required": [],
+              "title": "ports",
+              "type": "object"
+            },
+            "type": {
+              "default": "`LoadBalancer`",
+              "description": "Kubernetes Service type",
+              "required": [],
+              "title": "type"
+            }
+          },
+          "required": [
+            "ports"
+          ],
+          "title": "service",
+          "type": "object"
+        },
+        "tolerations": {
+          "default": "`[]`",
+          "description": "Tolerations for pod assignment",
+          "items": {
+            "required": []
+          },
+          "required": [],
+          "title": "tolerations"
+        }
+      },
+      "required": [
+        "image",
+        "service"
+      ],
+      "title": "bridgelink"
+    },
+    "fullnameOverride": {
+      "default": "",
+      "description": "Provide a name to substitute for the full names of resources",
+      "required": [],
+      "title": "fullnameOverride"
+    },
+    "global": {
+      "description": "Global values are values that can be accessed from any chart or subchart by exactly the same name.",
+      "required": [],
+      "title": "global",
+      "type": "object"
+    },
+    "nameOverride": {
+      "default": "",
+      "description": "Override the name of the chart",
+      "required": [],
+      "title": "nameOverride"
+    },
+    "postgres": {
+      "additionalProperties": false,
+      "properties": {
+        "credentials": {
+          "additionalProperties": false,
+          "description": "PostgreSQL database credentials",
+          "properties": {
+            "database": {
+              "default": "bridgelinkdb",
+              "description": "PostgreSQL database name",
+              "required": [],
+              "title": "database"
+            },
+            "password": {
+              "default": "bridgelinktest",
+              "description": "PostgreSQL password",
+              "required": [],
+              "title": "password"
+            },
+            "username": {
+              "default": "bridgelinktest",
+              "description": "PostgreSQL username",
+              "required": [],
+              "title": "username"
+            }
+          },
+          "required": [],
+          "title": "credentials"
+        },
+        "enabled": {
+          "default": "true",
+          "description": "Enable bundled PostgreSQL deployment Set to false to use external database",
+          "required": [],
+          "title": "enabled"
+        },
+        "image": {
+          "additionalProperties": false,
+          "properties": {
+            "pullPolicy": {
+              "default": "IfNotPresent",
+              "description": "PostgreSQL image pull policy",
+              "required": [],
+              "title": "pullPolicy"
+            },
+            "repository": {
+              "default": "postgres",
+              "description": "PostgreSQL container image repository",
+              "required": [],
+              "title": "repository"
+            },
+            "tag": {
+              "default": "14-alpine",
+              "description": "PostgreSQL container image tag",
+              "required": [],
+              "title": "tag"
+            }
+          },
+          "required": [],
+          "title": "image",
+          "type": "object"
+        },
+        "persistence": {
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "default": "true",
+              "description": "Enable persistent storage for PostgreSQL data",
+              "required": [],
+              "title": "enabled"
+            },
+            "size": {
+              "default": "10Gi",
+              "description": "Size of the persistent volume claim",
+              "required": [],
+              "title": "size"
+            },
+            "storageClass": {
+              "default": "\"\" (use default storage class)",
+              "description": "Storage class for PostgreSQL PVC",
+              "required": [],
+              "title": "storageClass"
+            }
+          },
+          "required": [],
+          "title": "persistence",
+          "type": "object"
+        },
+        "resources": {
+          "additionalProperties": false,
+          "description": "Resource limits and requests for PostgreSQL container",
+          "properties": {
+            "limits": {
+              "additionalProperties": false,
+              "properties": {
+                "cpu": {
+                  "default": "1000m",
+                  "description": "CPU limit for PostgreSQL container",
+                  "required": [],
+                  "title": "cpu"
+                },
+                "memory": {
+                  "default": "1Gi",
+                  "description": "Memory limit for PostgreSQL container",
+                  "required": [],
+                  "title": "memory"
+                }
+              },
+              "required": [],
+              "title": "limits",
+              "type": "object"
+            },
+            "requests": {
+              "additionalProperties": false,
+              "properties": {
+                "cpu": {
+                  "default": "200m",
+                  "description": "CPU request for PostgreSQL container",
+                  "required": [],
+                  "title": "cpu"
+                },
+                "memory": {
+                  "default": "256Mi",
+                  "description": "Memory request for PostgreSQL container",
+                  "required": [],
+                  "title": "memory"
+                }
+              },
+              "required": [],
+              "title": "requests",
+              "type": "object"
+            }
+          },
+          "required": [
+            "requests",
+            "limits"
+          ],
+          "title": "resources"
+        },
+        "service": {
+          "additionalProperties": false,
+          "properties": {
+            "port": {
+              "default": "5432",
+              "description": "PostgreSQL service port number",
+              "required": [],
+              "title": "port"
+            }
+          },
+          "required": [],
+          "title": "service",
+          "type": "object"
+        }
+      },
+      "required": [
+        "image",
+        "service",
+        "persistence"
+      ],
+      "title": "postgres",
+      "type": "object"
+    }
+  },
+  "required": [
+    "postgres"
+  ],
+  "type": "object"
+}

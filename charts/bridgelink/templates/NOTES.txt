@@ -1,0 +1,37 @@
+Thank you for installing {{ .Chart.Name }}.
+
+Your release is named {{ .Release.Name }}.
+
+To get the application URL, run these commands:
+
+{{- if eq .Values.bridgelink.service.type "LoadBalancer" }}
+  NOTE: It may take a few minutes for the LoadBalancer IP to be available.
+        Watch the status with: 'kubectl get svc --namespace {{ .Release.Namespace }} -w {{ include "bridgelink.fullname" . }}-bl'
+
+  export SERVICE_IP=$(kubectl get svc --namespace {{ .Release.Namespace }} {{ include "bridgelink.fullname" . }}-bl -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+  echo "BridgeLink URLs:"
+  echo "- HTTP:  http://$SERVICE_IP:{{ .Values.bridgelink.service.ports.http }}"
+  echo "- HTTPS: https://$SERVICE_IP:{{ .Values.bridgelink.service.ports.https }}"
+
+{{- else if eq .Values.bridgelink.service.type "ClusterIP" }}
+  To access BridgeLink from within the cluster:
+  echo "BridgeLink URLs:"
+  echo "- HTTP:  http://{{ include "bridgelink.fullname" . }}-bl.{{ .Release.Namespace }}.svc:{{ .Values.bridgelink.service.ports.http }}"
+  echo "- HTTPS: https://{{ include "bridgelink.fullname" . }}-bl.{{ .Release.Namespace }}.svc:{{ .Values.bridgelink.service.ports.https }}"
+
+  To access from outside the cluster, run these commands in a shell:
+  kubectl port-forward --namespace {{ .Release.Namespace }} svc/{{ include "bridgelink.fullname" . }}-bl {{ .Values.bridgelink.service.ports.http }}:{{ .Values.bridgelink.service.ports.http }} &
+  kubectl port-forward --namespace {{ .Release.Namespace }} svc/{{ include "bridgelink.fullname" . }}-bl {{ .Values.bridgelink.service.ports.https }}:{{ .Values.bridgelink.service.ports.https }} &
+
+  Then access:
+  - HTTP:  http://127.0.0.1:{{ .Values.bridgelink.service.ports.http }}
+  - HTTPS: https://127.0.0.1:{{ .Values.bridgelink.service.ports.https }}
+{{- end }}
+
+Database connection:
+  Host: {{ include "bridgelink.fullname" . }}-postgres.{{ .Release.Namespace }}.svc:5432
+  Database: {{ .Values.postgres.credentials.database }}
+  Username: {{ .Values.postgres.credentials.username }}
+
+For more information and configuration options, please visit:
+{{ .Chart.Home }}

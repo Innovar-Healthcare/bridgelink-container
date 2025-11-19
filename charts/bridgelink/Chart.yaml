@@ -1,0 +1,16 @@
+apiVersion: v2
+name: bridgelink
+description: A Helm chart for BridgeLink deployment
+type: application
+version: 0.1.0
+appVersion: "4.5.4"
+icon: https://avatars.githubusercontent.com/u/116584698
+maintainers:
+  - name: InnovaCare Healthcare
+keywords:
+  - bridgelink
+  - healthcare
+  - integration
+home: https://github.com/Innovar-Healthcare/bridgelink-container
+sources:
+  - https://github.com/Innovar-Healthcare/bridgelink-container

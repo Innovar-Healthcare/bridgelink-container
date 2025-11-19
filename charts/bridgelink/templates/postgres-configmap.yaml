@@ -1,0 +1,30 @@
+{{- if .Values.postgres.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "bridgelink.fullname" . }}-postgres-config
+  labels:
+    {{- include "bridgelink.labels" . | nindent 4 }}
+data:
+  postgresql.conf: |
+    listen_addresses = '*'
+    max_connections = 100
+    shared_buffers = 128MB
+    dynamic_shared_memory_type = posix
+    max_wal_size = 1GB
+    min_wal_size = 80MB
+    log_timezone = 'UTC'
+    datestyle = 'iso, mdy'
+    timezone = 'UTC'
+    lc_messages = 'en_US.utf8'
+    lc_monetary = 'en_US.utf8'
+    lc_numeric = 'en_US.utf8'
+    lc_time = 'en_US.utf8'
+    default_text_search_config = 'pg_catalog.english'
+
+  pg_hba.conf: |
+    local   all             all                                     trust
+    host    all             all             127.0.0.1/32           trust
+    host    all             all             ::1/128                 trust
+    host    all             all             0.0.0.0/0              trust
+{{- end }}

@@ -1,0 +1,125 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "bridgelink.fullname" . }}-bl
+  labels:
+    {{- include "bridgelink.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.bridgelink.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "bridgelink.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "bridgelink.selectorLabels" . | nindent 8 }}
+      {{- with .Values.bridgelink.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+      initContainers:
+        - name: init-appdata
+          image: busybox
+          command: ["/bin/sh"]
+          args:
+            - -xec
+            - |
+              echo "Setting up workspace..."
+              cd /
+              rm -rf /appdata/*
+              mkdir -p /appdata/temp
+              cd /appdata
+              
+              echo "Creating config files..."
+              echo "$SERVER_ID" > server.id
+              cat server.id
+              
+              echo "Copying configuration..."
+              if [ -d "/tmp/appdata" ]; then
+                cd /tmp/appdata
+                for f in *; do
+                  if [ "$f" != "server.id" ]; then
+                    cp -Lrv "$f" "/appdata/$f"
+                  fi
+                done
+              fi
+              
+              chmod -R 755 /appdata
+              chown -R 1000:1000 /appdata
+          env:
+            - name: SERVER_ID
+              value: {{ .Values.bridgelink.environment.SERVER_ID | quote }}
+          volumeMounts:
+            - name: appdata-config
+              mountPath: /tmp/appdata
+            - name: appdata
+              mountPath: /appdata
+          securityContext:
+            runAsUser: 0
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.bridgelink.image.repository }}:{{ .Values.bridgelink.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.bridgelink.image.pullPolicy }}
+          ports:
+            - name: https
+              containerPort: 8443
+              protocol: TCP
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          volumeMounts:
+            - name: appdata
+              mountPath: /opt/bridgelink/appdata
+            - name: blserver-vmoptions
+              mountPath: /opt/bridgelink/secrets/vmoptions
+              subPath: blserver-vmoptions
+          env:
+            - name: MP_DATABASE_URL
+              value: jdbc:postgresql://{{ include "bridgelink.fullname" . }}-postgres:5432/{{ .Values.postgres.credentials.database }}
+            - name: MP_DATABASE_USERNAME
+              value: {{ .Values.postgres.credentials.username | quote }}
+            - name: MP_DATABASE_PASSWORD
+              value: {{ .Values.postgres.credentials.password | quote }}
+            {{- range $key, $value := .Values.bridgelink.environment }}
+            {{- if not (or (eq $key "MP_DATABASE_URL") (eq $key "MP_DATABASE_USERNAME") (eq $key "MP_DATABASE_PASSWORD")) }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+            {{- end }}
+            - name: CUSTOM_VMOPTIONS_PATH
+              value: /opt/bridgelink/secrets/vmoptions
+          resources:
+            {{- toYaml .Values.bridgelink.resources | nindent 12 }}
+          {{- if .Values.bridgelink.livenessProbe }}
+          livenessProbe:
+            {{- toYaml .Values.bridgelink.livenessProbe | nindent 12 }}
+          {{- end }}
+          {{- if .Values.bridgelink.readinessProbe }}
+          readinessProbe:
+            {{- toYaml .Values.bridgelink.readinessProbe | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: appdata-config
+          configMap:
+            name: {{ include "bridgelink.fullname" . }}-config
+        - name: appdata
+          emptyDir: {}
+        - name: blserver-vmoptions
+          secret:
+            secretName: {{ include "bridgelink.fullname" . }}-vmoptions
+      {{- with .Values.bridgelink.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.bridgelink.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.bridgelink.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

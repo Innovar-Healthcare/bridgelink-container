@@ -1,0 +1,108 @@
+# -- Override the name of the chart
+nameOverride: ""
+# -- Provide a name to substitute for the full names of resources
+fullnameOverride: ""
+
+# @section BridgeLink Settings
+bridgelink:
+  # -- Number of BridgeLink replicas to deploy
+  replicaCount: 1
+
+  image:
+    # -- BridgeLink container image repository
+    repository: innovarhealthcare/bridgelink
+    # -- BridgeLink container image tag
+    tag: 4.5.4
+    # -- Image pull policy
+    pullPolicy: IfNotPresent
+  
+  service:
+    # -- Service type for BridgeLink (LoadBalancer, ClusterIP, NodePort)
+    type: LoadBalancer
+    ports:
+      # -- HTTP port for web interface
+      http: 8080
+      # -- HTTPS port for secure web interface
+      https: 8443
+
+  resources:
+    requests:
+      # -- CPU request for BridgeLink pods
+      cpu: 500m
+      # -- Memory request for BridgeLink pods
+      memory: 1Gi
+    limits:
+      # -- CPU limit for BridgeLink pods
+      cpu: 2000m
+      # -- Memory limit for BridgeLink pods
+      memory: 2Gi
+
+  # -- Node selector for BridgeLink pods
+  nodeSelector: {}
+  # -- Pod tolerations for BridgeLink
+  tolerations: []
+  # -- Pod affinity for BridgeLink
+  affinity: {}
+
+  environment:
+    # -- Database type (postgres, mysql, oracle, sqlserver)
+    MP_DATABASE: "postgres"
+    # -- Database connection URL
+    MP_DATABASE_URL: "jdbc:postgresql://{{ include \"bridgelink.fullname\" . }}-postgres:5432/{{ .Values.postgres.credentials.database }}"
+    # -- Database username
+    MP_DATABASE_USERNAME: "{{ .Values.postgres.credentials.username }}"
+    # -- Database password
+    MP_DATABASE_PASSWORD: "{{ .Values.postgres.credentials.password }}"
+    # -- Unique server identifier
+    SERVER_ID: 7d760af2-680a-4a19-b9a2-c4685df61ebc
+    # -- Keystore key password
+    MP_KEYSTORE_KEYPASS: bridgelinkKeystore
+    # -- Keystore store password
+    MP_KEYSTORE_STOREPASS: bridgelinkKeypass
+    # -- Configuration map location
+    MP_CONFIGURATIONMAP_LOCATION: database
+
+# @section PostgreSQL Settings
+postgres:
+  # -- Enable PostgreSQL deployment (set to false to use external database)
+  enabled: true
+
+  image:
+    # -- PostgreSQL image repository
+    repository: postgres
+    # -- PostgreSQL image tag
+    tag: 14-alpine
+    # -- PostgreSQL image pull policy
+    pullPolicy: IfNotPresent
+  
+  service:
+    # -- PostgreSQL port number
+    port: 5432
+
+  persistence:
+    # -- Enable PostgreSQL persistence
+    enabled: true
+    # -- PostgreSQL storage size
+    size: 10Gi
+    # -- Storage class for PostgreSQL (empty uses cluster default)
+    storageClass: ""
+
+  credentials:
+    # -- PostgreSQL username
+    username: bridgelinktest
+    # -- PostgreSQL password
+    password: bridgelinktest
+    # -- PostgreSQL database name
+    database: bridgelinkdb
+
+  resources:
+    requests:
+      # -- PostgreSQL CPU request
+      cpu: 200m
+      # -- PostgreSQL memory request
+      memory: 256Mi
+    limits:
+      # -- PostgreSQL CPU limit
+      cpu: 1000m
+      # -- PostgreSQL memory limit
+      memory: 1Gi
