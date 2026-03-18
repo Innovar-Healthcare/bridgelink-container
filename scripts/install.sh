@@ -1,27 +1,34 @@
 #!/bin/bash
 
-# URL of the .tar.gz file
-URL="https://innovar-oss-mirth-mirror.s3.us-east-2.amazonaws.com/mirth-arch/BridgeLink-4.6.1/BridgeLink_unix_4_6_1.tar.gz"
+# BINARY_URL must be provided at build time via --build-arg
+# Supports both s3:// (uses aws s3 cp) and https:// (uses curl)
+if [ -z "$BINARY_URL" ]; then
+  echo "ERROR: BINARY_URL build arg is not set" | tee -a "$LOG_FILE"
+  exit 1
+fi
 
 # Destination folder path
 DESTINATION_FOLDER="/opt"
 
 # Name of the downloaded file
-FILE_NAME="BridgeLink_unix_4_6_1.tar.gz"
+FILE_NAME="BridgeLink_unix_26_3_0.tar.gz"
 
 # Log file for debugging
 LOG_FILE="/opt/scripts/download_and_extract.log"
 
 # Start logging
 echo "Starting download and extract script" | tee -a "$LOG_FILE"
-echo "URL: $URL" | tee -a "$LOG_FILE"
 echo "Destination: $DESTINATION_FOLDER" | tee -a "$LOG_FILE"
 
-# Download the file with a timeout
-echo "Downloading file..." | tee -a "$LOG_FILE"
-curl -L --max-time 10000 -o "$FILE_NAME" "$URL" 2>&1 | tee -a "$LOG_FILE"
+# Download the binary
+echo "Downloading binary..." | tee -a "$LOG_FILE"
+if [[ "$BINARY_URL" == s3://* ]]; then
+  aws s3 cp "$BINARY_URL" "$FILE_NAME" 2>&1 | tee -a "$LOG_FILE"
+else
+  curl -L --max-time 10000 -o "$FILE_NAME" "$BINARY_URL" 2>&1 | tee -a "$LOG_FILE"
+fi
 if [ $? -ne 0 ]; then
-  echo "Download failed or timed out" | tee -a "$LOG_FILE"
+  echo "Download failed" | tee -a "$LOG_FILE"
   exit 1
 fi
 
