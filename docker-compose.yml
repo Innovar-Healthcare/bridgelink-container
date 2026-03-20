@@ -8,8 +8,6 @@ services:
       - "8443:8443"
     volumes:
       - ./appdata:/opt/bridgelink/appdata
-    # secrets:
-    #   - blserver_vmoptions
     environment:
       MP_DATABASE: postgres
       MP_DATABASE_URL: jdbc:postgresql://postgres:5432/bridgelinkdb
@@ -23,7 +21,7 @@ services:
       - postgres
 
   postgres:
-    image: postgres:14-alpine
+    image: postgres:16-alpine
     ports:
       - 5432:5432
     environment:
@@ -31,6 +29,3 @@ services:
       POSTGRES_USER: bridgelinktest
       POSTGRES_DB: bridgelinkdb
 
-# secrets:
-#   blserver_vmoptions:
-#     file: appdata/custom_blserver.vmoptions

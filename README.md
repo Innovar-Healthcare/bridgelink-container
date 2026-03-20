@@ -24,7 +24,8 @@
 
 ##### Rockylinux9 OpenJDK 17
 
-* [4.6.1, latest](https://github.com/Innovar-Healthcare/bridgelink-container/blob/bl_4.6.1/)
+* [26.3.0, latest](https://github.com/Innovar-Healthcare/bridgelink-container/blob/bl_26.3.0/)
+* [4.6.1](https://github.com/Innovar-Healthcare/bridgelink-container/blob/bl_4.6.1/Dockerfile)
 * [4.6.0](https://github.com/Innovar-Healthcare/bridgelink-container/blob/bl_4.6.0/Dockerfile)
 * [4.5.4](https://github.com/Innovar-Healthcare/bridgelink-container/blob/bl_4.5.4/Dockerfile)
 * [4.5.3](https://github.com/Innovar-Healthcare/bridgelink-container/blob/bl_4.5.3/Dockerfile)
@@ -34,7 +35,7 @@
 <a name="supported-architectures"></a>
 # Supported Architectures [↑](#top)
 
-Docker images for BridgeLink 4.6.1 and later versions support both `linux/amd64` and `linux/arm64` architectures. 
+Docker images for BridgeLink 26.3.0 and later versions support both `linux/amd64` and `linux/arm64` architectures.
 ```
 docker pull --platform linux/arm64 innovarhealthcare/bridgelink:latest
 ```
@@ -90,13 +91,13 @@ docker run --name mybridgelink -d -p 8443:8443 innovarhealthcare/bridgelink
 To run a specific version of Connect, specify a tag at the end:
 
 ```bash
-docker run --name mybridgelink -d -p 8443:8443 innovarhealthcare/bridgelink:4.6.1
+docker run --name mybridgelink -d -p 8443:8443 innovarhealthcare/bridgelink:26.3.0
 ```
 
 To run using a specific architecture, specify it using the `--platform` argument:
 
 ```bash
-docker run --name mybridgelink -d -p 8443:8443 --platform linux/arm64 innovarhealthcare/bridgelink:4.6.1
+docker run --name mybridgelink -d -p 8443:8443 --platform linux/arm64 innovarhealthcare/bridgelink:26.3.0
 ```
 
 Look at the [Environment Variables](#environment-variables) section for more available configuration options.
@@ -118,7 +119,7 @@ Here's an example `stack.yml` file you can use:
 version: "3.1"
 services:
   mc:
-    image: innovarhealthcare/bridgelink:4.6.1
+    image: innovarhealthcare/bridgelink:26.3.0
     platform: linux/amd64
     environment:
         - MP_DATABASE=postgres
