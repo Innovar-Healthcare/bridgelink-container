@@ -19,7 +19,7 @@ ENV PATH=$JAVA_HOME/bin:$PATH
 
 # Install AWS CLI (multi-arch: detects amd64/arm64)
 RUN ARCH=$(uname -m) && \
-    curl "https://awscli.amazonaws.com/awscli-exe-linux-${ARCH}.zip" -o "awscliv2.zip" && \
+    curl --retry 5 --retry-delay 5 "https://awscli.amazonaws.com/awscli-exe-linux-${ARCH}.zip" -o "awscliv2.zip" && \
     unzip awscliv2.zip && \
     /aws/install && \
     rm -rf aws*

@@ -20,17 +20,24 @@ LOG_FILE="/opt/scripts/download_and_extract.log"
 echo "Starting download and extract script" | tee -a "$LOG_FILE"
 echo "Destination: $DESTINATION_FOLDER" | tee -a "$LOG_FILE"
 
-# Download the binary
+# Download the binary with retry
 echo "Downloading binary..." | tee -a "$LOG_FILE"
-if [[ "$BINARY_URL" == s3://* ]]; then
-  aws s3 cp "$BINARY_URL" "$FILE_NAME" 2>&1 | tee -a "$LOG_FILE"
-else
-  curl -L --max-time 10000 -o "$FILE_NAME" "$BINARY_URL" 2>&1 | tee -a "$LOG_FILE"
-fi
-if [ $? -ne 0 ]; then
-  echo "Download failed" | tee -a "$LOG_FILE"
-  exit 1
-fi
+MAX_RETRIES=5
+RETRY_DELAY=10
+for i in $(seq 1 $MAX_RETRIES); do
+  if [[ "$BINARY_URL" == s3://* ]]; then
+    aws s3 cp "$BINARY_URL" "$FILE_NAME" 2>&1 | tee -a "$LOG_FILE"
+  else
+    curl -L --max-time 10000 -o "$FILE_NAME" "$BINARY_URL" 2>&1 | tee -a "$LOG_FILE"
+  fi
+  [ $? -eq 0 ] && break
+  echo "Download attempt $i failed, retrying in ${RETRY_DELAY}s..." | tee -a "$LOG_FILE"
+  sleep $RETRY_DELAY
+  if [ $i -eq $MAX_RETRIES ]; then
+    echo "Download failed after $MAX_RETRIES attempts" | tee -a "$LOG_FILE"
+    exit 1
+  fi
+done
 
 # Create the destination folder if it doesn't exist
 echo "Creating destination folder..." | tee -a "$LOG_FILE"
