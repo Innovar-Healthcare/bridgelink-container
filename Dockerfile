@@ -17,14 +17,19 @@ RUN yum -y install java-17-openjdk java-17-openjdk-devel
 ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk
 ENV PATH=$JAVA_HOME/bin:$PATH
 
-# Install AWS CLI
-RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip" && \
+# Install AWS CLI (multi-arch: detects amd64/arm64)
+RUN ARCH=$(uname -m) && \
+    curl --retry 5 --retry-delay 5 "https://awscli.amazonaws.com/awscli-exe-linux-${ARCH}.zip" -o "awscliv2.zip" && \
     unzip awscliv2.zip && \
     /aws/install && \
     rm -rf aws*
 
 # Create the bridgelink user with UID 1000
 RUN useradd -u 1000 bridgelink
+
+# Binary download URL — passed at build time (s3:// for internal, https:// for public release)
+ARG BINARY_URL
+ENV BINARY_URL=${BINARY_URL}
 
 # Copy in the necessary scripts and ensure they are executable
 COPY scripts/install.sh /opt/scripts/install.sh
@@ -35,7 +40,9 @@ RUN chmod +x /opt/scripts/install.sh /opt/scripts/entrypoint.sh
 RUN ls -l /opt/scripts/
 
 # Run the installation script which sets up your application under /opt/bridgelink
-RUN /opt/scripts/install.sh
+# AWS credentials are injected via build secret (never baked into the image)
+RUN --mount=type=secret,id=aws_credentials,target=/root/.aws/credentials \
+    /opt/scripts/install.sh
 
 # Create required directories for persistent data and set ownership
 RUN mkdir -p /opt/bridgelink/appdata && chown bridgelink:bridgelink /opt/bridgelink/appdata && \
