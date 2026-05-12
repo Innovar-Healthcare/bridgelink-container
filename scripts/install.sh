@@ -11,7 +11,7 @@ fi
 DESTINATION_FOLDER="/opt"
 
 # Name of the downloaded file
-FILE_NAME="BridgeLink_unix_26_3_0.tar.gz"
+FILE_NAME="BridgeLink_unix_26_3_1.tar.gz"
 
 # Log file for debugging
 LOG_FILE="/opt/scripts/download_and_extract.log"
