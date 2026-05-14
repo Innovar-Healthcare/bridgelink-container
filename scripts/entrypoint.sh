@@ -130,6 +130,11 @@ for var in $(env | grep '^MP_' | sed 's/=.*//'); do
   # Replace double underscores with dashes and single underscores with dots
   property=$(echo "$var_without_prefix" | tr '[:upper:]' '[:lower:]' | sed 's/__/-/g; s/_/./g')
 
+  # Correct camelCase properties mangled by lowercasing above
+  case "$var_without_prefix" in
+    SERVER_ALLOWROOT) property="server.allowRoot" ;;
+  esac
+
 
   # Choose file to update
   if [ "$var_without_prefix" == "VMOPTIONS" ]; then
