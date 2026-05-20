@@ -12,6 +12,7 @@
     * [Common mirth.properties options](#common-mirth-properties-options)
     * [Other mirth.properties options](#other-mirth-properties-options)
   * [Using Docker Secrets](#using-docker-secrets)
+  * [Security Options](#security-options)
   * [Using Volumes](#using-volumes)
     * [The appdata folder](#the-appdata-folder)
     * [Additional extensions](#additional-extensions)
@@ -363,6 +364,27 @@ secrets:
 The **secrets** section at the bottom specifies the local file location for each secret.  Change `/local/path/to/secret.properties` to the correct local path and filename.
 
 Inside the configuration for the BridgeLink container there is also a **secrets** section that lists the secrets you want to include for that container.
+
+------------
+
+<a name="security-options"></a>
+## Security Options [↑](#top)
+
+### `no-new-privileges`
+
+The `no-new-privileges` flag prevents the container process and any child processes from gaining additional Linux privileges after startup — for example, via `setuid` or `setgid` binaries. This is a defense-in-depth measure: if the application is compromised, an attacker cannot escalate privileges inside the container.
+
+To enable it, add a `security_opt` block to your docker-compose service:
+
+```yaml
+services:
+  bl:
+    image: innovarhealthcare/bridgelink:26.3.1
+    security_opt:
+      - no-new-privileges:true
+```
+
+> **Note:** This option is recommended for production deployments. Verify that all extensions and startup scripts function correctly with this flag enabled before rolling it out, as some tooling that requires privilege escalation during initialization may be affected.
 
 ------------
 
