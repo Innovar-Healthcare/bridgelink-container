@@ -97,6 +97,13 @@ Key differences from the Rocky image:
 | Shell / package manager | present | **none** (runtime) |
 | Image tag suffix | *(none)* | `-dhi` |
 
+**Published tags.** The hardened image lives in the **same** `innovarhealthcare/bridgelink`
+repository — it's just additional tags: `26.3.1-dhi` (version-pinned) and `latest-dhi` (rolling),
+sitting alongside the Rocky tags (`26.3.1`, `latest`). You choose the base by tag —
+`…/bridgelink:26.3.1` for Rocky, `…/bridgelink:26.3.1-dhi` for hardened. Both are multi-arch
+(amd64 + arm64). The two images are the same BridgeLink release and behave identically; only the
+base OS/runtime and the non-root UID differ.
+
 **Build** (the DHI base is pulled from the free Community registry — run `docker login dhi.io` first).
 `BINARY_URL` points at a BridgeLink release tarball:
 
@@ -115,10 +122,16 @@ public `https://` URL:
   --secret id=aws_credentials,src=$HOME/.aws/credentials
 ```
 
-**Run** — same as the Rocky image, but use the `-dhi` tag and UID `65532`. Any mounted `appdata` /
-`custom-extensions` directory must be owned by `65532` so the container can write to it:
+**Run.** The hardened image runs like the Rocky one; you just select it by tag and run as UID
+`65532`. Any mounted `appdata` / `custom-extensions` directory must be owned by `65532` so the
+container can write to it. A ready-to-use compose file, `docker-compose.dhi.yml`, is the DHI
+counterpart of `docker-compose.yml` — pick which one by the `-f` you pass:
 
 ```
+# Rocky image (default) — uses docker-compose.yml
+docker compose up
+
+# Hardened (DHI) image — uses docker-compose.dhi.yml
 chown -R 65532:65532 ./appdata
 docker compose -f docker-compose.dhi.yml up
 ```
