@@ -56,6 +56,11 @@ on:
 permissions:
   contents: read
 
+# Cancel a superseded run for the same ref (e.g. rapid PR pushes) and avoid overlapping publishes.
+concurrency:
+  group: build-images-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # Resolve inputs vs. scheduled-run defaults once, share with downstream jobs.
   params:
@@ -88,6 +93,13 @@ jobs:
           registry: dhi.io
           username: ${{ secrets.DHI_USERNAME }}
           password: ${{ secrets.DHI_TOKEN }}
+      # Authenticate Docker Hub pulls so the suite's nginx/postgres/mysql pulls don't hit the
+      # anonymous pull-rate limit on shared runner IPs.
+      - name: Log in to Docker Hub (authenticated pulls)
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
       # Build a local (native-arch) test image — not pushed.
       - name: Build DHI test image
         uses: docker/build-push-action@v6
@@ -99,8 +111,11 @@ jobs:
           tags: innovarhealthcare/bridgelink:dhi-test
           build-args: |
             BINARY_URL=${{ needs.params.outputs.binary_url }}
+          # Only pass AWS creds on trusted (non-PR) events — needed for s3:// tarballs. On
+          # pull_request the build uses the public-https default, so pass empty to avoid exposing
+          # the secret to PR-branch code.
           secrets: |
-            aws_credentials=${{ secrets.AWS_CREDENTIALS }}
+            aws_credentials=${{ github.event_name != 'pull_request' && secrets.AWS_CREDENTIALS || '' }}
       - name: Run acceptance tests
         run: IMAGE=innovarhealthcare/bridgelink:dhi-test SKIP_BUILD=1 bash test/dhi-test.sh
 
