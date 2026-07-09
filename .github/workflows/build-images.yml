@@ -36,6 +36,18 @@ on:
   # benefit. Uses the DEFAULT_VERSION / DEFAULT_BINARY_URL repo variables.
   schedule:
     - cron: "0 6 * * 1"   # Mondays 06:00 UTC
+  # PR gate: run the DHI acceptance suite (test-dhi) when the image-relevant files change. The
+  # publish job is skipped on pull_request (see its `if:`), so this never pushes. Uses the
+  # DEFAULT_VERSION / DEFAULT_BINARY_URL repo variables. Secrets are available because PRs come
+  # from branches in this repo (not forks).
+  pull_request:
+    branches: [main]
+    paths:
+      - "Dockerfile.dhi"
+      - "bootstrap/**"
+      - "scripts/install.sh"
+      - "test/dhi-test.sh"
+      - ".github/workflows/build-images.yml"
 
 permissions:
   contents: read
@@ -89,8 +101,10 @@ jobs:
         run: IMAGE=innovarhealthcare/bridgelink:dhi-test SKIP_BUILD=1 bash test/dhi-test.sh
 
   # Publish both images (multi-arch). Only runs if the DHI acceptance suite passed.
+  # Never runs on pull_request — PRs only exercise the test-dhi gate above.
   build:
     needs: [params, test-dhi]
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
