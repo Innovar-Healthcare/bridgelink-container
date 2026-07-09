@@ -1,0 +1,49 @@
+BridgeLink Container
+Copyright (c) Innovar Healthcare
+
+The Dockerfiles, entrypoint script, Java bootstrap launcher, Helm chart, and all
+other build files in this repository are licensed under the Mozilla Public
+License 2.0 (see LICENSE).
+
+This product packages and redistributes third-party software, which remains
+under its own upstream license. Attribution and obligations follow.
+
+--------------------------------------------------------------------------------
+BridgeLink
+--------------------------------------------------------------------------------
+The images bundle a BridgeLink release binary (downloaded at build time via the
+BINARY_URL build argument). BridgeLink is an Innovar Healthcare product derived
+from Mirth Connect and is distributed under the Mozilla Public License 2.0.
+
+--------------------------------------------------------------------------------
+Hardened image base — Docker Hardened Images (Dockerfile.dhi only)
+--------------------------------------------------------------------------------
+The hardened image (Dockerfile.dhi) is built FROM the Amazon Corretto Debian 13
+Docker Hardened Image (DHI):
+
+    dhi.io/amazoncorretto:17-debian13       (runtime)
+    dhi.io/amazoncorretto:17-debian13-dev   (build stage)
+
+- Docker's DHI build definitions, patches, and scripts are licensed under the
+  Apache License 2.0, which permits building and redistributing derivative
+  images. See: https://github.com/docker-hardened-images/catalog
+- This Apache 2.0 grant covers Docker's DHI definitions only. The software
+  packages inside the image retain their own upstream licenses, including:
+    * Amazon Corretto (OpenJDK) — GNU General Public License v2 with the
+      Classpath Exception
+    * GNU C Library (glibc) — GNU Lesser General Public License
+    * Debian base packages — their respective upstream licenses
+- Docker publishes a per-image Software Bill of Materials (SBOM) for the exact
+  package set and versions in each DHI tag, via the catalog at
+  https://hub.docker.com/hardened-images/catalog/dhi/amazoncorretto
+
+Modifications by Innovar Healthcare: this image adds the BridgeLink runtime under
+/opt/bridgelink, a shell-free Java bootstrap launcher (bootstrap/), and runs as
+the non-root user UID 65532. It does not modify the base OS or JDK packages.
+
+--------------------------------------------------------------------------------
+The Rocky Linux image (Dockerfile) is unaffected by the above and is built FROM
+rockylinux:9 with OpenJDK 17 installed via the distribution package manager.
+
+NOTE: attribution wording should be confirmed by Innovar Healthcare legal before
+a DHI-based image is published publicly.

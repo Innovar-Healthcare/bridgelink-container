@@ -1,0 +1,171 @@
+# Build, test & publish the hardened (DHI) BridgeLink image  —  IRT-1356
+#
+# This workflow ONLY builds/publishes the hardened image (Dockerfile.dhi), tagged `<version>-dhi`
+# / `latest-dhi`. The Rocky image (Dockerfile) is published by its existing process and is left
+# completely unaffected by this pipeline.
+#
+# DRAFT — review before enabling. Create these repo secrets/variables first:
+#   Secrets:
+#     DOCKERHUB_USERNAME / DOCKERHUB_TOKEN   push target (innovarhealthcare/bridgelink)
+#     DHI_USERNAME       / DHI_TOKEN         free Docker account, to pull the DHI base from dhi.io
+#     AWS_CREDENTIALS                        contents of an ~/.aws/credentials file (only needed
+#                                            when BINARY_URL is an s3:// URL; harmless otherwise)
+#   Variables (defaults used by the scheduled rebuild):
+#     DEFAULT_VERSION      e.g. 26.3.1
+#     DEFAULT_BINARY_URL   s3:// (internal) or https:// (public) BridgeLink release tarball
+#
+# ASSUMPTIONS to confirm: GitHub Actions is the CI system; the release tarball is fetched via
+# BINARY_URL (same build-arg the Dockerfiles already use); images publish to Docker Hub.
+
+name: build-images
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "BridgeLink version tag (e.g. 26.3.1)"
+        required: true
+      binary_url:
+        description: "BINARY_URL for the release tarball (s3:// or https://)"
+        required: true
+      push:
+        description: "Push images to Docker Hub"
+        type: boolean
+        default: true
+      update_latest:
+        description: "Also move the rolling latest-dhi tag (turn off when back-publishing an old version)"
+        type: boolean
+        default: true
+  # Rebuild-on-base-update: DHI repatches frequently, so rebuild weekly to keep the near-zero-CVE
+  # benefit. Uses the DEFAULT_VERSION / DEFAULT_BINARY_URL repo variables.
+  schedule:
+    - cron: "0 6 * * 1"   # Mondays 06:00 UTC
+  # PR gate: run the DHI acceptance suite (test-dhi) when the image-relevant files change. The
+  # publish job is skipped on pull_request (see its `if:`), so this never pushes. Uses the
+  # DEFAULT_VERSION / DEFAULT_BINARY_URL repo variables. Secrets are available because PRs come
+  # from branches in this repo (not forks).
+  pull_request:
+    branches: [main]
+    paths:
+      - "Dockerfile.dhi"
+      - "bootstrap/**"
+      - "scripts/install.sh"
+      - "test/dhi-test.sh"
+      - ".github/workflows/build-images.yml"
+
+permissions:
+  contents: read
+
+# Cancel a superseded run for the same ref (e.g. rapid PR pushes) and avoid overlapping publishes.
+concurrency:
+  group: build-images-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Resolve inputs vs. scheduled-run defaults once, share with downstream jobs.
+  params:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.p.outputs.version }}
+      binary_url: ${{ steps.p.outputs.binary_url }}
+      push: ${{ steps.p.outputs.push }}
+      update_latest: ${{ steps.p.outputs.update_latest }}
+    steps:
+      - id: p
+        run: |
+          echo "version=${{ github.event.inputs.version || vars.DEFAULT_VERSION }}" >> "$GITHUB_OUTPUT"
+          echo "binary_url=${{ github.event.inputs.binary_url || vars.DEFAULT_BINARY_URL }}" >> "$GITHUB_OUTPUT"
+          # Scheduled runs always push + move latest (they track the current DEFAULT_VERSION); manual
+          # runs honor the toggles.
+          echo "push=${{ github.event_name == 'schedule' || github.event.inputs.push }}" >> "$GITHUB_OUTPUT"
+          echo "update_latest=${{ github.event_name == 'schedule' || github.event.inputs.update_latest }}" >> "$GITHUB_OUTPUT"
+
+  # Gate: build the DHI image single-arch and run the acceptance suite before anything publishes.
+  test-dhi:
+    needs: params
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to dhi.io (DHI base pull)
+        uses: docker/login-action@v3
+        with:
+          registry: dhi.io
+          username: ${{ secrets.DHI_USERNAME }}
+          password: ${{ secrets.DHI_TOKEN }}
+      # Authenticate Docker Hub pulls so the suite's nginx/postgres/mysql pulls don't hit the
+      # anonymous pull-rate limit on shared runner IPs.
+      - name: Log in to Docker Hub (authenticated pulls)
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      # Build a local (native-arch) test image — not pushed.
+      - name: Build DHI test image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.dhi
+          load: true
+          push: false
+          tags: innovarhealthcare/bridgelink:dhi-test
+          build-args: |
+            BINARY_URL=${{ needs.params.outputs.binary_url }}
+          # Only pass AWS creds on trusted (non-PR) events — needed for s3:// tarballs. On
+          # pull_request the build uses the public-https default, so pass empty to avoid exposing
+          # the secret to PR-branch code.
+          secrets: |
+            aws_credentials=${{ github.event_name != 'pull_request' && secrets.AWS_CREDENTIALS || '' }}
+      - name: Run acceptance tests
+        run: IMAGE=innovarhealthcare/bridgelink:dhi-test SKIP_BUILD=1 bash test/dhi-test.sh
+
+  # Publish the hardened (DHI) image (multi-arch). Only runs if the acceptance suite passed, and
+  # never on pull_request. The Rocky image (Dockerfile) is intentionally NOT built or pushed here —
+  # it keeps being published by its existing process, fully unaffected.
+  build:
+    needs: [params, test-dhi]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      # Push target.
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Pull the hardened base from dhi.io.
+      - name: Log in to dhi.io (DHI base pull)
+        uses: docker/login-action@v3
+        with:
+          registry: dhi.io
+          username: ${{ secrets.DHI_USERNAME }}
+          password: ${{ secrets.DHI_TOKEN }}
+
+      # Version tag always; rolling latest-dhi only when update_latest is set.
+      - name: Compute tags
+        id: tags
+        run: |
+          T="innovarhealthcare/bridgelink:${{ needs.params.outputs.version }}-dhi"
+          if [ "${{ needs.params.outputs.update_latest }}" = "true" ]; then
+            T="$T"$'\n'"innovarhealthcare/bridgelink:latest-dhi"
+          fi
+          { echo "list<<EOF"; echo "$T"; echo "EOF"; } >> "$GITHUB_OUTPUT"
+
+      - name: Build & push DHI image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.dhi
+          platforms: linux/amd64,linux/arm64
+          push: ${{ needs.params.outputs.push == 'true' }}
+          build-args: |
+            BINARY_URL=${{ needs.params.outputs.binary_url }}
+          # Mounted at /root/.aws/credentials for s3:// pulls (Dockerfile.dhi: --mount=type=secret,id=aws_credentials).
+          secrets: |
+            aws_credentials=${{ secrets.AWS_CREDENTIALS }}
+          tags: ${{ steps.tags.outputs.list }}

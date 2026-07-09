@@ -19,8 +19,8 @@ spec:
       {{- end }}
     spec:
       securityContext:
-        runAsUser: 1000
-        runAsGroup: 1000
+        runAsUser: {{ .Values.bridgelink.runAsUser }}
+        runAsGroup: {{ .Values.bridgelink.runAsGroup }}
       initContainers:
         - name: init-appdata
           image: busybox
@@ -49,7 +49,7 @@ spec:
               fi
               
               chmod -R 755 /appdata
-              chown -R 1000:1000 /appdata
+              chown -R {{ .Values.bridgelink.runAsUser }}:{{ .Values.bridgelink.runAsGroup }} /appdata
           env:
             - name: SERVER_ID
               value: {{ .Values.bridgelink.environment.SERVER_ID | quote }}

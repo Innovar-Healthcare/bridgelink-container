@@ -1,0 +1,87 @@
+# ============================================================
+# BridgeLink on Amazon Corretto Debian 13 Docker Hardened Image (DHI)  —  IRT-1356
+#
+# Additional build target ALONGSIDE the Rocky Linux image (see Dockerfile). Build stage uses the
+# Corretto DHI "-dev" variant (root + apt + shell) so we can reuse scripts/install.sh; the runtime
+# stage ships the MINIMAL HARDENED variant (no shell, no apt, no coreutils, non-root UID 65532).
+# The bash entrypoint cannot run there, so config + launch are handled by the shell-free
+# bootstrap/BridgeLinkBootstrap.java (JDK-only: java.util.zip, java.net.http, file I/O).
+#
+# Base images: Community tier (free) is pulled directly from dhi.io after `docker login dhi.io`.
+# Confirmed against the catalog: Corretto 17.x / Debian 13 runtime is nonroot UID 65532, no shell,
+# no package manager; the -dev variant is root with shell + apt. CI needs dhi.io creds as a secret.
+#   https://hub.docker.com/hardened-images/catalog/dhi/amazoncorretto
+# ============================================================
+
+ARG CORRETTO_DEV_IMAGE=dhi.io/amazoncorretto:17-debian13-dev
+ARG CORRETTO_RUNTIME_IMAGE=dhi.io/amazoncorretto:17-debian13
+
+# ============================================================
+# Stage 1: Builder  (DHI -dev variant: has shell + apt, runs as root)
+# ============================================================
+FROM ${CORRETTO_DEV_IMAGE} AS builder
+
+USER root
+
+# Build-stage tools for install.sh + the AWS CLI installer (Debian equivalents of the yum installs).
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        ca-certificates curl unzip tar gzip && \
+    rm -rf /var/lib/apt/lists/*
+
+# UTF-8 via the built-in glibc C.UTF-8 locale (Debian 13 / glibc 2.41) — no locale-gen needed, and
+# it is available in the minimal runtime image too (unlike a generated en_US.UTF-8).
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
+
+# AWS CLI for s3:// BINARY_URL pulls (multi-arch: detects amd64/arm64). Same approach as Rocky.
+RUN ARCH=$(uname -m) && \
+    curl --retry 5 --retry-delay 5 "https://awscli.amazonaws.com/awscli-exe-linux-${ARCH}.zip" -o "awscliv2.zip" && \
+    unzip awscliv2.zip && \
+    /aws/install && \
+    rm -rf aws*
+
+# Binary download URL — passed at build time (s3:// internal or https:// public release)
+ARG BINARY_URL
+ENV BINARY_URL=${BINARY_URL}
+
+# Reused, unchanged build-stage install logic (download + extract the BridgeLink release tarball).
+# AWS credentials injected via build secret (never baked into the image).
+COPY scripts/install.sh /opt/scripts/install.sh
+RUN chmod +x /opt/scripts/install.sh
+RUN --mount=type=secret,id=aws_credentials,target=/root/.aws/credentials \
+    /opt/scripts/install.sh
+
+# Compile the shell-free bootstrap launcher (single class, default package).
+COPY bootstrap/BridgeLinkBootstrap.java /opt/bridgelink/bootstrap/BridgeLinkBootstrap.java
+RUN javac -d /opt/bridgelink/bootstrap /opt/bridgelink/bootstrap/BridgeLinkBootstrap.java
+
+# Drop unused launchers/libs (matches the Rocky image).
+WORKDIR /opt/bridgelink
+RUN rm -rf mirth-cli-launcher.jar mirth-manager-launcher.jar blmanager cli-lib
+
+# Pre-create writable dirs; ownership for the DHI non-root UID (65532) is stamped once by the
+# runtime stage's COPY --chown (a chown -R here would just duplicate a ~500MB build layer).
+RUN mkdir -p appdata custom-extensions extensions custom-jars
+
+# ============================================================
+# Stage 2: Runtime  (DHI hardened variant: no shell, non-root by default)
+# ============================================================
+FROM ${CORRETTO_RUNTIME_IMAGE} AS final
+
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
+
+# Bring over the built app + compiled bootstrap, owned by the hardened non-root UID.
+COPY --from=builder --chown=65532:65532 /opt/bridgelink /opt/bridgelink
+
+WORKDIR /opt/bridgelink
+
+EXPOSE 8443
+VOLUME /opt/bridgelink/appdata
+VOLUME /opt/bridgelink/custom-extensions
+
+USER 65532
+
+# Shell-free entrypoint: the bootstrap templates config, then launches the server in-process.
+ENTRYPOINT ["java", "-cp", "/opt/bridgelink/bootstrap", "BridgeLinkBootstrap"]

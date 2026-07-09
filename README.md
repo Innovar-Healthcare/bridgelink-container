@@ -5,6 +5,7 @@
 * [Supported Architectures](#supported-architectures)
 * [Quick Reference](#quick-reference)
 * [What is BridgeLink (formerly Mirth Connect)](#what-is-connect)
+* [Hardened (DHI) image](#hardened-dhi-image)
 * [How to use this image](#how-to-use)
   * [Start a BridgeLink instance](#start-bridgelink)
   * [Using `docker stack deploy` or `docker-compose`](#using-docker-compose)
@@ -31,6 +32,10 @@
 * [4.6.0](https://github.com/Innovar-Healthcare/bridgelink-container/blob/bl_4.6.0/Dockerfile)
 * [4.5.4](https://github.com/Innovar-Healthcare/bridgelink-container/blob/bl_4.5.4/Dockerfile)
 * [4.5.3](https://github.com/Innovar-Healthcare/bridgelink-container/blob/bl_4.5.3/Dockerfile)
+
+##### Amazon Corretto Debian 13 — Docker Hardened Image (DHI)
+
+* [26.3.1-dhi](https://github.com/Innovar-Healthcare/bridgelink-container/blob/main/Dockerfile.dhi)
 
 ------------
 
@@ -69,6 +74,89 @@ docker pull --platform linux/arm64 innovarhealthcare/bridgelink:latest
 An open-source message integration engine focused on healthcare. For more information please visit our [GitHub page](https://github.com/Innovar-Healthcare/BridgeLink/tree/bridgelink_development).
 
 <img src="https://raw.githubusercontent.com/Innovar-Healthcare/BridgeLink/bridgelink_development/server/public_html/images/MirthConnect_Logo_WordMark_Big.png"/>
+
+------------
+
+<a name="hardened-dhi-image"></a>
+# Hardened (DHI) image [↑](#top)
+
+In addition to the default Rocky Linux image (`Dockerfile`), BridgeLink ships a **hardened image**
+built on the [Amazon Corretto Debian 13 Docker Hardened Image](https://hub.docker.com/hardened-images/catalog/dhi/amazoncorretto)
+(`Dockerfile.dhi`), for environments that require a minimal, near-zero-CVE base. The hardened
+runtime has **no shell, no package manager, and runs as non-root UID `65532`**. Its config/startup
+logic is handled by a small shell-free Java launcher (`bootstrap/BridgeLinkBootstrap.java`) instead
+of the bash `entrypoint.sh` — **all environment variables, Docker secrets, and volumes documented
+below work identically on both images.**
+
+Key differences from the Rocky image:
+
+| | Rocky image (`Dockerfile`) | Hardened image (`Dockerfile.dhi`) |
+|---|---|---|
+| Base | Rocky Linux 9 + OpenJDK 17 | Amazon Corretto 17 / Debian 13 DHI |
+| Non-root UID | 1000 | **65532** |
+| Shell / package manager | present | **none** (runtime) |
+| Image tag suffix | *(none)* | `-dhi` |
+
+**Published tags.** The hardened image lives in the **same** `innovarhealthcare/bridgelink`
+repository — it's just additional tags: `26.3.1-dhi` (version-pinned) and `latest-dhi` (rolling),
+sitting alongside the Rocky tags (`26.3.1`, `latest`). You choose the base by tag —
+`…/bridgelink:26.3.1` for Rocky, `…/bridgelink:26.3.1-dhi` for hardened. Both are multi-arch
+(amd64 + arm64). The two images are the same BridgeLink release and behave identically; only the
+base OS/runtime and the non-root UID differ.
+
+**Build** (the DHI base is pulled from the free Community registry — run `docker login dhi.io` first).
+`BINARY_URL` points at a BridgeLink release tarball:
+
+```
+docker build -f Dockerfile.dhi \
+  --build-arg BINARY_URL="https://.../BridgeLink_unix_26_3_1.tar.gz" \
+  -t innovarhealthcare/bridgelink:26.3.1-dhi .
+```
+
+Only if you pull the tarball from a **private `s3://`** bucket (internal Innovar builds), also pass
+AWS credentials as a build secret — the build reads it via `aws s3 cp`. It is not needed for a
+public `https://` URL:
+
+```
+  --build-arg BINARY_URL="s3://your-bucket/BridgeLink_unix_26_3_1.tar.gz" \
+  --secret id=aws_credentials,src=$HOME/.aws/credentials
+```
+
+**Run.** The hardened image runs like the Rocky one; you just select it by tag and run as UID
+`65532`. Any mounted `appdata` / `custom-extensions` directory must be owned by `65532` so the
+container can write to it. A ready-to-use compose file, `docker-compose.dhi.yml`, is the DHI
+counterpart of `docker-compose.yml` — pick which one by the `-f` you pass:
+
+```
+# Rocky image (default) — uses docker-compose.yml
+docker compose up
+
+# Hardened (DHI) image — uses docker-compose.dhi.yml
+chown -R 65532:65532 ./appdata
+docker compose -f docker-compose.dhi.yml up
+```
+
+For Kubernetes, deploy the Helm chart with `--set bridgelink.runAsUser=65532 --set bridgelink.runAsGroup=65532`.
+
+Behavior notes specific to the hardened image:
+
+* **`ALLOW_INSECURE` also applies to `KEYSTORE_DOWNLOAD`.** On the Rocky image the keystore
+  download always verifies TLS regardless of `ALLOW_INSECURE`; the hardened image applies
+  `ALLOW_INSECURE` consistently to *all* downloads (keystore, extensions, custom jars,
+  custom properties/vmoptions). All downloads verify TLS by default on both images.
+* **Graceful shutdown window.** On `docker stop` the launcher forwards the signal to the engine
+  and allows up to 30 seconds for queues/DB connections to drain — but Docker's default stop
+  timeout is 10 seconds, after which the container is killed. For queue-heavy deployments give it
+  headroom: `docker stop -t 35`, compose `stop_grace_period: 35s`, or a pod
+  `terminationGracePeriodSeconds: 35`.
+
+**Test** the hardened image (no-shell, boot, config/secret/extension injection, Postgres, graceful
+shutdown, persistence) with the acceptance suite — this is the same suite CI runs before publishing:
+
+```
+BINARY_URL="<release tarball>" test/dhi-test.sh              # builds, then tests
+IMAGE=innovarhealthcare/bridgelink:26.3.1-dhi SKIP_BUILD=1 test/dhi-test.sh   # test an existing image
+```
 
 ------------
 
@@ -453,4 +541,6 @@ Example:
 <a name="license"></a>
 # License [↑](#top)
 
-The Dockerfiles, entrypoint script, and any other files used to build these Docker images are Copyright © Innovar Healthcare and licensed under the [Mozilla Public License 2.0](https://www.mozilla.org/en-US/MPL/2.0/).
+The Dockerfiles, entrypoint script, Java bootstrap launcher, Helm chart, and any other files used to build these Docker images are Copyright © Innovar Healthcare and licensed under the [Mozilla Public License 2.0](https://www.mozilla.org/en-US/MPL/2.0/) (see [`LICENSE`](LICENSE)).
+
+The hardened image (`Dockerfile.dhi`) is built on the Amazon Corretto Debian 13 Docker Hardened Image; see [`NOTICE`](NOTICE) for third-party attribution and redistribution details (Docker's Apache-2.0 DHI definitions, and the OpenJDK/glibc/Debian package licenses inside the base).
