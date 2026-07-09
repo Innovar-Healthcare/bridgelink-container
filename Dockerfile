@@ -48,9 +48,12 @@ RUN --mount=type=secret,id=aws_credentials,target=/root/.aws/credentials \
 RUN mkdir -p /opt/bridgelink/appdata && chown bridgelink:bridgelink /opt/bridgelink/appdata && \
     mkdir -p /opt/bridgelink/custom-extensions && chown bridgelink:bridgelink /opt/bridgelink/custom-extensions
 
-# Clean up unnecessary files from the application directory
+# Clean up unnecessary files from the application directory. The CLI (blcommand) and manager
+# (blmanager) are meant to run outside the server container, so their launchers, jars, and libs
+# are all removed — leaving a launcher without its jar/libs produces a confusing
+# ClassNotFoundException at runtime (see issue #13).
 WORKDIR /opt/bridgelink
-RUN rm -r mirth-cli-launcher.jar mirth-manager-launcher.jar blmanager cli-lib
+RUN rm -r mirth-cli-launcher.jar mirth-manager-launcher.jar blmanager blcommand cli-lib
 
 # Ensure the entrypoint script is executable and that the application files have proper ownership
 RUN chmod 755 /opt/scripts/entrypoint.sh && \
