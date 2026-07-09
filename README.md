@@ -97,13 +97,22 @@ Key differences from the Rocky image:
 | Shell / package manager | present | **none** (runtime) |
 | Image tag suffix | *(none)* | `-dhi` |
 
-**Build** (the DHI base is pulled from the free Community registry — run `docker login dhi.io` first):
+**Build** (the DHI base is pulled from the free Community registry — run `docker login dhi.io` first).
+`BINARY_URL` points at a BridgeLink release tarball:
 
 ```
 docker build -f Dockerfile.dhi \
-  --build-arg BINARY_URL="<s3:// or https:// BridgeLink release tarball>" \
-  --secret id=aws_credentials,src=$HOME/.aws/credentials \
+  --build-arg BINARY_URL="https://.../BridgeLink_unix_26_3_1.tar.gz" \
   -t innovarhealthcare/bridgelink:26.3.1-dhi .
+```
+
+Only if you pull the tarball from a **private `s3://`** bucket (internal Innovar builds), also pass
+AWS credentials as a build secret — the build reads it via `aws s3 cp`. It is not needed for a
+public `https://` URL:
+
+```
+  --build-arg BINARY_URL="s3://your-bucket/BridgeLink_unix_26_3_1.tar.gz" \
+  --secret id=aws_credentials,src=$HOME/.aws/credentials
 ```
 
 **Run** — same as the Rocky image, but use the `-dhi` tag and UID `65532`. Any mounted `appdata` /
