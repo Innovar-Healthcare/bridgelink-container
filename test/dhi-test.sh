@@ -24,8 +24,11 @@ bad()  { echo "  FAIL: $1"; FAIL=$((FAIL+1)); }
 info() { echo "== $1"; }
 
 cleanup() {
-  docker rm -f "${CIDS[@]}" >/dev/null 2>&1 || true
+  # ${CIDS[@]+...}: empty-array expansion is an "unbound variable" error under set -u on bash 3.2
+  # (macOS /bin/bash), which would abort cleanup entirely.
+  docker rm -f ${CIDS[@]+"${CIDS[@]}"} >/dev/null 2>&1 || true
   docker network rm "$NET" >/dev/null 2>&1 || true
+  docker volume rm bl-dhi-appdata >/dev/null 2>&1 || true
   rm -rf "$WORK"
 }
 CIDS=()
@@ -52,7 +55,9 @@ api_code() {
 
 # ---- fixtures ---------------------------------------------------------------------------------
 mkdir -p "$WORK/secrets" "$WORK/ext" "$WORK/httproot"
-printf 'secret.injected.prop = fromSecret\ndatabase.max-connections = 42\n' > "$WORK/secrets/mirth_properties"
+# Includes a raw Latin-1 byte (0xE9, é) — regression guard: a non-UTF-8 customer file must not
+# crash the bootstrap (it reads/writes ISO-8859-1, the java.util.Properties charset).
+printf 'secret.injected.prop = fromSecret\ndatabase.max-connections = 42\nsecret.latin1.prop = caf\xe9pass\n' > "$WORK/secrets/mirth_properties"
 printf -- '-Dsecret.vmopt=enabled\n' > "$WORK/secrets/blserver_vmoptions"
 python3 - "$WORK" <<'PY'
 import os, sys, zipfile
@@ -117,6 +122,8 @@ run bl-secrets -p 8443 \
 if wait_for_log bl-secrets; then
   docker cp bl-secrets:/opt/bridgelink/conf/mirth.properties "$WORK/mp2" >/dev/null 2>&1
   grep -q '^secret.injected.prop = fromSecret' "$WORK/mp2" && ok "properties secret merged" || bad "properties secret not merged"
+  # -a: the 0xE9 byte makes grep treat the file as binary otherwise
+  grep -aq 'secret.latin1.prop = caf' "$WORK/mp2" && ok "Latin-1 secret survives (charset regression)" || bad "Latin-1 secret missing (charset regression)"
   docker logs bl-secrets 2>&1 | grep -q -- '-Dsecret.vmopt=enabled' && ok "vmoptions secret appended" || bad "vmoptions secret missing"
   docker cp bl-secrets:/opt/bridgelink/extensions/myextension/plugin.txt "$WORK/pl" >/dev/null 2>&1 \
     && ok "custom-extension zip extracted" || bad "custom-extension not extracted"
@@ -167,9 +174,15 @@ fi
 
 info "5c. KEYSTORE_DOWNLOAD (verifies download writes appdata/keystore.jks)"
 run bl-ks --network "$NET" -e KEYSTORE_DOWNLOAD="http://fileserver/keystore.jks"
-sleep 6   # download happens before launch; don't gate on the (deliberately bogus) keystore booting
-docker cp bl-ks:/opt/bridgelink/appdata/keystore.jks "$WORK/ks-dl" >/dev/null 2>&1
-cmp -s "$WORK/httproot/keystore.jks" "$WORK/ks-dl" && ok "KEYSTORE_DOWNLOAD wrote appdata/keystore.jks" || bad "keystore download bytes differ/missing"
+# The download happens before launch; don't gate on the (deliberately bogus) keystore booting.
+# Poll rather than fixed-sleep — a slow runner made a fixed sleep flaky.
+KS_OK=1 i=0
+while [ "$i" -lt 60 ]; do
+  if docker cp bl-ks:/opt/bridgelink/appdata/keystore.jks "$WORK/ks-dl" >/dev/null 2>&1 \
+     && cmp -s "$WORK/httproot/keystore.jks" "$WORK/ks-dl"; then KS_OK=0; break; fi
+  sleep 1; i=$((i+1))
+done
+[ "$KS_OK" -eq 0 ] && ok "KEYSTORE_DOWNLOAD wrote appdata/keystore.jks" || bad "keystore download bytes differ/missing"
 
 info "5d. ALLOW_INSECURE over self-signed https"
 if command -v openssl >/dev/null; then
@@ -231,11 +244,13 @@ docker run -d --name mysql --network "$NET" \
   -e MYSQL_USER=bridgelinktest -e MYSQL_PASSWORD=bridgelinktest \
   mysql:8 >/dev/null && CIDS+=(mysql)
 # allowPublicKeyRetrieval+useSSL=false: MySQL 8 defaults to caching_sha2_password, which needs one
-# of these for first auth over a plaintext connection.
+# of these for first auth over a plaintext connection. MP_DATABASE_MAX_RETRY widens the retry
+# window past MySQL 8's cold-init (~20-30s), which can exceed the default 2x10s on a cold runner.
 run bl-mysql --network "$NET" -p 8443 \
   -e MP_DATABASE=mysql \
   -e MP_DATABASE_URL="jdbc:mysql://mysql:3306/bridgelinkdb?allowPublicKeyRetrieval=true&useSSL=false" \
-  -e MP_DATABASE_USERNAME=bridgelinktest -e MP_DATABASE_PASSWORD=bridgelinktest
+  -e MP_DATABASE_USERNAME=bridgelinktest -e MP_DATABASE_PASSWORD=bridgelinktest \
+  -e MP_DATABASE_MAX_RETRY=15
 if wait_for_log bl-mysql 'successfully started' 180; then
   docker logs bl-mysql 2>&1 | grep -q ', mysql,' && ok "using mysql backend" || bad "not on mysql"
   [ "$(api_code "$(https_port bl-mysql)")" = "200" ] && ok "API 200 (mysql)" || bad "API not 200 (mysql)"

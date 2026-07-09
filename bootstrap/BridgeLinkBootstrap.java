@@ -10,14 +10,17 @@
  * This is a faithful, line-for-line port of scripts/entrypoint.sh — same env vars, same property
  * mapping, same ordering — so both images behave identically. See IRT-1356.
  *
- * NOTE (spike): the launch step assumes the server is started via
- *   java <add-opens...> <blserver.vmoptions...> -jar mirth-server-launcher.jar
- * rather than the install4j ./blserver launcher (which may itself need a shell). Confirm against
- * the real 26.3.1 tarball layout during the spike.
+ * The launch step starts the server via
+ *   java <blserver.vmoptions flags> -jar mirth-server-launcher.jar
+ * rather than the install4j ./blserver launcher (a shell script, unusable in a shell-less
+ * runtime). Validated against the 26.3.1 release tarball.
+ *
+ * All config-file I/O uses ISO-8859-1: it is the java.util.Properties charset, every byte
+ * sequence is valid in it (so a Latin-1-encoded customer file cannot crash startup the way a
+ * UTF-8 decode would), and it round-trips bytes faithfully like the byte-oriented sed pipeline
+ * this replaces.
  */
-import java.io.BufferedReader;
 import java.io.IOException;
-import java.io.InputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -75,7 +78,8 @@ public final class BridgeLinkBootstrap {
         String id = System.getenv("SERVER_ID");
         if (isSet(id)) {
             Files.createDirectories(SERVER_ID_FILE.getParent());
-            Files.writeString(SERVER_ID_FILE, "server.id = " + id + System.lineSeparator());
+            Files.writeString(SERVER_ID_FILE, "server.id = " + id + System.lineSeparator(),
+                    StandardCharsets.ISO_8859_1);
         }
     }
 
@@ -209,7 +213,7 @@ public final class BridgeLinkBootstrap {
         Path secret = Paths.get("/run/secrets/mirth_properties");
         if (!Files.isRegularFile(secret)) return;
         List<String> target = readLines(PROPERTIES_FILE);
-        for (String line : Files.readAllLines(secret)) {
+        for (String line : Files.readAllLines(secret, StandardCharsets.ISO_8859_1)) {
             int eq = line.indexOf('=');
             if (eq < 0) continue;
             String key = line.substring(0, eq).strip();
@@ -233,7 +237,7 @@ public final class BridgeLinkBootstrap {
         Path secret = Paths.get("/run/secrets/blserver_vmoptions");
         if (!Files.isRegularFile(secret)) return;
         List<String> lines = readLines(VMOPTIONS_FILE);
-        lines.addAll(Files.readAllLines(secret));
+        lines.addAll(Files.readAllLines(secret, StandardCharsets.ISO_8859_1));
         writeLines(VMOPTIONS_FILE, lines);
     }
 
@@ -334,7 +338,7 @@ public final class BridgeLinkBootstrap {
     /** Read a .vmoptions file into individual args, skipping blanks and #-comments. */
     static List<String> readOptionLines(Path file) throws IOException {
         List<String> out = new ArrayList<>();
-        for (String line : Files.readAllLines(file)) {
+        for (String line : Files.readAllLines(file, StandardCharsets.ISO_8859_1)) {
             String s = line.strip();
             if (!s.isEmpty() && !s.startsWith("#")) out.add(s);
         }
@@ -342,12 +346,15 @@ public final class BridgeLinkBootstrap {
     }
 
     static List<String> readLines(Path file) throws IOException {
-        return Files.isRegularFile(file) ? new ArrayList<>(Files.readAllLines(file)) : new ArrayList<>();
+        return Files.isRegularFile(file)
+                ? new ArrayList<>(Files.readAllLines(file, StandardCharsets.ISO_8859_1))
+                : new ArrayList<>();
     }
 
     static void writeLines(Path file, List<String> lines) throws IOException {
-        Files.createDirectories(file.getParent());
-        Files.write(file, lines);
+        Path parent = file.toAbsolutePath().getParent();
+        if (parent != null) Files.createDirectories(parent);
+        Files.write(file, lines, StandardCharsets.ISO_8859_1);
     }
 
     static String fileName(String url) {

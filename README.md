@@ -116,6 +116,18 @@ docker compose -f docker-compose.dhi.yml up
 
 For Kubernetes, deploy the Helm chart with `--set bridgelink.runAsUser=65532 --set bridgelink.runAsGroup=65532`.
 
+Behavior notes specific to the hardened image:
+
+* **`ALLOW_INSECURE` also applies to `KEYSTORE_DOWNLOAD`.** On the Rocky image the keystore
+  download always verifies TLS regardless of `ALLOW_INSECURE`; the hardened image applies
+  `ALLOW_INSECURE` consistently to *all* downloads (keystore, extensions, custom jars,
+  custom properties/vmoptions). All downloads verify TLS by default on both images.
+* **Graceful shutdown window.** On `docker stop` the launcher forwards the signal to the engine
+  and allows up to 30 seconds for queues/DB connections to drain — but Docker's default stop
+  timeout is 10 seconds, after which the container is killed. For queue-heavy deployments give it
+  headroom: `docker stop -t 35`, compose `stop_grace_period: 35s`, or a pod
+  `terminationGracePeriodSeconds: 35`.
+
 **Test** the hardened image (no-shell, boot, config/secret/extension injection, Postgres, graceful
 shutdown, persistence) with the acceptance suite — this is the same suite CI runs before publishing:
 

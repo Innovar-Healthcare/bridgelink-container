@@ -60,9 +60,9 @@ RUN javac -d /opt/bridgelink/bootstrap /opt/bridgelink/bootstrap/BridgeLinkBoots
 WORKDIR /opt/bridgelink
 RUN rm -rf mirth-cli-launcher.jar mirth-manager-launcher.jar blmanager cli-lib
 
-# Pre-create writable dirs and stamp everything for the DHI non-root UID (65532, not 1000).
-RUN mkdir -p appdata custom-extensions extensions custom-jars && \
-    chown -R 65532:65532 /opt/bridgelink
+# Pre-create writable dirs; ownership for the DHI non-root UID (65532) is stamped once by the
+# runtime stage's COPY --chown (a chown -R here would just duplicate a ~500MB build layer).
+RUN mkdir -p appdata custom-extensions extensions custom-jars
 
 # ============================================================
 # Stage 2: Runtime  (DHI hardened variant: no shell, non-root by default)
