@@ -37,7 +37,53 @@ permissions:
   contents: read
 
 jobs:
+  # Resolve inputs vs. scheduled-run defaults once, share with downstream jobs.
+  params:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.p.outputs.version }}
+      binary_url: ${{ steps.p.outputs.binary_url }}
+      push: ${{ steps.p.outputs.push }}
+    steps:
+      - id: p
+        run: |
+          echo "version=${{ github.event.inputs.version || vars.DEFAULT_VERSION }}" >> "$GITHUB_OUTPUT"
+          echo "binary_url=${{ github.event.inputs.binary_url || vars.DEFAULT_BINARY_URL }}" >> "$GITHUB_OUTPUT"
+          # Scheduled runs always push (to refresh the published tag); manual runs honor the toggle.
+          echo "push=${{ github.event_name == 'schedule' || github.event.inputs.push }}" >> "$GITHUB_OUTPUT"
+
+  # Gate: build the DHI image single-arch and run the acceptance suite before anything publishes.
+  test-dhi:
+    needs: params
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to dhi.io (DHI base pull)
+        uses: docker/login-action@v3
+        with:
+          registry: dhi.io
+          username: ${{ secrets.DHI_USERNAME }}
+          password: ${{ secrets.DHI_TOKEN }}
+      # Build a local (native-arch) test image — not pushed.
+      - name: Build DHI test image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.dhi
+          load: true
+          push: false
+          tags: innovarhealthcare/bridgelink:dhi-test
+          build-args: |
+            BINARY_URL=${{ needs.params.outputs.binary_url }}
+          secrets: |
+            aws_credentials=${{ secrets.AWS_CREDENTIALS }}
+      - name: Run acceptance tests
+        run: IMAGE=innovarhealthcare/bridgelink:dhi-test SKIP_BUILD=1 bash test/dhi-test.sh
+
+  # Publish both images (multi-arch). Only runs if the DHI acceptance suite passed.
   build:
+    needs: [params, test-dhi]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -51,16 +97,6 @@ jobs:
             suffix: "-dhi"      # innovarhealthcare/bridgelink:<version>-dhi
     steps:
       - uses: actions/checkout@v4
-
-      # Resolve inputs vs. scheduled-run defaults.
-      - name: Resolve build parameters
-        id: params
-        run: |
-          echo "version=${{ github.event.inputs.version || vars.DEFAULT_VERSION }}" >> "$GITHUB_OUTPUT"
-          echo "binary_url=${{ github.event.inputs.binary_url || vars.DEFAULT_BINARY_URL }}" >> "$GITHUB_OUTPUT"
-          # Scheduled runs always push (to refresh the published tag); manual runs honor the toggle.
-          echo "push=${{ github.event_name == 'schedule' || github.event.inputs.push }}" >> "$GITHUB_OUTPUT"
-
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
 
@@ -86,11 +122,11 @@ jobs:
           context: .
           file: ${{ matrix.dockerfile }}
           platforms: linux/amd64,linux/arm64
-          push: ${{ steps.params.outputs.push == 'true' }}
+          push: ${{ needs.params.outputs.push == 'true' }}
           build-args: |
-            BINARY_URL=${{ steps.params.outputs.binary_url }}
+            BINARY_URL=${{ needs.params.outputs.binary_url }}
           # Mounted at /root/.aws/credentials for s3:// pulls (Dockerfiles: --mount=type=secret,id=aws_credentials).
           secrets: |
             aws_credentials=${{ secrets.AWS_CREDENTIALS }}
           tags: |
-            innovarhealthcare/bridgelink:${{ steps.params.outputs.version }}${{ matrix.suffix }}
+            innovarhealthcare/bridgelink:${{ needs.params.outputs.version }}${{ matrix.suffix }}

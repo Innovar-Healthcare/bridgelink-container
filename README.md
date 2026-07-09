@@ -116,6 +116,14 @@ docker compose -f docker-compose.dhi.yml up
 
 For Kubernetes, deploy the Helm chart with `--set bridgelink.runAsUser=65532 --set bridgelink.runAsGroup=65532`.
 
+**Test** the hardened image (no-shell, boot, config/secret/extension injection, Postgres, graceful
+shutdown, persistence) with the acceptance suite — this is the same suite CI runs before publishing:
+
+```
+BINARY_URL="<release tarball>" test/dhi-test.sh              # builds, then tests
+IMAGE=innovarhealthcare/bridgelink:26.3.1-dhi SKIP_BUILD=1 test/dhi-test.sh   # test an existing image
+```
+
 ------------
 
 <a name="how-to-use"></a>
