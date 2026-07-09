@@ -56,9 +56,11 @@ RUN --mount=type=secret,id=aws_credentials,target=/root/.aws/credentials \
 COPY bootstrap/BridgeLinkBootstrap.java /opt/bridgelink/bootstrap/BridgeLinkBootstrap.java
 RUN javac -d /opt/bridgelink/bootstrap /opt/bridgelink/bootstrap/BridgeLinkBootstrap.java
 
-# Drop unused launchers/libs (matches the Rocky image).
+# Drop unused launchers/libs (matches the Rocky image). blcommand/blmanager run outside the
+# server container; removing their launchers alongside the jars/libs avoids a dangling launcher
+# that fails with ClassNotFoundException (see issue #13).
 WORKDIR /opt/bridgelink
-RUN rm -rf mirth-cli-launcher.jar mirth-manager-launcher.jar blmanager cli-lib
+RUN rm -rf mirth-cli-launcher.jar mirth-manager-launcher.jar blmanager blcommand cli-lib
 
 # Pre-create writable dirs; ownership for the DHI non-root UID (65532) is stamped once by the
 # runtime stage's COPY --chown (a chown -R here would just duplicate a ~500MB build layer).
