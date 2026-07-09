@@ -1,4 +1,8 @@
-# Build & publish BridgeLink container images (Rocky + hardened DHI)  —  IRT-1356
+# Build, test & publish the hardened (DHI) BridgeLink image  —  IRT-1356
+#
+# This workflow ONLY builds/publishes the hardened image (Dockerfile.dhi), tagged `<version>-dhi`
+# / `latest-dhi`. The Rocky image (Dockerfile) is published by its existing process and is left
+# completely unaffected by this pipeline.
 #
 # DRAFT — review before enabling. Create these repo secrets/variables first:
 #   Secrets:
@@ -29,7 +33,7 @@ on:
         type: boolean
         default: true
       update_latest:
-        description: "Also move the rolling latest / latest-dhi tags (turn off when back-publishing an old version)"
+        description: "Also move the rolling latest-dhi tag (turn off when back-publishing an old version)"
         type: boolean
         default: true
   # Rebuild-on-base-update: DHI repatches frequently, so rebuild weekly to keep the near-zero-CVE
@@ -100,22 +104,13 @@ jobs:
       - name: Run acceptance tests
         run: IMAGE=innovarhealthcare/bridgelink:dhi-test SKIP_BUILD=1 bash test/dhi-test.sh
 
-  # Publish both images (multi-arch). Only runs if the DHI acceptance suite passed.
-  # Never runs on pull_request — PRs only exercise the test-dhi gate above.
+  # Publish the hardened (DHI) image (multi-arch). Only runs if the acceptance suite passed, and
+  # never on pull_request. The Rocky image (Dockerfile) is intentionally NOT built or pushed here —
+  # it keeps being published by its existing process, fully unaffected.
   build:
     needs: [params, test-dhi]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - variant: rocky
-            dockerfile: Dockerfile
-            suffix: ""          # innovarhealthcare/bridgelink:<version>
-          - variant: dhi
-            dockerfile: Dockerfile.dhi
-            suffix: "-dhi"      # innovarhealthcare/bridgelink:<version>-dhi
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-qemu-action@v3
@@ -128,35 +123,34 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # Only the DHI build needs the hardened base from dhi.io.
+      # Pull the hardened base from dhi.io.
       - name: Log in to dhi.io (DHI base pull)
-        if: matrix.variant == 'dhi'
         uses: docker/login-action@v3
         with:
           registry: dhi.io
           username: ${{ secrets.DHI_USERNAME }}
           password: ${{ secrets.DHI_TOKEN }}
 
-      # Version tag always; rolling latest/latest-dhi only when update_latest is set.
+      # Version tag always; rolling latest-dhi only when update_latest is set.
       - name: Compute tags
         id: tags
         run: |
-          T="innovarhealthcare/bridgelink:${{ needs.params.outputs.version }}${{ matrix.suffix }}"
+          T="innovarhealthcare/bridgelink:${{ needs.params.outputs.version }}-dhi"
           if [ "${{ needs.params.outputs.update_latest }}" = "true" ]; then
-            T="$T"$'\n'"innovarhealthcare/bridgelink:latest${{ matrix.suffix }}"
+            T="$T"$'\n'"innovarhealthcare/bridgelink:latest-dhi"
           fi
           { echo "list<<EOF"; echo "$T"; echo "EOF"; } >> "$GITHUB_OUTPUT"
 
-      - name: Build & push ${{ matrix.variant }}
+      - name: Build & push DHI image
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: ${{ matrix.dockerfile }}
+          file: Dockerfile.dhi
           platforms: linux/amd64,linux/arm64
           push: ${{ needs.params.outputs.push == 'true' }}
           build-args: |
             BINARY_URL=${{ needs.params.outputs.binary_url }}
-          # Mounted at /root/.aws/credentials for s3:// pulls (Dockerfiles: --mount=type=secret,id=aws_credentials).
+          # Mounted at /root/.aws/credentials for s3:// pulls (Dockerfile.dhi: --mount=type=secret,id=aws_credentials).
           secrets: |
             aws_credentials=${{ secrets.AWS_CREDENTIALS }}
           tags: ${{ steps.tags.outputs.list }}
