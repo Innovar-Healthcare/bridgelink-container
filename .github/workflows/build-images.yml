@@ -28,6 +28,10 @@ on:
         description: "Push images to Docker Hub"
         type: boolean
         default: true
+      update_latest:
+        description: "Also move the rolling latest / latest-dhi tags (turn off when back-publishing an old version)"
+        type: boolean
+        default: true
   # Rebuild-on-base-update: DHI repatches frequently, so rebuild weekly to keep the near-zero-CVE
   # benefit. Uses the DEFAULT_VERSION / DEFAULT_BINARY_URL repo variables.
   schedule:
@@ -44,13 +48,16 @@ jobs:
       version: ${{ steps.p.outputs.version }}
       binary_url: ${{ steps.p.outputs.binary_url }}
       push: ${{ steps.p.outputs.push }}
+      update_latest: ${{ steps.p.outputs.update_latest }}
     steps:
       - id: p
         run: |
           echo "version=${{ github.event.inputs.version || vars.DEFAULT_VERSION }}" >> "$GITHUB_OUTPUT"
           echo "binary_url=${{ github.event.inputs.binary_url || vars.DEFAULT_BINARY_URL }}" >> "$GITHUB_OUTPUT"
-          # Scheduled runs always push (to refresh the published tag); manual runs honor the toggle.
+          # Scheduled runs always push + move latest (they track the current DEFAULT_VERSION); manual
+          # runs honor the toggles.
           echo "push=${{ github.event_name == 'schedule' || github.event.inputs.push }}" >> "$GITHUB_OUTPUT"
+          echo "update_latest=${{ github.event_name == 'schedule' || github.event.inputs.update_latest }}" >> "$GITHUB_OUTPUT"
 
   # Gate: build the DHI image single-arch and run the acceptance suite before anything publishes.
   test-dhi:
@@ -116,6 +123,16 @@ jobs:
           username: ${{ secrets.DHI_USERNAME }}
           password: ${{ secrets.DHI_TOKEN }}
 
+      # Version tag always; rolling latest/latest-dhi only when update_latest is set.
+      - name: Compute tags
+        id: tags
+        run: |
+          T="innovarhealthcare/bridgelink:${{ needs.params.outputs.version }}${{ matrix.suffix }}"
+          if [ "${{ needs.params.outputs.update_latest }}" = "true" ]; then
+            T="$T"$'\n'"innovarhealthcare/bridgelink:latest${{ matrix.suffix }}"
+          fi
+          { echo "list<<EOF"; echo "$T"; echo "EOF"; } >> "$GITHUB_OUTPUT"
+
       - name: Build & push ${{ matrix.variant }}
         uses: docker/build-push-action@v6
         with:
@@ -128,5 +145,4 @@ jobs:
           # Mounted at /root/.aws/credentials for s3:// pulls (Dockerfiles: --mount=type=secret,id=aws_credentials).
           secrets: |
             aws_credentials=${{ secrets.AWS_CREDENTIALS }}
-          tags: |
-            innovarhealthcare/bridgelink:${{ needs.params.outputs.version }}${{ matrix.suffix }}
+          tags: ${{ steps.tags.outputs.list }}
