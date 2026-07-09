@@ -124,16 +124,88 @@ else
   bad "server did not start (secrets)"
 fi
 
-# ---- 5. HTTP download path (EXTENSIONS_DOWNLOAD via HttpClient) --------------------------------
-info "5. HTTP download (EXTENSIONS_DOWNLOAD)"
+# ---- 5. HTTP download knobs (all via the HttpClient curl-replacement) -------------------------
+# Extra HTTP-served fixtures. custom.properties reuses the valid mirth.properties captured in test 3
+# (download-and-overwrite needs a complete file), plus a marker to assert the overwrite happened.
+cp "$WORK/mp" "$WORK/httproot/custom.properties"; echo "custom.download.marker = downloaded" >> "$WORK/httproot/custom.properties"
+printf -- '-server\n-Xmx333m\n-Djava.awt.headless=true\n-Dcustom.vmopt.marker=downloaded\n' > "$WORK/httproot/custom.vmoptions"
+head -c 2048 /dev/urandom > "$WORK/httproot/keystore.jks"   # dummy bytes: tests the download path, not JKS validity
+python3 - "$WORK" <<'PY'
+import os, sys, zipfile
+w = sys.argv[1]; d = os.path.join(w, "cjar"); os.makedirs(d, exist_ok=True)
+open(os.path.join(d, "lib.txt"), "w").write("custom jar payload\n")
+with zipfile.ZipFile(os.path.join(w, "httproot", "custom-jars.zip"), "w") as z:
+    z.write(os.path.join(d, "lib.txt"), "mycustomjar/lib.txt")
+PY
+
 docker run -d --name fileserver --network "$NET" \
   -v "$WORK/httproot:/usr/share/nginx/html:ro" nginx:alpine >/dev/null && CIDS+=(fileserver)
+sleep 2
+
+info "5a. EXTENSIONS_DOWNLOAD"
 run bl-dl --network "$NET" -e EXTENSIONS_DOWNLOAD="http://fileserver/myextension.zip"
 if wait_for_log bl-dl; then
   docker cp bl-dl:/opt/bridgelink/extensions/myextension/plugin.txt "$WORK/pl2" >/dev/null 2>&1 \
     && ok "downloaded + extracted via HttpClient" || bad "HTTP download/extract failed"
 else
   bad "server did not start (download)"
+fi
+
+info "5b. CUSTOM_PROPERTIES / CUSTOM_VMOPTIONS / CUSTOM_JARS_DOWNLOAD"
+run bl-knobs --network "$NET" \
+  -e CUSTOM_PROPERTIES="http://fileserver/custom.properties" \
+  -e CUSTOM_VMOPTIONS="http://fileserver/custom.vmoptions" \
+  -e CUSTOM_JARS_DOWNLOAD="http://fileserver/custom-jars.zip"
+if wait_for_log bl-knobs; then
+  docker cp bl-knobs:/opt/bridgelink/conf/mirth.properties "$WORK/mp3" >/dev/null 2>&1
+  grep -q '^custom.download.marker = downloaded' "$WORK/mp3" && ok "CUSTOM_PROPERTIES overwrote mirth.properties" || bad "CUSTOM_PROPERTIES not applied"
+  docker logs bl-knobs 2>&1 | grep -q -- '-Dcustom.vmopt.marker=downloaded' && ok "CUSTOM_VMOPTIONS applied" || bad "CUSTOM_VMOPTIONS not applied"
+  docker cp bl-knobs:/opt/bridgelink/custom-jars/mycustomjar/lib.txt "$WORK/cj" >/dev/null 2>&1 && ok "CUSTOM_JARS_DOWNLOAD extracted" || bad "CUSTOM_JARS_DOWNLOAD not extracted"
+else
+  bad "server did not start (custom knobs)"
+fi
+
+info "5c. KEYSTORE_DOWNLOAD (verifies download writes appdata/keystore.jks)"
+run bl-ks --network "$NET" -e KEYSTORE_DOWNLOAD="http://fileserver/keystore.jks"
+sleep 6   # download happens before launch; don't gate on the (deliberately bogus) keystore booting
+docker cp bl-ks:/opt/bridgelink/appdata/keystore.jks "$WORK/ks-dl" >/dev/null 2>&1
+cmp -s "$WORK/httproot/keystore.jks" "$WORK/ks-dl" && ok "KEYSTORE_DOWNLOAD wrote appdata/keystore.jks" || bad "keystore download bytes differ/missing"
+
+info "5d. ALLOW_INSECURE over self-signed https"
+if command -v openssl >/dev/null; then
+  mkdir -p "$WORK/tls"
+  openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj "/CN=fileserver-https" \
+    -keyout "$WORK/tls/key.pem" -out "$WORK/tls/cert.pem" >/dev/null 2>&1
+  cat > "$WORK/tls/default.conf" <<'NG'
+server {
+  listen 443 ssl;
+  ssl_certificate     /etc/nginx/certs/cert.pem;
+  ssl_certificate_key /etc/nginx/certs/key.pem;
+  location / { root /usr/share/nginx/html; }
+}
+NG
+  docker run -d --name fileserver-https --network "$NET" \
+    -v "$WORK/httproot:/usr/share/nginx/html:ro" \
+    -v "$WORK/tls:/etc/nginx/certs:ro" \
+    -v "$WORK/tls/default.conf:/etc/nginx/conf.d/default.conf:ro" \
+    nginx:alpine >/dev/null && CIDS+=(fileserver-https)
+  sleep 2
+  # (a) ALLOW_INSECURE=true -> self-signed cert accepted, download succeeds
+  run bl-insec --network "$NET" -e ALLOW_INSECURE=true \
+    -e EXTENSIONS_DOWNLOAD="https://fileserver-https/myextension.zip"
+  if wait_for_log bl-insec; then
+    docker cp bl-insec:/opt/bridgelink/extensions/myextension/plugin.txt "$WORK/pi" >/dev/null 2>&1 \
+      && ok "ALLOW_INSECURE=true downloads over self-signed https" || bad "insecure https download failed"
+  else bad "server did not start (insecure)"; fi
+  # (b) no ALLOW_INSECURE -> cert rejected, extension absent, server still boots (failure is non-fatal)
+  run bl-sec --network "$NET" -e EXTENSIONS_DOWNLOAD="https://fileserver-https/myextension.zip"
+  if wait_for_log bl-sec; then
+    if docker cp bl-sec:/opt/bridgelink/extensions/myextension/plugin.txt "$WORK/psf" >/dev/null 2>&1; then
+      bad "self-signed https downloaded WITHOUT ALLOW_INSECURE (cert not verified)"
+    else ok "self-signed https rejected without ALLOW_INSECURE"; fi
+  else bad "server did not start (secure)"; fi
+else
+  echo "  SKIP: openssl not available — ALLOW_INSECURE lane"
 fi
 
 # ---- 6. Postgres backend ----------------------------------------------------------------------
@@ -150,6 +222,25 @@ if wait_for_log bl-pg 'successfully started' 120; then
   [ "$(api_code "$(https_port bl-pg)")" = "200" ] && ok "API 200 (postgres)" || bad "API not 200 (postgres)"
 else
   bad "server did not start (postgres)"; docker logs bl-pg 2>&1 | tail -20
+fi
+
+# ---- 6b. MySQL backend ------------------------------------------------------------------------
+info "6b. MySQL backend"
+docker run -d --name mysql --network "$NET" \
+  -e MYSQL_ROOT_PASSWORD=rootpw -e MYSQL_DATABASE=bridgelinkdb \
+  -e MYSQL_USER=bridgelinktest -e MYSQL_PASSWORD=bridgelinktest \
+  mysql:8 >/dev/null && CIDS+=(mysql)
+# allowPublicKeyRetrieval+useSSL=false: MySQL 8 defaults to caching_sha2_password, which needs one
+# of these for first auth over a plaintext connection.
+run bl-mysql --network "$NET" -p 8443 \
+  -e MP_DATABASE=mysql \
+  -e MP_DATABASE_URL="jdbc:mysql://mysql:3306/bridgelinkdb?allowPublicKeyRetrieval=true&useSSL=false" \
+  -e MP_DATABASE_USERNAME=bridgelinktest -e MP_DATABASE_PASSWORD=bridgelinktest
+if wait_for_log bl-mysql 'successfully started' 180; then
+  docker logs bl-mysql 2>&1 | grep -q ', mysql,' && ok "using mysql backend" || bad "not on mysql"
+  [ "$(api_code "$(https_port bl-mysql)")" = "200" ] && ok "API 200 (mysql)" || bad "API not 200 (mysql)"
+else
+  bad "server did not start (mysql)"; docker logs bl-mysql 2>&1 | tail -20
 fi
 
 # ---- 7. Graceful shutdown (SIGTERM forwarding) ------------------------------------------------

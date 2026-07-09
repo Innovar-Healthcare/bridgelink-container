@@ -507,4 +507,6 @@ Example:
 <a name="license"></a>
 # License [↑](#top)
 
-The Dockerfiles, entrypoint script, and any other files used to build these Docker images are Copyright © Innovar Healthcare and licensed under the [Mozilla Public License 2.0](https://www.mozilla.org/en-US/MPL/2.0/).
+The Dockerfiles, entrypoint script, Java bootstrap launcher, Helm chart, and any other files used to build these Docker images are Copyright © Innovar Healthcare and licensed under the [Mozilla Public License 2.0](https://www.mozilla.org/en-US/MPL/2.0/) (see [`LICENSE`](LICENSE)).
+
+The hardened image (`Dockerfile.dhi`) is built on the Amazon Corretto Debian 13 Docker Hardened Image; see [`NOTICE`](NOTICE) for third-party attribution and redistribution details (Docker's Apache-2.0 DHI definitions, and the OpenJDK/glibc/Debian package licenses inside the base).
