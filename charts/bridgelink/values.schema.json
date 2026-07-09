@@ -109,6 +109,18 @@
           "required": [],
           "title": "replicaCount"
         },
+        "runAsUser": {
+          "default": 1000,
+          "description": "Non-root UID the container runs as (1000 for Rocky image, 65532 for hardened DHI image)",
+          "required": [],
+          "title": "runAsUser"
+        },
+        "runAsGroup": {
+          "default": 1000,
+          "description": "Non-root GID the container runs as (1000 for Rocky image, 65532 for hardened DHI image)",
+          "required": [],
+          "title": "runAsGroup"
+        },
         "resources": {
           "additionalProperties": false,
           "default": "See below",

@@ -15,7 +15,13 @@ bridgelink:
     tag: 4.5.4
     # -- Image pull policy
     pullPolicy: IfNotPresent
-  
+
+  # -- Non-root UID the container runs as. Use 1000 for the Rocky image, 65532 for the hardened
+  # (DHI) image. Must match the image so mounted appdata/custom-extensions are writable.
+  runAsUser: 1000
+  # -- Non-root GID the container runs as (see runAsUser). 1000 for Rocky, 65532 for DHI.
+  runAsGroup: 1000
+
   service:
     # -- Service type for BridgeLink (LoadBalancer, ClusterIP, NodePort)
     type: LoadBalancer

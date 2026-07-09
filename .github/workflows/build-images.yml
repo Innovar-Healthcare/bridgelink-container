@@ -1,0 +1,96 @@
+# Build & publish BridgeLink container images (Rocky + hardened DHI)  —  IRT-1356
+#
+# DRAFT — review before enabling. Create these repo secrets/variables first:
+#   Secrets:
+#     DOCKERHUB_USERNAME / DOCKERHUB_TOKEN   push target (innovarhealthcare/bridgelink)
+#     DHI_USERNAME       / DHI_TOKEN         free Docker account, to pull the DHI base from dhi.io
+#     AWS_CREDENTIALS                        contents of an ~/.aws/credentials file (only needed
+#                                            when BINARY_URL is an s3:// URL; harmless otherwise)
+#   Variables (defaults used by the scheduled rebuild):
+#     DEFAULT_VERSION      e.g. 26.3.1
+#     DEFAULT_BINARY_URL   s3:// (internal) or https:// (public) BridgeLink release tarball
+#
+# ASSUMPTIONS to confirm: GitHub Actions is the CI system; the release tarball is fetched via
+# BINARY_URL (same build-arg the Dockerfiles already use); images publish to Docker Hub.
+
+name: build-images
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "BridgeLink version tag (e.g. 26.3.1)"
+        required: true
+      binary_url:
+        description: "BINARY_URL for the release tarball (s3:// or https://)"
+        required: true
+      push:
+        description: "Push images to Docker Hub"
+        type: boolean
+        default: true
+  # Rebuild-on-base-update: DHI repatches frequently, so rebuild weekly to keep the near-zero-CVE
+  # benefit. Uses the DEFAULT_VERSION / DEFAULT_BINARY_URL repo variables.
+  schedule:
+    - cron: "0 6 * * 1"   # Mondays 06:00 UTC
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: rocky
+            dockerfile: Dockerfile
+            suffix: ""          # innovarhealthcare/bridgelink:<version>
+          - variant: dhi
+            dockerfile: Dockerfile.dhi
+            suffix: "-dhi"      # innovarhealthcare/bridgelink:<version>-dhi
+    steps:
+      - uses: actions/checkout@v4
+
+      # Resolve inputs vs. scheduled-run defaults.
+      - name: Resolve build parameters
+        id: params
+        run: |
+          echo "version=${{ github.event.inputs.version || vars.DEFAULT_VERSION }}" >> "$GITHUB_OUTPUT"
+          echo "binary_url=${{ github.event.inputs.binary_url || vars.DEFAULT_BINARY_URL }}" >> "$GITHUB_OUTPUT"
+          # Scheduled runs always push (to refresh the published tag); manual runs honor the toggle.
+          echo "push=${{ github.event_name == 'schedule' || github.event.inputs.push }}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      # Push target.
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Only the DHI build needs the hardened base from dhi.io.
+      - name: Log in to dhi.io (DHI base pull)
+        if: matrix.variant == 'dhi'
+        uses: docker/login-action@v3
+        with:
+          registry: dhi.io
+          username: ${{ secrets.DHI_USERNAME }}
+          password: ${{ secrets.DHI_TOKEN }}
+
+      - name: Build & push ${{ matrix.variant }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          push: ${{ steps.params.outputs.push == 'true' }}
+          build-args: |
+            BINARY_URL=${{ steps.params.outputs.binary_url }}
+          # Mounted at /root/.aws/credentials for s3:// pulls (Dockerfiles: --mount=type=secret,id=aws_credentials).
+          secrets: |
+            aws_credentials=${{ secrets.AWS_CREDENTIALS }}
+          tags: |
+            innovarhealthcare/bridgelink:${{ steps.params.outputs.version }}${{ matrix.suffix }}

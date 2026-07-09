@@ -1,0 +1,35 @@
+# Hardened (Docker Hardened Image / DHI) variant of docker-compose.yml.
+# Differences vs the Rocky compose: the -dhi image tag and the non-root UID (65532, not 1000).
+# The mounted ./appdata dir must be writable by UID 65532 (e.g. `chown -R 65532:65532 ./appdata`).
+services:
+  bl:
+    image: innovarhealthcare/bridgelink:26.3.1-dhi
+    stdin_open: true
+    tty: true
+    user: 65532:65532
+    ports:
+      - "8443:8443"
+    volumes:
+      - ./appdata:/opt/bridgelink/appdata
+    environment:
+      MP_DATABASE: postgres
+      MP_DATABASE_URL: jdbc:postgresql://postgres:5432/bridgelinkdb
+      MP_DATABASE_USERNAME: bridgelinktest
+      MP_DATABASE_PASSWORD: bridgelinktest
+      SERVER_ID: 7d760af2-680a-4a19-b9a2-c4685df61ebc
+      MP_KEYSTORE_KEYPASS: bridgelinkKeystore
+      MP_KEYSTORE_STOREPASS: bridgelinkKeypass
+      MP_CONFIGURATIONMAP_LOCATION: database
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      - postgres
+
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - 5432:5432
+    environment:
+      POSTGRES_PASSWORD: bridgelinktest
+      POSTGRES_USER: bridgelinktest
+      POSTGRES_DB: bridgelinkdb

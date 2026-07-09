@@ -5,6 +5,7 @@
 * [Supported Architectures](#supported-architectures)
 * [Quick Reference](#quick-reference)
 * [What is BridgeLink (formerly Mirth Connect)](#what-is-connect)
+* [Hardened (DHI) image](#hardened-dhi-image)
 * [How to use this image](#how-to-use)
   * [Start a BridgeLink instance](#start-bridgelink)
   * [Using `docker stack deploy` or `docker-compose`](#using-docker-compose)
@@ -31,6 +32,10 @@
 * [4.6.0](https://github.com/Innovar-Healthcare/bridgelink-container/blob/bl_4.6.0/Dockerfile)
 * [4.5.4](https://github.com/Innovar-Healthcare/bridgelink-container/blob/bl_4.5.4/Dockerfile)
 * [4.5.3](https://github.com/Innovar-Healthcare/bridgelink-container/blob/bl_4.5.3/Dockerfile)
+
+##### Amazon Corretto Debian 13 — Docker Hardened Image (DHI)
+
+* [26.3.1-dhi](https://github.com/Innovar-Healthcare/bridgelink-container/blob/main/Dockerfile.dhi)
 
 ------------
 
@@ -69,6 +74,47 @@ docker pull --platform linux/arm64 innovarhealthcare/bridgelink:latest
 An open-source message integration engine focused on healthcare. For more information please visit our [GitHub page](https://github.com/Innovar-Healthcare/BridgeLink/tree/bridgelink_development).
 
 <img src="https://raw.githubusercontent.com/Innovar-Healthcare/BridgeLink/bridgelink_development/server/public_html/images/MirthConnect_Logo_WordMark_Big.png"/>
+
+------------
+
+<a name="hardened-dhi-image"></a>
+# Hardened (DHI) image [↑](#top)
+
+In addition to the default Rocky Linux image (`Dockerfile`), BridgeLink ships a **hardened image**
+built on the [Amazon Corretto Debian 13 Docker Hardened Image](https://hub.docker.com/hardened-images/catalog/dhi/amazoncorretto)
+(`Dockerfile.dhi`), for environments that require a minimal, near-zero-CVE base. The hardened
+runtime has **no shell, no package manager, and runs as non-root UID `65532`**. Its config/startup
+logic is handled by a small shell-free Java launcher (`bootstrap/BridgeLinkBootstrap.java`) instead
+of the bash `entrypoint.sh` — **all environment variables, Docker secrets, and volumes documented
+below work identically on both images.**
+
+Key differences from the Rocky image:
+
+| | Rocky image (`Dockerfile`) | Hardened image (`Dockerfile.dhi`) |
+|---|---|---|
+| Base | Rocky Linux 9 + OpenJDK 17 | Amazon Corretto 17 / Debian 13 DHI |
+| Non-root UID | 1000 | **65532** |
+| Shell / package manager | present | **none** (runtime) |
+| Image tag suffix | *(none)* | `-dhi` |
+
+**Build** (the DHI base is pulled from the free Community registry — run `docker login dhi.io` first):
+
+```
+docker build -f Dockerfile.dhi \
+  --build-arg BINARY_URL="<s3:// or https:// BridgeLink release tarball>" \
+  --secret id=aws_credentials,src=$HOME/.aws/credentials \
+  -t innovarhealthcare/bridgelink:26.3.1-dhi .
+```
+
+**Run** — same as the Rocky image, but use the `-dhi` tag and UID `65532`. Any mounted `appdata` /
+`custom-extensions` directory must be owned by `65532` so the container can write to it:
+
+```
+chown -R 65532:65532 ./appdata
+docker compose -f docker-compose.dhi.yml up
+```
+
+For Kubernetes, deploy the Helm chart with `--set bridgelink.runAsUser=65532 --set bridgelink.runAsGroup=65532`.
 
 ------------
 
