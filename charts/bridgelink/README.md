@@ -1,8 +1,8 @@
 # bridgelink
 
-![Version: 0.1.0](https://img.shields.io/badge/Version-0.1.0-informational?style=flat-square)
+![Version: 0.2.0](https://img.shields.io/badge/Version-0.2.0-informational?style=flat-square)
 ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square)
-![AppVersion: 4.5.4](https://img.shields.io/badge/AppVersion-4.5.4-informational?style=flat-square)
+![AppVersion: 26.3.1](https://img.shields.io/badge/AppVersion-26.3.1-informational?style=flat-square)
 
 A Helm chart for BridgeLink deployment
 
@@ -154,7 +154,7 @@ The chart supports different types of persistence:
 | bridgelink.environment.SERVER_ID | string | `"7d760af2-680a-4a19-b9a2-c4685df61ebc"` | Unique server identifier |
 | bridgelink.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy |
 | bridgelink.image.repository | string | `"innovarhealthcare/bridgelink"` | BridgeLink container image repository |
-| bridgelink.image.tag | string | `"4.5.4"` | BridgeLink container image tag |
+| bridgelink.image.tag | string | `"26.3.1"` | BridgeLink container image tag. Defaults to the Rocky image. For the hardened (DHI) image set `tag: 26.3.1-dhi` and `runAsUser: 65532` / `runAsGroup: 65532` (see below). |
 | bridgelink.nodeSelector | object | `{}` | Node selector for BridgeLink pods |
 | bridgelink.replicaCount | int | `1` | Number of BridgeLink replicas to deploy |
 | bridgelink.resources.limits.cpu | string | `"2000m"` | CPU limit for BridgeLink pods |
@@ -173,7 +173,7 @@ The chart supports different types of persistence:
 | postgres.enabled | bool | `true` | Enable PostgreSQL deployment (set to false to use external database) |
 | postgres.image.pullPolicy | string | `"IfNotPresent"` | PostgreSQL image pull policy |
 | postgres.image.repository | string | `"postgres"` | PostgreSQL image repository |
-| postgres.image.tag | string | `"14-alpine"` | PostgreSQL image tag |
+| postgres.image.tag | string | `"16-alpine"` | PostgreSQL image tag (kept in sync with docker-compose.yml) |
 | postgres.persistence.enabled | bool | `true` | Enable PostgreSQL persistence |
 | postgres.persistence.size | string | `"10Gi"` | PostgreSQL storage size |
 | postgres.persistence.storageClass | string | `""` | Storage class for PostgreSQL (empty uses cluster default) |
