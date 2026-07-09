@@ -60,7 +60,7 @@ RUN javac -d /opt/bridgelink/bootstrap /opt/bridgelink/bootstrap/BridgeLinkBoots
 # server container; removing their launchers alongside the jars/libs avoids a dangling launcher
 # that fails with ClassNotFoundException (see issue #13).
 WORKDIR /opt/bridgelink
-RUN rm -rf mirth-cli-launcher.jar mirth-manager-launcher.jar blmanager blcommand cli-lib
+RUN rm -rf mirth-cli-launcher.jar mirth-manager-launcher.jar blmanager blcommand cli-lib manager-lib
 
 # Pre-create writable dirs; ownership for the DHI non-root UID (65532) is stamped once by the
 # runtime stage's COPY --chown (a chown -R here would just duplicate a ~500MB build layer).

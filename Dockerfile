@@ -53,7 +53,7 @@ RUN mkdir -p /opt/bridgelink/appdata && chown bridgelink:bridgelink /opt/bridgel
 # are all removed — leaving a launcher without its jar/libs produces a confusing
 # ClassNotFoundException at runtime (see issue #13).
 WORKDIR /opt/bridgelink
-RUN rm -r mirth-cli-launcher.jar mirth-manager-launcher.jar blmanager blcommand cli-lib
+RUN rm -r mirth-cli-launcher.jar mirth-manager-launcher.jar blmanager blcommand cli-lib manager-lib
 
 # Ensure the entrypoint script is executable and that the application files have proper ownership
 RUN chmod 755 /opt/scripts/entrypoint.sh && \
