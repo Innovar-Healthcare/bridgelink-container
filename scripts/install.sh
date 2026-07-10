@@ -34,7 +34,9 @@ for i in $(seq 1 $MAX_RETRIES); do
   if [[ "$BINARY_URL" == s3://* ]]; then
     aws s3 cp "$BINARY_URL" "$FILE_NAME" 2>&1 | tee -a "$LOG_FILE"
   else
-    curl -L --max-time 10000 -o "$FILE_NAME" "$BINARY_URL" 2>&1 | tee -a "$LOG_FILE"
+    # -f: fail (non-zero) on HTTP errors (404/5xx) instead of saving the error body as the tarball,
+    # so the retry loop actually re-attempts transient server errors on the https path.
+    curl -fL --max-time 10000 -o "$FILE_NAME" "$BINARY_URL" 2>&1 | tee -a "$LOG_FILE"
   fi
   # With pipefail set, $? here reflects curl/aws (the failing side of the pipe), not tee.
   [ $? -eq 0 ] && break
