@@ -139,6 +139,19 @@ The chart supports different types of persistence:
      storageClass: "standard"
    ```
 
+## Upgrading
+
+**Bundled PostgreSQL default moved from `14-alpine` to `16-alpine` (chart 0.2.0).** PostgreSQL does
+not upgrade its on-disk data directory across major versions automatically, so an existing release
+that used the bundled PostgreSQL 14 will **crash-loop** if simply upgraded to the 16 image against the
+old PVC (`FATAL: database files are incompatible with server`). For existing installs, either:
+
+- **Stay on 14** — pin the old image: `--set postgres.image.tag=14-alpine`, or
+- **Migrate the data** — `pg_dumpall` from 14, then restore into a fresh 16 volume, then upgrade.
+
+Fresh installs are unaffected. If you use an external database (`postgres.enabled=false`), this does
+not apply.
+
 ## Configuration
 
 | Key | Type | Default | Description |
@@ -161,6 +174,8 @@ The chart supports different types of persistence:
 | bridgelink.resources.limits.memory | string | `"2Gi"` | Memory limit for BridgeLink pods |
 | bridgelink.resources.requests.cpu | string | `"500m"` | CPU request for BridgeLink pods |
 | bridgelink.resources.requests.memory | string | `"1Gi"` | Memory request for BridgeLink pods |
+| bridgelink.runAsGroup | int | `1000` | Non-root GID the container runs as (see runAsUser). 1000 for Rocky, 65532 for DHI. |
+| bridgelink.runAsUser | int | `1000` | Non-root UID the container runs as. Use 1000 for the Rocky image, 65532 for the hardened (DHI) image. Must match the image so mounted appdata/custom-extensions are writable. |
 | bridgelink.service.ports.http | int | `8080` | HTTP port for web interface |
 | bridgelink.service.ports.https | int | `8443` | HTTPS port for secure web interface |
 | bridgelink.service.type | string | `"LoadBalancer"` | Service type for BridgeLink (LoadBalancer, ClusterIP, NodePort) |
