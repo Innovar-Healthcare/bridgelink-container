@@ -11,8 +11,9 @@ bridgelink:
   image:
     # -- BridgeLink container image repository
     repository: innovarhealthcare/bridgelink
-    # -- BridgeLink container image tag
-    tag: 4.5.4
+    # -- BridgeLink container image tag. Defaults to the Rocky image. For the hardened (DHI) image
+    # set `tag: 26.3.1-dhi` and `runAsUser: 65532` / `runAsGroup: 65532` (see below).
+    tag: 26.3.1
     # -- Image pull policy
     pullPolicy: IfNotPresent
 
@@ -76,8 +77,8 @@ postgres:
   image:
     # -- PostgreSQL image repository
     repository: postgres
-    # -- PostgreSQL image tag
-    tag: 14-alpine
+    # -- PostgreSQL image tag (kept in sync with docker-compose.yml)
+    tag: 16-alpine
     # -- PostgreSQL image pull policy
     pullPolicy: IfNotPresent
   

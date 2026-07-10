@@ -294,7 +294,7 @@
               "title": "repository"
             },
             "tag": {
-              "default": "14-alpine",
+              "default": "16-alpine",
               "description": "PostgreSQL container image tag",
               "required": [],
               "title": "tag"
