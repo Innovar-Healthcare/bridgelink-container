@@ -9,8 +9,10 @@
     "Renovate abort the ENTIRE run for this repo (init-phase 'Unknown secrets name'). Without the",
     "dhi.io credential Renovate still manages Actions + the Rocky base; only the Corretto DHI base",
     "digest won't resolve.",
-    "Manages: GitHub Actions versions and Dockerfile base images; pins everything to digests so",
-    "updates arrive as deliberate PRs that CI (test-dhi/test-rocky) and the Trivy scan gate."
+    "Manages ONLY the dockerfile + github-actions managers (see enabledManagers): the docker-compose*",
+    "sample files are intentionally left unmanaged so Renovate does not digest-pin our own repushed",
+    "innovarhealthcare/bridgelink tags there and point users at superseded images. Pins everything it",
+    "does manage to digests so updates arrive as deliberate PRs that CI (test-dhi/test-rocky) + Trivy gate."
   ],
   "extends": [
     "config:recommended",
@@ -20,6 +22,7 @@
   "timezone": "America/Chicago",
   "schedule": ["before 6am on monday"],
   "pinDigests": true,
+  "enabledManagers": ["dockerfile", "github-actions"],
   "packageRules": [
     {
       "description": "Group GitHub Actions bumps into one PR.",
