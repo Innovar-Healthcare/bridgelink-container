@@ -1,18 +1,32 @@
 #!/usr/bin/env bash
 #
-# Automated acceptance tests for the hardened (DHI) BridgeLink image (Dockerfile.dhi) — IRT-1356.
-# Asserts the properties Sectra care about plus config-injection parity with the Rocky image.
+# Automated acceptance tests for the BridgeLink container images — IRT-1356 (DHI), IRT-1391 (Rocky).
+# Asserts boot + config-injection parity across the hardened (DHI) and Rocky images from one suite.
+#
+# Parameterized by env var:
+#   IMAGE           image to test (default innovarhealthcare/bridgelink:dhi-test)
+#   DOCKERFILE      Dockerfile to build when SKIP_BUILD!=1 (default Dockerfile.dhi; Dockerfile for Rocky)
+#   EXPECTED_UID    non-root UID the image must run as (default 65532; 1000 for Rocky)
+#   CHECK_NO_SHELL  1 = assert the runtime has no shell (DHI); 0 = skip (Rocky has a shell)
+#   SKIP_BUILD      1 = test an existing IMAGE instead of building
 #
 # Usage:
-#   BINARY_URL="https://.../BridgeLink_unix_26_3_1.tar.gz" test/dhi-test.sh   # builds, then tests
-#   IMAGE=innovarhealthcare/bridgelink:26.3.1-dhi SKIP_BUILD=1 test/dhi-test.sh   # tests existing image
+#   # DHI (defaults):
+#   BINARY_URL="https://.../BridgeLink_unix_26_3_1.tar.gz" test/image-test.sh
+#   IMAGE=innovarhealthcare/bridgelink:26.3.1-dhi SKIP_BUILD=1 test/image-test.sh
+#   # Rocky:
+#   BINARY_URL="https://.../..." IMAGE=innovarhealthcare/bridgelink:rocky-test \
+#     DOCKERFILE=Dockerfile EXPECTED_UID=1000 CHECK_NO_SHELL=0 test/image-test.sh
 #
-# Requires: docker (with buildx), python3, curl. For the build/DHI-base pull: `docker login dhi.io`.
+# Requires: docker (with buildx), python3, curl. Building the DHI image needs `docker login dhi.io`.
 set -u
 
 IMAGE="${IMAGE:-innovarhealthcare/bridgelink:dhi-test}"
 SKIP_BUILD="${SKIP_BUILD:-0}"
-NET="bl-dhi-test-net-$$"
+DOCKERFILE="${DOCKERFILE:-Dockerfile.dhi}"
+EXPECTED_UID="${EXPECTED_UID:-65532}"
+CHECK_NO_SHELL="${CHECK_NO_SHELL:-1}"
+NET="bl-test-net-$$"
 WORK="$(mktemp -d)"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
@@ -34,6 +48,27 @@ cleanup() {
 CIDS=()
 trap cleanup EXIT
 run() { local name="$1"; shift; CIDS+=("$name"); docker run -d --name "$name" "$@" "$IMAGE" >/dev/null; }
+
+# vmoptions assertions differ by launcher: the DHI bootstrap echoes the assembled JVM command line to
+# stdout (so we grep the log — this also exercises the bootstrap's add-opens dedup logic); the Rocky
+# ./blserver vendor launcher does not, so we inspect blserver.vmoptions on disk. Same net assertion.
+vmopt_has() {   # <container> <fixed-string>  -> return 0 if present
+  if [ "$CHECK_NO_SHELL" = "1" ]; then
+    docker logs "$1" 2>&1 | grep -q -- "$2"
+  else
+    docker cp "$1:/opt/bridgelink/blserver.vmoptions" "$WORK/_vmo" >/dev/null 2>&1 && grep -q -- "$2" "$WORK/_vmo"
+  fi
+}
+vmopt_count() {  # <container> <pattern>  -> echo occurrence count
+  if [ "$CHECK_NO_SHELL" = "1" ]; then
+    docker logs "$1" 2>&1 | grep -o "$2" | wc -l | tr -d ' '
+  elif docker cp "$1:/opt/bridgelink/blserver.vmoptions" "$WORK/_vmo" >/dev/null 2>&1; then
+    # grep -c prints "0" and exits 1 on no match; keep just the count, swallow the exit.
+    grep -c "$2" "$WORK/_vmo" 2>/dev/null || true
+  else
+    echo 0
+  fi
+}
 
 # Poll a container's logs for a pattern (default: successful start). Returns non-zero on timeout.
 wait_for_log() {
@@ -71,9 +106,9 @@ PY
 
 # ---- build (optional) -------------------------------------------------------------------------
 if [ "$SKIP_BUILD" != "1" ]; then
-  info "Building $IMAGE from Dockerfile.dhi"
+  info "Building $IMAGE from $DOCKERFILE"
   : "${BINARY_URL:?set BINARY_URL to build, or set SKIP_BUILD=1 to test an existing IMAGE}"
-  docker build -f "$REPO_ROOT/Dockerfile.dhi" --load \
+  docker build -f "$REPO_ROOT/$DOCKERFILE" --load \
     --build-arg BINARY_URL="$BINARY_URL" \
     ${AWS_CREDENTIALS_FILE:+--secret id=aws_credentials,src=$AWS_CREDENTIALS_FILE} \
     -t "$IMAGE" "$REPO_ROOT" || { echo "BUILD FAILED"; exit 1; }
@@ -81,15 +116,25 @@ fi
 
 docker network create "$NET" >/dev/null
 
-# ---- 1. Hardening: no shell / no bash in the runtime -----------------------------------------
-info "1. Hardened runtime has no shell"
-if docker run --rm --entrypoint sh "$IMAGE" -c 'echo x' >/dev/null 2>&1; then bad "sh present"; else ok "no sh"; fi
-if docker run --rm --entrypoint /bin/bash "$IMAGE" -c 'echo x' >/dev/null 2>&1; then bad "bash present"; else ok "no bash"; fi
+# ---- 1. Hardening: no shell / no bash in the runtime (DHI only) -------------------------------
+if [ "$CHECK_NO_SHELL" = "1" ]; then
+  info "1. Hardened runtime has no shell"
+  if docker run --rm --entrypoint sh "$IMAGE" -c 'echo x' >/dev/null 2>&1; then bad "sh present"; else ok "no sh"; fi
+  if docker run --rm --entrypoint /bin/bash "$IMAGE" -c 'echo x' >/dev/null 2>&1; then bad "bash present"; else ok "no bash"; fi
+else
+  info "1. No-shell check skipped (CHECK_NO_SHELL=0 — the Rocky image ships a shell by design)"
+fi
 
-# ---- 2. Runs non-root as UID 65532 ------------------------------------------------------------
-info "2. Non-root UID 65532"
+# ---- 2. Runs non-root as the expected UID -----------------------------------------------------
+info "2. Non-root UID $EXPECTED_UID"
 U="$(docker image inspect "$IMAGE" --format '{{.Config.User}}')"
-[ "$U" = "65532" ] && ok "image User=65532" || bad "image User=$U (expected 65532)"
+if printf '%s' "$U" | grep -qE '^[0-9]+$'; then
+  RUID="$U"   # numeric USER directive (e.g. DHI 'USER 65532')
+else
+  # Rocky sets USER by name ('USER bridgelink'); resolve the effective uid via the shell it ships.
+  RUID="$(docker run --rm --entrypoint id "$IMAGE" -u 2>/dev/null | tr -d '[:space:]')"
+fi
+[ "$RUID" = "$EXPECTED_UID" ] && ok "runs as non-root uid $EXPECTED_UID (User=$U)" || bad "uid=$RUID User=$U (expected $EXPECTED_UID)"
 
 # ---- 3. Boot (Derby) + config injection -------------------------------------------------------
 info "3. Boot on Derby + MP_/SERVER_ID/MP_VMOPTIONS injection"
@@ -105,9 +150,9 @@ if wait_for_log bl-derby; then
   grep -q '11111111-2222-3333-4444-555555555555' "$WORK/sid" && ok "SERVER_ID written" || bad "SERVER_ID missing"
   docker cp bl-derby:/opt/bridgelink/conf/mirth.properties "$WORK/mp" >/dev/null 2>&1
   grep -q '^keystore.storepass = testStorePass123' "$WORK/mp" && ok "MP_ injected" || bad "MP_ not injected"
-  docker logs bl-derby 2>&1 | grep -q -- '-Xmx512m' && ok "MP_VMOPTIONS -Xmx applied" || bad "MP_VMOPTIONS not applied"
+  vmopt_has bl-derby '-Xmx512m' && ok "MP_VMOPTIONS -Xmx applied" || bad "MP_VMOPTIONS not applied"
   # add-opens must appear exactly once (dedup)
-  N="$(docker logs bl-derby 2>&1 | grep -o 'add-opens=java.base/java.util=ALL-UNNAMED' | wc -l | tr -d ' ')"
+  N="$(vmopt_count bl-derby 'add-opens=java.base/java.util=ALL-UNNAMED')"
   [ "$N" = "1" ] && ok "add-opens dedup (x1)" || bad "add-opens appears x$N"
 else
   bad "server did not start (Derby)"; docker logs bl-derby 2>&1 | tail -20
@@ -121,10 +166,11 @@ run bl-secrets -p 8443 \
   -v "$WORK/ext:/opt/bridgelink/custom-extensions:ro"
 if wait_for_log bl-secrets; then
   docker cp bl-secrets:/opt/bridgelink/conf/mirth.properties "$WORK/mp2" >/dev/null 2>&1
-  grep -q '^secret.injected.prop = fromSecret' "$WORK/mp2" && ok "properties secret merged" || bad "properties secret not merged"
+  # Whitespace-tolerant around '=': entrypoint.sh (Rocky) writes "key  =  value", the bootstrap "key = value".
+  grep -qE '^secret\.injected\.prop[[:space:]]*=[[:space:]]*fromSecret' "$WORK/mp2" && ok "properties secret merged" || bad "properties secret not merged"
   # -a: the 0xE9 byte makes grep treat the file as binary otherwise
-  grep -aq 'secret.latin1.prop = caf' "$WORK/mp2" && ok "Latin-1 secret survives (charset regression)" || bad "Latin-1 secret missing (charset regression)"
-  docker logs bl-secrets 2>&1 | grep -q -- '-Dsecret.vmopt=enabled' && ok "vmoptions secret appended" || bad "vmoptions secret missing"
+  grep -aqE '^secret\.latin1\.prop[[:space:]]*=[[:space:]]*caf' "$WORK/mp2" && ok "Latin-1 secret survives (charset regression)" || bad "Latin-1 secret missing (charset regression)"
+  vmopt_has bl-secrets '-Dsecret.vmopt=enabled' && ok "vmoptions secret appended" || bad "vmoptions secret missing"
   docker cp bl-secrets:/opt/bridgelink/extensions/myextension/plugin.txt "$WORK/pl" >/dev/null 2>&1 \
     && ok "custom-extension zip extracted" || bad "custom-extension not extracted"
 else
@@ -166,7 +212,7 @@ run bl-knobs --network "$NET" \
 if wait_for_log bl-knobs; then
   docker cp bl-knobs:/opt/bridgelink/conf/mirth.properties "$WORK/mp3" >/dev/null 2>&1
   grep -q '^custom.download.marker = downloaded' "$WORK/mp3" && ok "CUSTOM_PROPERTIES overwrote mirth.properties" || bad "CUSTOM_PROPERTIES not applied"
-  docker logs bl-knobs 2>&1 | grep -q -- '-Dcustom.vmopt.marker=downloaded' && ok "CUSTOM_VMOPTIONS applied" || bad "CUSTOM_VMOPTIONS not applied"
+  vmopt_has bl-knobs '-Dcustom.vmopt.marker=downloaded' && ok "CUSTOM_VMOPTIONS applied" || bad "CUSTOM_VMOPTIONS not applied"
   docker cp bl-knobs:/opt/bridgelink/custom-jars/mycustomjar/lib.txt "$WORK/cj" >/dev/null 2>&1 && ok "CUSTOM_JARS_DOWNLOAD extracted" || bad "CUSTOM_JARS_DOWNLOAD not extracted"
 else
   bad "server did not start (custom knobs)"
