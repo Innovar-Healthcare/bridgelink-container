@@ -10,6 +10,8 @@
 #     DHI_USERNAME       / DHI_TOKEN         free Docker account, to pull the DHI base from dhi.io
 #     AWS_CREDENTIALS                        contents of an ~/.aws/credentials file (only needed
 #                                            when BINARY_URL is an s3:// URL; harmless otherwise)
+#     SLACK_WEBHOOK_URL   (optional)         Slack Incoming Webhook for the weekly scan summary
+#                                            (notify-slack job); if unset, that job skips silently
 #   Variables (defaults used by the scheduled rebuild):
 #     DEFAULT_VERSION      e.g. 26.3.1
 #     DEFAULT_BINARY_URL   s3:// (internal) or https:// (public) BridgeLink release tarball
@@ -281,3 +283,49 @@ jobs:
           secrets: |
             aws_credentials=${{ secrets.AWS_CREDENTIALS }}
           tags: ${{ steps.tags.outputs.list }}
+
+  # Post the image-scan summary to Slack (IRT-1390). Fires on the weekly scheduled scan and on manual
+  # workflow_dispatch (for an on-demand report) — never on pull_request, so PRs stay quiet (new-PR
+  # notifications are handled by the GitHub Slack app). One message: each image's gate result + total
+  # finding count + links. Skips silently if SLACK_WEBHOOK_URL is unset, and never reds the run on a
+  # Slack hiccup (a delivery failure is a warning, not a build failure).
+  notify-slack:
+    needs: [test-dhi, test-rocky]
+    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: read   # read code-scanning analyses for the finding counts
+    steps:
+      - name: Post scan summary to Slack
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          DHI_RESULT: ${{ needs.test-dhi.result }}
+          ROCKY_RESULT: ${{ needs.test-rocky.result }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          REF: ${{ github.ref }}
+          SERVER_URL: ${{ github.server_url }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          if [ -z "$SLACK_WEBHOOK_URL" ]; then
+            echo "SLACK_WEBHOOK_URL not set — skipping Slack notification."; exit 0
+          fi
+          icon() { [ "$1" = "success" ] && printf ':white_check_mark:' || printf ':x:'; }
+          # latest results_count for a category on this run's ref (best-effort; 'n/a' if unavailable)
+          count() {
+            gh api "repos/$REPO/code-scanning/analyses?ref=$REF&per_page=100" \
+              --jq "map(select(.category==\"$1\"))|.[0].results_count // \"n/a\"" 2>/dev/null || echo "n/a"
+          }
+          sec="$SERVER_URL/$REPO/security/code-scanning"
+          run="$SERVER_URL/$REPO/actions/runs/$RUN_ID"
+          text="$(printf '%s\n' \
+            "*BridgeLink container — image scan summary* (\`main\`)" \
+            "$(icon "$DHI_RESULT") DHI gate: \`$DHI_RESULT\`  ·  $(count trivy-dhi) findings" \
+            "$(icon "$ROCKY_RESULT") Rocky gate: \`$ROCKY_RESULT\`  ·  $(count trivy-rocky) findings" \
+            "<$sec|Code scanning report>  ·  <$run|workflow run>" \
+            "_Gate = fixable HIGH/CRITICAL OS packages; counts are all-severity incl. bundled libraries (IRT-1396)._")"
+          payload="$(jq -n --arg t "$text" '{text:$t}')"
+          code="$(curl -s -o /tmp/slack_resp -w '%{http_code}' -X POST -H 'Content-type: application/json' --data "$payload" "$SLACK_WEBHOOK_URL")"
+          echo "Slack HTTP $code: $(cat /tmp/slack_resp)"
+          [ "$code" = "200" ] || echo "::warning::Slack notification returned HTTP $code"
