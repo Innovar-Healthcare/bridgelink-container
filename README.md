@@ -151,12 +151,17 @@ Behavior notes specific to the hardened image:
   headroom: `docker stop -t 35`, compose `stop_grace_period: 35s`, or a pod
   `terminationGracePeriodSeconds: 35`.
 
-**Test** the hardened image (no-shell, boot, config/secret/extension injection, Postgres, graceful
-shutdown, persistence) with the acceptance suite — this is the same suite CI runs before publishing:
+**Test** the images (no-shell [DHI], boot, config/secret/extension injection, Postgres/MySQL, graceful
+shutdown, persistence) with the acceptance suite `test/image-test.sh` — the same suite CI runs on PRs:
 
 ```
-BINARY_URL="<release tarball>" test/dhi-test.sh              # builds, then tests
-IMAGE=innovarhealthcare/bridgelink:26.3.1-dhi SKIP_BUILD=1 test/dhi-test.sh   # test an existing image
+# Hardened (DHI) image — defaults:
+BINARY_URL="<release tarball>" test/image-test.sh              # builds, then tests
+IMAGE=innovarhealthcare/bridgelink:26.3.1-dhi SKIP_BUILD=1 test/image-test.sh   # test an existing image
+
+# Rocky image (UID 1000, shell present -> no-shell check skipped):
+BINARY_URL="<release tarball>" IMAGE=innovarhealthcare/bridgelink:26.3.1 \
+  DOCKERFILE=Dockerfile EXPECTED_UID=1000 CHECK_NO_SHELL=0 test/image-test.sh
 ```
 
 ------------

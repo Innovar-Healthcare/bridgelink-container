@@ -1,8 +1,8 @@
 # Build, test & publish the hardened (DHI) BridgeLink image  —  IRT-1356
 #
-# This workflow ONLY builds/publishes the hardened image (Dockerfile.dhi), tagged `<version>-dhi`
-# / `latest-dhi`. The Rocky image (Dockerfile) is published by its existing process and is left
-# completely unaffected by this pipeline.
+# This workflow only PUBLISHES the hardened image (Dockerfile.dhi), tagged `<version>-dhi` /
+# `latest-dhi`. It also builds + acceptance-tests + vuln-scans the Rocky image on PRs (IRT-1391 /
+# IRT-1390), but never publishes it — the Rocky image keeps being published by its existing process.
 #
 # DRAFT — review before enabling. Create these repo secrets/variables first:
 #   Secrets:
@@ -51,7 +51,8 @@ on:
       - "Dockerfile.dhi"
       - "bootstrap/**"
       - "scripts/install.sh"
-      - "test/dhi-test.sh"
+      - "scripts/entrypoint.sh"
+      - "test/image-test.sh"
       - ".trivyignore"
       - ".github/workflows/build-images.yml"
 
@@ -122,7 +123,8 @@ jobs:
           secrets: |
             aws_credentials=${{ github.event_name != 'pull_request' && secrets.AWS_CREDENTIALS || '' }}
       - name: Run acceptance tests
-        run: IMAGE=innovarhealthcare/bridgelink:dhi-test SKIP_BUILD=1 bash test/dhi-test.sh
+        # DHI defaults (EXPECTED_UID=65532, CHECK_NO_SHELL=1, DOCKERFILE=Dockerfile.dhi) are implicit.
+        run: IMAGE=innovarhealthcare/bridgelink:dhi-test SKIP_BUILD=1 bash test/image-test.sh
 
       # --- Vulnerability scan (IRT-1390) -----------------------------------------------------------
       # Full report (all severities, incl. unfixed) -> SARIF -> Security tab. Non-failing so the gate
@@ -161,11 +163,10 @@ jobs:
         env:
           TRIVY_PKG_TYPES: os
 
-  # Vulnerability scan of the Rocky image (IRT-1390). The Rocky image has no CI acceptance suite yet
-  # (that arrives in IRT-1391, which will fold this scan into a `test-rocky` job and drop this one),
-  # so this interim job builds it single-arch and scans it. Publishing of the Rocky image is
-  # unaffected — this only builds a throwaway local image to scan.
-  scan-rocky:
+  # Gate: build the Rocky image single-arch, run the same acceptance suite (UID 1000, shell present),
+  # then scan it (IRT-1391). Mirrors test-dhi. Rocky PUBLISHING is unaffected — this only builds a
+  # throwaway local image for PR testing; the Rocky image keeps being published by its own process.
+  test-rocky:
     needs: params
     runs-on: ubuntu-latest
     permissions:
@@ -174,7 +175,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
-      # Authenticated Docker Hub pulls (the rockylinux base + avoiding the anon pull-rate limit).
+      # Authenticated Docker Hub pulls (the rockylinux base + the suite's nginx/postgres/mysql pulls;
+      # avoids the anonymous pull-rate limit on shared runner IPs).
       - name: Log in to Docker Hub (authenticated pulls)
         uses: docker/login-action@v3
         with:
@@ -193,6 +195,12 @@ jobs:
           # Only pass AWS creds on trusted (non-PR) events — see test-dhi for the rationale.
           secrets: |
             aws_credentials=${{ github.event_name != 'pull_request' && secrets.AWS_CREDENTIALS || '' }}
+      - name: Run acceptance tests
+        # Rocky runs as UID 1000 and ships a shell, so the no-shell assertion is skipped for it.
+        run: |
+          IMAGE=innovarhealthcare/bridgelink:rocky-test SKIP_BUILD=1 \
+            DOCKERFILE=Dockerfile EXPECTED_UID=1000 CHECK_NO_SHELL=0 \
+            bash test/image-test.sh
       - name: Trivy scan (SARIF, full report) — Rocky
         uses: aquasecurity/trivy-action@v0.36.0
         with:
@@ -201,6 +209,9 @@ jobs:
           format: sarif
           output: trivy-rocky.sarif
           exit-code: "0"
+        env:
+          # Full report must include everything; .trivyignore stays scoped to the gate step below.
+          TRIVY_IGNOREFILE: /dev/null
       - name: Upload Trivy SARIF — Rocky
         if: always()
         uses: github/codeql-action/upload-sarif@v3
