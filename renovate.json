@@ -1,0 +1,48 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": [
+    "Dependency automation for bridgelink-container (IRT-1392).",
+    "SETUP: requires the Mend Renovate GitHub App enabled on the Innovar-Healthcare org (or a",
+    "self-hosted Renovate). The dhi.io base is a PRIVATE registry — Renovate needs the DHI pull",
+    "credential (DHI_USERNAME / DHI_TOKEN) supplied via the hostRules below (Mend app secrets, or",
+    "self-hosted env), otherwise it cannot resolve/pin the Corretto DHI base digests.",
+    "Manages: GitHub Actions versions and Dockerfile base images; pins everything to digests so",
+    "updates arrive as deliberate PRs that CI (test-dhi/test-rocky) and the Trivy scan gate."
+  ],
+  "extends": [
+    "config:recommended",
+    ":dependencyDashboard"
+  ],
+  "labels": ["dependencies"],
+  "timezone": "America/Chicago",
+  "schedule": ["before 6am on monday"],
+  "pinDigests": true,
+  "packageRules": [
+    {
+      "description": "Group GitHub Actions bumps into one PR.",
+      "matchManagers": ["github-actions"],
+      "groupName": "github-actions"
+    },
+    {
+      "description": "Rocky base image (Dockerfile) — its own PR so a base bump is reviewed in isolation.",
+      "matchManagers": ["dockerfile"],
+      "matchDepNames": ["rockylinux"],
+      "groupName": "rockylinux base image"
+    },
+    {
+      "description": "Corretto Docker Hardened Image base (Dockerfile.dhi, dev + runtime variants).",
+      "matchManagers": ["dockerfile"],
+      "matchDepNames": ["dhi.io/amazoncorretto"],
+      "groupName": "corretto DHI base image"
+    }
+  ],
+  "hostRules": [
+    {
+      "description": "Auth for the private DHI registry so Renovate can resolve Corretto base digests.",
+      "matchHost": "dhi.io",
+      "hostType": "docker",
+      "username": "{{ secrets.DHI_USERNAME }}",
+      "password": "{{ secrets.DHI_TOKEN }}"
+    }
+  ]
+}
