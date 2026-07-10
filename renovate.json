@@ -3,9 +3,12 @@
   "description": [
     "Dependency automation for bridgelink-container (IRT-1392).",
     "SETUP: requires the Mend Renovate GitHub App enabled on the Innovar-Healthcare org (or a",
-    "self-hosted Renovate). The dhi.io base is a PRIVATE registry — Renovate needs the DHI pull",
-    "credential (DHI_USERNAME / DHI_TOKEN) supplied via the hostRules below (Mend app secrets, or",
-    "self-hosted env), otherwise it cannot resolve/pin the Corretto DHI base digests.",
+    "self-hosted Renovate). The dhi.io base is a PRIVATE registry — configure its pull credential",
+    "as an APP-LEVEL hostRule (Mend dashboard: host=dhi.io, or self-hosted config.js hostRules with",
+    "env), NOT here: a repo-config hostRule that references a `{{ secrets.* }}` that isn't set makes",
+    "Renovate abort the ENTIRE run for this repo (init-phase 'Unknown secrets name'). Without the",
+    "dhi.io credential Renovate still manages Actions + the Rocky base; only the Corretto DHI base",
+    "digest won't resolve.",
     "Manages: GitHub Actions versions and Dockerfile base images; pins everything to digests so",
     "updates arrive as deliberate PRs that CI (test-dhi/test-rocky) and the Trivy scan gate."
   ],
@@ -34,15 +37,6 @@
       "matchManagers": ["dockerfile"],
       "matchDepNames": ["dhi.io/amazoncorretto"],
       "groupName": "corretto DHI base image"
-    }
-  ],
-  "hostRules": [
-    {
-      "description": "Auth for the private DHI registry so Renovate can resolve Corretto base digests.",
-      "matchHost": "dhi.io",
-      "hostType": "docker",
-      "username": "{{ secrets.DHI_USERNAME }}",
-      "password": "{{ secrets.DHI_TOKEN }}"
     }
   ]
 }
