@@ -137,6 +137,19 @@ The chart supports different types of persistence:
      storageClass: "standard"
    ```
 
+## Upgrading
+
+**Bundled PostgreSQL default moved from `14-alpine` to `16-alpine` (chart 0.2.0).** PostgreSQL does
+not upgrade its on-disk data directory across major versions automatically, so an existing release
+that used the bundled PostgreSQL 14 will **crash-loop** if simply upgraded to the 16 image against the
+old PVC (`FATAL: database files are incompatible with server`). For existing installs, either:
+
+- **Stay on 14** — pin the old image: `--set postgres.image.tag=14-alpine`, or
+- **Migrate the data** — `pg_dumpall` from 14, then restore into a fresh 16 volume, then upgrade.
+
+Fresh installs are unaffected. If you use an external database (`postgres.enabled=false`), this does
+not apply.
+
 ## Configuration
 
 {{ template "chart.valuesTable" . }}
