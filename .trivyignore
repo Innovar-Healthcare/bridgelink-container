@@ -1,0 +1,29 @@
+# Trivy vulnerability allowlist  —  IRT-1390
+#
+# Scope of this file:
+#  - CI GATE (.github/workflows/build-images.yml) scans OS/base packages only
+#    (trivy --ignore-unfixed --pkg-types os) and reads this file, so an OS CVE listed here is
+#    accepted and won't fail the gate.
+#  - CI SARIF upload sets TRIVY_IGNOREFILE=/dev/null, so the Security > Code scanning report shows
+#    EVERYTHING regardless of this file — full visibility is intentional (even accepted findings stay
+#    on the dashboard as an audit trail).
+#  - Local/manual `trivy image <img>` runs (README "Scan locally") read this file by default, so
+#    entries here also keep those scans clean.
+#
+# OS/base CVEs: add one to silence the gate when a finding is a false positive, unreachable in our
+# config, or awaiting a Rocky/DHI erratum.
+#
+# Library / application-JAR CVEs come from the BridgeLink Core release tarball and are NOT gated here
+# (the gate is OS-only); they are tracked in IRT-1396. Add one only after Core has assessed it as
+# not-exploitable / unfixable, so local library scans (trivy image --pkg-types library) are clean;
+# it still shows on the CI Security tab.
+#
+# Format: justification + review date on the comment line(s) ABOVE the bare CVE ID (portable across
+# Trivy versions). Keep the list short; re-review dated entries.
+
+# CVE-2022-46337 (Apache Derby, embedded-only) — accepted per IRT-1396 triage. Not exploitable:
+# BridgeLink uses Derby strictly embedded (EmbeddedDriver, local jdbc:derby: appdata paths) with no
+# network server and no Derby authentication configured, so the LDAP-authenticator vector does not
+# exist. No Java-17 binary fix is published (10.16.1.2 was never released to Maven Central; 10.17
+# requires Java 21). Revisit when the platform moves to Java 21.
+CVE-2022-46337

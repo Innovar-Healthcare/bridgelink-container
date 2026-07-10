@@ -47,10 +47,12 @@ on:
   pull_request:
     branches: [main]
     paths:
+      - "Dockerfile"
       - "Dockerfile.dhi"
       - "bootstrap/**"
       - "scripts/install.sh"
       - "test/dhi-test.sh"
+      - ".trivyignore"
       - ".github/workflows/build-images.yml"
 
 permissions:
@@ -84,6 +86,9 @@ jobs:
   test-dhi:
     needs: params
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write   # upload the Trivy SARIF to Security > Code scanning (IRT-1390)
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
@@ -118,6 +123,102 @@ jobs:
             aws_credentials=${{ github.event_name != 'pull_request' && secrets.AWS_CREDENTIALS || '' }}
       - name: Run acceptance tests
         run: IMAGE=innovarhealthcare/bridgelink:dhi-test SKIP_BUILD=1 bash test/dhi-test.sh
+
+      # --- Vulnerability scan (IRT-1390) -----------------------------------------------------------
+      # Full report (all severities, incl. unfixed) -> SARIF -> Security tab. Non-failing so the gate
+      # below is the single source of pass/fail; uploaded even if a later step fails (if: always()).
+      - name: Trivy scan (SARIF, full report) — DHI
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: innovarhealthcare/bridgelink:dhi-test
+          scanners: vuln
+          format: sarif
+          output: trivy-dhi.sarif
+          exit-code: "0"
+        env:
+          # Full report must include everything; do NOT apply .trivyignore here (it stays scoped to
+          # the gate step) so allowlisted findings remain visible in the Security tab.
+          TRIVY_IGNOREFILE: /dev/null
+      - name: Upload Trivy SARIF — DHI
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-dhi.sarif
+          category: trivy-dhi
+      # Gate: fail the run on FIXABLE HIGH/CRITICAL in OS/base packages — the layer this repo owns.
+      # Library CVEs from the bundled BridgeLink app JARs come from the Core release tarball and can't
+      # be fixed here; they're surfaced in the SARIF above and tracked against Core (see README).
+      # .trivyignore (repo root) is auto-applied for accepted OS findings.
+      - name: Trivy gate (fixable HIGH/CRITICAL, OS packages) — DHI
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: innovarhealthcare/bridgelink:dhi-test
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          format: table
+          exit-code: "1"
+        env:
+          TRIVY_PKG_TYPES: os
+
+  # Vulnerability scan of the Rocky image (IRT-1390). The Rocky image has no CI acceptance suite yet
+  # (that arrives in IRT-1391, which will fold this scan into a `test-rocky` job and drop this one),
+  # so this interim job builds it single-arch and scans it. Publishing of the Rocky image is
+  # unaffected — this only builds a throwaway local image to scan.
+  scan-rocky:
+    needs: params
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      # Authenticated Docker Hub pulls (the rockylinux base + avoiding the anon pull-rate limit).
+      - name: Log in to Docker Hub (authenticated pulls)
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Build Rocky test image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          load: true
+          push: false
+          tags: innovarhealthcare/bridgelink:rocky-test
+          build-args: |
+            BINARY_URL=${{ needs.params.outputs.binary_url }}
+          # Only pass AWS creds on trusted (non-PR) events — see test-dhi for the rationale.
+          secrets: |
+            aws_credentials=${{ github.event_name != 'pull_request' && secrets.AWS_CREDENTIALS || '' }}
+      - name: Trivy scan (SARIF, full report) — Rocky
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: innovarhealthcare/bridgelink:rocky-test
+          scanners: vuln
+          format: sarif
+          output: trivy-rocky.sarif
+          exit-code: "0"
+      - name: Upload Trivy SARIF — Rocky
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-rocky.sarif
+          category: trivy-rocky
+      # Gate on OS/base packages only (see the DHI gate above for the rationale).
+      - name: Trivy gate (fixable HIGH/CRITICAL, OS packages) — Rocky
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: innovarhealthcare/bridgelink:rocky-test
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          format: table
+          exit-code: "1"
+        env:
+          TRIVY_PKG_TYPES: os
 
   # Publish the hardened (DHI) image (multi-arch). Only runs if the acceptance suite passed, and
   # never on pull_request. The Rocky image (Dockerfile) is intentionally NOT built or pushed here —

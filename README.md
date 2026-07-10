@@ -6,6 +6,7 @@
 * [Quick Reference](#quick-reference)
 * [What is BridgeLink (formerly Mirth Connect)](#what-is-connect)
 * [Hardened (DHI) image](#hardened-dhi-image)
+* [Image security scanning](#image-security-scanning)
 * [How to use this image](#how-to-use)
   * [Start a BridgeLink instance](#start-bridgelink)
   * [Using `docker stack deploy` or `docker-compose`](#using-docker-compose)
@@ -157,6 +158,50 @@ shutdown, persistence) with the acceptance suite — this is the same suite CI r
 BINARY_URL="<release tarball>" test/dhi-test.sh              # builds, then tests
 IMAGE=innovarhealthcare/bridgelink:26.3.1-dhi SKIP_BUILD=1 test/dhi-test.sh   # test an existing image
 ```
+
+------------
+
+<a name="image-security-scanning"></a>
+# Image security scanning [↑](#top)
+
+Both images are scanned for OS and library vulnerabilities with [Trivy](https://trivy.dev) in CI
+(`.github/workflows/build-images.yml`) on every pull request and before publish.
+
+- **Full results** (all severities, OS **and** library, including unfixed) are uploaded as SARIF to the
+  repository **Security → Code scanning** tab, one category per image (`trivy-dhi`, `trivy-rocky`).
+  Scanning the DHI image makes its near-zero-CVE base claim provable and catches regressions early.
+- **Gate:** the build **fails on _fixable_ HIGH/CRITICAL findings in OS / base-image packages**
+  (`--ignore-unfixed`, OS packages only) — the layer this repo controls. Unfixed OS CVEs (no upstream
+  patch yet) don't fail the build but are still reported.
+- **Library / application-JAR CVEs are _not_ gated here.** They come from the BridgeLink release
+  tarball baked in via `BINARY_URL` (see [What this repo is](#what-this-repo-is)); this repo can't fix
+  them — only a new Core release can. They are reported in the SARIF above and tracked against Core in
+  [IRT-1396](https://innovarhealthcare.atlassian.net/browse/IRT-1396).
+
+### Scan locally
+
+```
+trivy image innovarhealthcare/bridgelink:26.3.1          # Rocky — full report (OS + library)
+trivy image innovarhealthcare/bridgelink:26.3.1-dhi      # DHI
+# Reproduce the CI gate exactly (OS packages only):
+trivy image --severity HIGH,CRITICAL --ignore-unfixed --pkg-types os --exit-code 1 <image>
+```
+
+### Triage / allowlist an OS finding
+
+1. Review the finding in the **Security → Code scanning** tab (or the CI job's table output).
+2. Fix it by bumping the base image (the Renovate PRs keep the digest-pinned bases current) and letting
+   `yum update` / the hardened base pull the patched package.
+3. If it must be accepted (false positive, not reachable in our configuration, or awaiting a Rocky/DHI
+   erratum), add its CVE ID to [`.trivyignore`](.trivyignore) with a justification and a review date.
+   Allowlisted entries are suppressed from the gate, so keep the list short and re-review dated entries.
+
+For a library/app-JAR CVE, track it in the Core ticket
+([IRT-1396](https://innovarhealthcare.atlassian.net/browse/IRT-1396)) — it is outside the CI gate
+scope (the gate scans OS packages only) and stays visible on the Security tab regardless. Once Core
+has assessed one as not-exploitable / unfixable, you may also record it in [`.trivyignore`](.trivyignore)
+with that justification so local `trivy image` / `--pkg-types library` scans are clean; the CI SARIF
+still shows it. (Example already present: Apache Derby `CVE-2022-46337`.)
 
 ------------
 

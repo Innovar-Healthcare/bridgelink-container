@@ -4,7 +4,7 @@
 FROM rockylinux:9 AS builder
 
 # Update and install system tools and language support
-RUN yum update -y --nogpgcheck && \
+RUN yum update -y && \
     yum install -y tar gzip openssl shadow-utils unzip python3 wget glibc-langpack-en
 
 # Set UTF-8 locale environment variables
@@ -64,8 +64,11 @@ RUN chmod 755 /opt/scripts/entrypoint.sh && \
 # ============================================================
 FROM rockylinux:9 AS final
 
-# Install runtime dependencies and locale support
-RUN yum install -y java-17-openjdk java-17-openjdk-devel python3 glibc-langpack-en && \
+# Patch base OS packages (the base image ships stale packages; without this the runtime image keeps
+# them — the builder stage's update does not carry over across the FROM). Then install runtime deps
+# and locale support. Keeps the Trivy OS scan (IRT-1390) green on genuinely-patched packages.
+RUN yum update -y && \
+    yum install -y java-17-openjdk java-17-openjdk-devel python3 glibc-langpack-en && \
     yum clean all
 
 # Set UTF-8 locale environment variables
