@@ -1,5 +1,11 @@
 #!/bin/bash
 
+# Fail a pipeline on the first failing command, not just the last. Without this, `curl ... | tee`
+# and `tar ... | tee` report tee's exit status (~always 0), which silently defeated the download
+# retry loop and the extraction-failure check below (IRT-1387). NOT using `set -e` (it would abort
+# the retry loop on the first failed download) or `set -u` ($LOG_FILE is referenced before it is set).
+set -o pipefail
+
 # BINARY_URL must be provided at build time via --build-arg
 # Supports both s3:// (uses aws s3 cp) and https:// (uses curl)
 if [ -z "$BINARY_URL" ]; then
@@ -28,15 +34,18 @@ for i in $(seq 1 $MAX_RETRIES); do
   if [[ "$BINARY_URL" == s3://* ]]; then
     aws s3 cp "$BINARY_URL" "$FILE_NAME" 2>&1 | tee -a "$LOG_FILE"
   else
-    curl -L --max-time 10000 -o "$FILE_NAME" "$BINARY_URL" 2>&1 | tee -a "$LOG_FILE"
+    # -f: fail (non-zero) on HTTP errors (404/5xx) instead of saving the error body as the tarball,
+    # so the retry loop actually re-attempts transient server errors on the https path.
+    curl -fL --max-time 10000 -o "$FILE_NAME" "$BINARY_URL" 2>&1 | tee -a "$LOG_FILE"
   fi
+  # With pipefail set, $? here reflects curl/aws (the failing side of the pipe), not tee.
   [ $? -eq 0 ] && break
-  echo "Download attempt $i failed, retrying in ${RETRY_DELAY}s..." | tee -a "$LOG_FILE"
-  sleep $RETRY_DELAY
   if [ $i -eq $MAX_RETRIES ]; then
     echo "Download failed after $MAX_RETRIES attempts" | tee -a "$LOG_FILE"
     exit 1
   fi
+  echo "Download attempt $i failed, retrying in ${RETRY_DELAY}s..." | tee -a "$LOG_FILE"
+  sleep $RETRY_DELAY
 done
 
 # Create the destination folder if it doesn't exist
