@@ -128,6 +128,27 @@ jobs:
         # DHI defaults (EXPECTED_UID=65532, CHECK_NO_SHELL=1, DOCKERFILE=Dockerfile.dhi) are implicit.
         run: IMAGE=innovarhealthcare/bridgelink:dhi-test SKIP_BUILD=1 bash test/image-test.sh
 
+      # Gate the WebAdmin-only (slim) variant too: build it with the Swing Administrator stripped and
+      # run the same suite plus the strip assertion (EXPECT_NO_ADMIN_CLIENT). Proves the server still
+      # boots/serves /api without client-lib/public_html.
+      - name: Build DHI slim test image (INCLUDE_ADMIN_CLIENT=false)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.dhi
+          load: true
+          push: false
+          tags: innovarhealthcare/bridgelink:dhi-slim-test
+          build-args: |
+            BINARY_URL=${{ needs.params.outputs.binary_url }}
+            INCLUDE_ADMIN_CLIENT=false
+          secrets: |
+            aws_credentials=${{ github.event_name != 'pull_request' && secrets.AWS_CREDENTIALS || '' }}
+      - name: Run acceptance tests (slim)
+        run: |
+          IMAGE=innovarhealthcare/bridgelink:dhi-slim-test SKIP_BUILD=1 \
+            EXPECT_NO_ADMIN_CLIENT=1 bash test/image-test.sh
+
       # --- Vulnerability scan (IRT-1390) -----------------------------------------------------------
       # Full report (all severities, incl. unfixed) -> SARIF -> Security tab. Non-failing so the gate
       # below is the single source of pass/fail; uploaded even if a later step fails (if: always()).
@@ -260,15 +281,19 @@ jobs:
           username: ${{ secrets.DHI_USERNAME }}
           password: ${{ secrets.DHI_TOKEN }}
 
-      # Version tag always; rolling latest-dhi only when update_latest is set.
+      # Version tag always; rolling latest-dhi only when update_latest is set. The slim variant
+      # (WebAdmin-only, no Swing Administrator) gets the same tags with a `-slim` suffix.
       - name: Compute tags
         id: tags
         run: |
           T="innovarhealthcare/bridgelink:${{ needs.params.outputs.version }}-dhi"
+          S="innovarhealthcare/bridgelink:${{ needs.params.outputs.version }}-dhi-slim"
           if [ "${{ needs.params.outputs.update_latest }}" = "true" ]; then
             T="$T"$'\n'"innovarhealthcare/bridgelink:latest-dhi"
+            S="$S"$'\n'"innovarhealthcare/bridgelink:latest-dhi-slim"
           fi
           { echo "list<<EOF"; echo "$T"; echo "EOF"; } >> "$GITHUB_OUTPUT"
+          { echo "slim<<EOF"; echo "$S"; echo "EOF"; } >> "$GITHUB_OUTPUT"
 
       - name: Build & push DHI image
         uses: docker/build-push-action@v6
@@ -283,6 +308,21 @@ jobs:
           secrets: |
             aws_credentials=${{ secrets.AWS_CREDENTIALS }}
           tags: ${{ steps.tags.outputs.list }}
+
+      # WebAdmin-only variant: same image with the Swing Administrator stripped (INCLUDE_ADMIN_CLIENT=false).
+      - name: Build & push DHI slim image (WebAdmin-only)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.dhi
+          platforms: linux/amd64,linux/arm64
+          push: ${{ needs.params.outputs.push == 'true' }}
+          build-args: |
+            BINARY_URL=${{ needs.params.outputs.binary_url }}
+            INCLUDE_ADMIN_CLIENT=false
+          secrets: |
+            aws_credentials=${{ secrets.AWS_CREDENTIALS }}
+          tags: ${{ steps.tags.outputs.slim }}
 
   # Post the image-scan summary to Slack (IRT-1390). Fires on the weekly scheduled scan and on manual
   # workflow_dispatch (for an on-demand report) — never on pull_request, so PRs stay quiet (new-PR

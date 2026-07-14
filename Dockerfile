@@ -31,6 +31,11 @@ RUN useradd -u 1000 bridgelink
 ARG BINARY_URL
 ENV BINARY_URL=${BINARY_URL}
 
+# Include the Swing Administrator (client-lib + public_html webstart landing page)? Default keeps it.
+# Set to "false" to build a WebAdmin-only image — the server + REST API are unaffected (the server
+# classpath never references client-lib); only Java Web Start launching of the Swing client is dropped.
+ARG INCLUDE_ADMIN_CLIENT=true
+
 # Copy in the necessary scripts and ensure they are executable
 COPY scripts/install.sh /opt/scripts/install.sh
 COPY scripts/entrypoint.sh /opt/scripts/entrypoint.sh
@@ -52,8 +57,14 @@ RUN mkdir -p /opt/bridgelink/appdata && chown bridgelink:bridgelink /opt/bridgel
 # (blmanager) are meant to run outside the server container, so their launchers, jars, and libs
 # are all removed — leaving a launcher without its jar/libs produces a confusing
 # ClassNotFoundException at runtime (see issue #13).
+# The Swing Administrator (client-lib jars + the public_html webstart landing page) is stripped when
+# INCLUDE_ADMIN_CLIENT=false, producing a WebAdmin-only image (see the ARG note above).
 WORKDIR /opt/bridgelink
-RUN rm -r mirth-cli-launcher.jar mirth-manager-launcher.jar blmanager blcommand cli-lib manager-lib
+RUN rm -r mirth-cli-launcher.jar mirth-manager-launcher.jar blmanager blcommand cli-lib manager-lib && \
+    if [ "$INCLUDE_ADMIN_CLIENT" != "true" ]; then \
+      echo "INCLUDE_ADMIN_CLIENT=$INCLUDE_ADMIN_CLIENT — stripping Swing Administrator (client-lib, public_html)"; \
+      rm -rf client-lib public_html; \
+    fi
 
 # Ensure the entrypoint script is executable and that the application files have proper ownership
 RUN chmod 755 /opt/scripts/entrypoint.sh && \

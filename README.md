@@ -37,6 +37,7 @@
 ##### Amazon Corretto Debian 13 — Docker Hardened Image (DHI)
 
 * [26.3.1-dhi](https://github.com/Innovar-Healthcare/bridgelink-container/blob/main/Dockerfile.dhi)
+* [26.3.1-dhi-slim](https://github.com/Innovar-Healthcare/bridgelink-container/blob/main/Dockerfile.dhi) — WebAdmin-only (no bundled Swing Administrator)
 
 ------------
 
@@ -123,6 +124,32 @@ public `https://` URL:
   --secret id=aws_credentials,src=$HOME/.aws/credentials
 ```
 
+**WebAdmin-only (slim) variant.** The new web-based BridgeLink Administrator (WebAdmin) replaces the
+legacy Swing desktop client. For deployments that use WebAdmin, the `INCLUDE_ADMIN_CLIENT` build-arg
+strips the Swing Administrator from the image:
+
+* `INCLUDE_ADMIN_CLIENT=true` *(default)* — keeps the Swing client. The server serves it via Java
+  Web Start, exactly as today.
+* `INCLUDE_ADMIN_CLIENT=false` — removes the Swing client jars (`client-lib/`) and the Web Start
+  landing page (`public_html/`), producing a smaller, lower-attack-surface image. **The server and
+  its REST API are unaffected** — only Java Web Start launching of the Swing client and the `/`
+  landing page are dropped (they return `404`). Manage the instance with WebAdmin (its own
+  container) or the standalone WebAdmin download instead.
+
+CI publishes this variant for the DHI image as `26.3.1-dhi-slim` / `latest-dhi-slim`, alongside the
+full `-dhi` tags. The build-arg works on **both** Dockerfiles; the Rocky slim image is built the same
+way (its publish is handled by the Rocky release process):
+
+```
+docker build \
+  --build-arg BINARY_URL="https://.../BridgeLink_unix_26_3_1.tar.gz" \
+  --build-arg INCLUDE_ADMIN_CLIENT=false \
+  -t innovarhealthcare/bridgelink:26.3.1-slim .
+```
+
+> Note: this image contains BridgeLink **Core** without the Swing client — it does **not** bundle the
+> WebAdmin/WebUI itself, which ships as its own separate container.
+
 **Run.** The hardened image runs like the Rocky one; you just select it by tag and run as UID
 `65532`. Any mounted `appdata` / `custom-extensions` directory must be owned by `65532` so the
 container can write to it. A ready-to-use compose file, `docker-compose.dhi.yml`, is the DHI
@@ -162,6 +189,10 @@ IMAGE=innovarhealthcare/bridgelink:26.3.1-dhi SKIP_BUILD=1 test/image-test.sh   
 # Rocky image (UID 1000, shell present -> no-shell check skipped):
 BINARY_URL="<release tarball>" IMAGE=innovarhealthcare/bridgelink:26.3.1 \
   DOCKERFILE=Dockerfile EXPECTED_UID=1000 CHECK_NO_SHELL=0 test/image-test.sh
+
+# WebAdmin-only (slim) image — also assert the Swing Administrator was stripped:
+IMAGE=innovarhealthcare/bridgelink:26.3.1-dhi-slim SKIP_BUILD=1 \
+  EXPECT_NO_ADMIN_CLIENT=1 test/image-test.sh
 ```
 
 ------------
