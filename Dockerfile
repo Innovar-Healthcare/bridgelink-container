@@ -1,7 +1,8 @@
 # ============================================================
 # Stage 1: Builder
 # ============================================================
-FROM rockylinux:9 AS builder
+# Base pinned by digest for reproducibility; Renovate raises PRs to bump it (IRT-1392).
+FROM rockylinux:9@sha256:d7be1c094cc5845ee815d4632fe377514ee6ebcf8efaed6892889657e5ddaaa6 AS builder
 
 # Update and install system tools and language support
 RUN yum update -y && \
@@ -73,7 +74,8 @@ RUN chmod 755 /opt/scripts/entrypoint.sh && \
 # ============================================================
 # Stage 2: Runtime
 # ============================================================
-FROM rockylinux:9 AS final
+# Same digest-pinned base as the builder stage (see IRT-1392).
+FROM rockylinux:9@sha256:d7be1c094cc5845ee815d4632fe377514ee6ebcf8efaed6892889657e5ddaaa6 AS final
 
 # Patch base OS packages (the base image ships stale packages; without this the runtime image keeps
 # them — the builder stage's update does not carry over across the FROM). Then install runtime deps
