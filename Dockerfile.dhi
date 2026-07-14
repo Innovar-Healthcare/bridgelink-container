@@ -45,6 +45,11 @@ RUN ARCH=$(uname -m) && \
 ARG BINARY_URL
 ENV BINARY_URL=${BINARY_URL}
 
+# Include the Swing Administrator (client-lib + public_html webstart landing page)? Default keeps it.
+# "false" builds a WebAdmin-only image; the bootstrap launcher references only server artifacts, so
+# the server + REST API are unaffected — only Java Web Start launching of the Swing client is dropped.
+ARG INCLUDE_ADMIN_CLIENT=true
+
 # Reused, unchanged build-stage install logic (download + extract the BridgeLink release tarball).
 # AWS credentials injected via build secret (never baked into the image).
 COPY scripts/install.sh /opt/scripts/install.sh
@@ -59,8 +64,14 @@ RUN javac -d /opt/bridgelink/bootstrap /opt/bridgelink/bootstrap/BridgeLinkBoots
 # Drop unused launchers/libs (matches the Rocky image). blcommand/blmanager run outside the
 # server container; removing their launchers alongside the jars/libs avoids a dangling launcher
 # that fails with ClassNotFoundException (see issue #13).
+# When INCLUDE_ADMIN_CLIENT=false, also strip the Swing Administrator (client-lib jars + the
+# public_html webstart landing page), producing a WebAdmin-only image (see the ARG note above).
 WORKDIR /opt/bridgelink
-RUN rm -rf mirth-cli-launcher.jar mirth-manager-launcher.jar blmanager blcommand cli-lib manager-lib
+RUN rm -rf mirth-cli-launcher.jar mirth-manager-launcher.jar blmanager blcommand cli-lib manager-lib && \
+    if [ "$INCLUDE_ADMIN_CLIENT" != "true" ]; then \
+      echo "INCLUDE_ADMIN_CLIENT=$INCLUDE_ADMIN_CLIENT — stripping Swing Administrator (client-lib, public_html)"; \
+      rm -rf client-lib public_html; \
+    fi
 
 # Pre-create writable dirs; ownership for the DHI non-root UID (65532) is stamped once by the
 # runtime stage's COPY --chown (a chown -R here would just duplicate a ~500MB build layer).

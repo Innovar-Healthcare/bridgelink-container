@@ -9,6 +9,8 @@
 #   EXPECTED_UID    non-root UID the image must run as (default 65532; 1000 for Rocky)
 #   CHECK_NO_SHELL  1 = assert the runtime has no shell (DHI); 0 = skip (Rocky has a shell)
 #   SKIP_BUILD      1 = test an existing IMAGE instead of building
+#   EXPECT_NO_ADMIN_CLIENT  1 = assert the Swing Administrator (client-lib, public_html) is absent
+#                           (WebAdmin-only image built with INCLUDE_ADMIN_CLIENT=false); 0 = skip
 #
 # Usage:
 #   # DHI (defaults):
@@ -135,6 +137,20 @@ else
   RUID="$(docker run --rm --entrypoint id "$IMAGE" -u 2>/dev/null | tr -d '[:space:]')"
 fi
 [ "$RUID" = "$EXPECTED_UID" ] && ok "runs as non-root uid $EXPECTED_UID (User=$U)" || bad "uid=$RUID User=$U (expected $EXPECTED_UID)"
+
+# ---- 2b. WebAdmin-only image: Swing Administrator stripped ------------------------------------
+# Image-filesystem assertion (no running container needed). `docker export | tar -t` is
+# shell-independent, so it works for the no-shell DHI runtime too. Boot + API parity for the
+# stripped image is still covered by tests 3-8 below (they run against whatever IMAGE is given).
+if [ "${EXPECT_NO_ADMIN_CLIENT:-0}" = "1" ]; then
+  info "2b. Swing Administrator stripped (client-lib, public_html absent)"
+  CTMP="$(docker create "$IMAGE")"; CIDS+=("$CTMP")
+  if docker export "$CTMP" | tar -t 2>/dev/null | grep -qE 'opt/bridgelink/(client-lib|public_html)/'; then
+    bad "client-lib/public_html still present (INCLUDE_ADMIN_CLIENT strip did not run)"
+  else
+    ok "client-lib and public_html absent"
+  fi
+fi
 
 # ---- 3. Boot (Derby) + config injection -------------------------------------------------------
 info "3. Boot on Derby + MP_/SERVER_ID/MP_VMOPTIONS injection"
