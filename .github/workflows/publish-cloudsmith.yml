@@ -171,12 +171,19 @@ jobs:
           count=0
           for f in ./artifacts/*; do
             [ -f "$f" ] || continue
-            echo "Pushing $(basename "$f") ..."
+            fname="$(basename "$f")"
+            echo "Pushing ${fname} ..."
+            # A Cloudsmith raw package is keyed by (name, version) and holds exactly one file, so each
+            # artifact needs a UNIQUE name — we use its filename. (Reusing one name for all files
+            # collides on (name, version) and only the first upload succeeds.) --republish makes a
+            # re-run of the same version idempotent: replace the existing file instead of failing with
+            # 400 "already exists".
             cloudsmith push raw \
               "${{ env.CLOUDSMITH_NAMESPACE }}/${{ env.CLOUDSMITH_REPO }}" \
               "$f" \
-              --name bridgelink \
+              --name "$fname" \
               --version "${{ github.event.inputs.version }}" \
+              --republish \
               --no-wait-for-sync
             count=$((count + 1))
           done
