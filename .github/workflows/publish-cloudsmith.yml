@@ -1,0 +1,183 @@
+# Publish a BridgeLink release to Cloudsmith  —  IRT-1451
+#
+# Source stays public on GitHub and public releases continue on a less frequent cadence; licensed
+# customers get earlier / more frequent builds (incl. security patches) via Cloudsmith. This publishes
+# a release to the Cloudsmith repo innovarhealthcare/bridgelink — one multi-format repo holds BOTH the
+# Docker image and the raw installer/archive files, gated by a per-customer entitlement token.
+#
+# This workflow is manual-only (workflow_dispatch) — we run it by hand until the official 26.6.0
+# release ships. It is additive and does NOT touch the existing Docker Hub / DHI workflow
+# (build-images.yml); that image keeps being published by its own process.
+#
+# Two independent jobs (run in parallel):
+#   docker  — build the multi-arch Rocky image (same Dockerfile as Docker Hub) and push it to
+#             docker.cloudsmith.io/innovarhealthcare/bridgelink/bridgelink:<version>.
+#   raw     — copy every file under the release's official-release/ S3 prefix and publish them to
+#             Cloudsmith as raw packages (name `bridgelink`, version <version>).
+#
+# Release artifacts live at s3://innovar-codebuild/bridgelink/<version>/official-release/ (us-east-1).
+# AWS access is via GitHub OIDC (no static keys) — role github-bridgelink-release-read, read-only on
+# s3://innovar-codebuild/bridgelink/*.
+#
+# Required repo config (create these before the first run):
+#   Secret:
+#     CLOUDSMITH_API_KEY        Cloudsmith service-account API key (docker login password + CLI auth)
+#   Variables:
+#     CLOUDSMITH_SERVICE_SLUG   Cloudsmith service-account slug (docker login username)
+#     AWS_ROLE_ARN              arn:aws:iam::403214344436:role/github-bridgelink-release-read
+
+name: publish-cloudsmith
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "BridgeLink version to publish (e.g. 26.6.0)"
+        required: true
+      latest:
+        description: "Also tag the image `latest` in Cloudsmith"
+        type: boolean
+        default: false
+
+permissions:
+  id-token: write   # request the OIDC token used to assume the AWS role
+  contents: read
+
+concurrency:
+  group: publish-cloudsmith-${{ github.event.inputs.version }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  CLOUDSMITH_NAMESPACE: innovarhealthcare
+  CLOUDSMITH_REPO: bridgelink
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Build the multi-arch image (same Dockerfile as the Docker Hub build) and push
+  # to Cloudsmith's Docker registry.
+  # ---------------------------------------------------------------------------
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      # OIDC → temporary AWS creds. Exports AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY /
+      # AWS_SESSION_TOKEN to the job env for the following steps.
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 3600   # headroom for the emulated arm64 build
+
+      # Derive BINARY_URL from the version. Filenames use underscores in the version part
+      # (26.6.0 -> 26_6_0). install.sh (run inside the Dockerfile build) fetches this via `aws s3 cp`.
+      - name: Compute BINARY_URL
+        id: url
+        run: |
+          set -euo pipefail
+          VERSION="${{ github.event.inputs.version }}"
+          VERSION_US="${VERSION//./_}"
+          echo "binary_url=s3://innovar-codebuild/bridgelink/${VERSION}/official-release/BridgeLink_unix_${VERSION_US}.tar.gz" >> "$GITHUB_OUTPUT"
+
+      # The Dockerfile fetches the binary during the build and reads AWS creds from a mounted build
+      # secret (RUN --mount=type=secret,id=aws_credentials,target=/root/.aws/credentials). Write the
+      # OIDC session creds into an ~/.aws/credentials-format file so that mount works unchanged.
+      # Reading the values from env (not a YAML expression) keeps them out of the workflow text.
+      - name: Stage AWS credentials for the build
+        run: |
+          set -euo pipefail
+          umask 077
+          # region is honored from the credentials file by the AWS CLI; the in-build `aws s3 cp`
+          # has no other region source (no env, no ~/.aws/config, no IMDS).
+          {
+            echo "[default]"
+            echo "aws_access_key_id=${AWS_ACCESS_KEY_ID}"
+            echo "aws_secret_access_key=${AWS_SECRET_ACCESS_KEY}"
+            echo "aws_session_token=${AWS_SESSION_TOKEN}"
+            echo "region=${AWS_REGION}"
+          } > "${RUNNER_TEMP}/aws_credentials"
+
+      - name: Log in to Cloudsmith Docker registry
+        uses: docker/login-action@v3
+        with:
+          registry: docker.cloudsmith.io
+          username: ${{ vars.CLOUDSMITH_SERVICE_SLUG }}
+          password: ${{ secrets.CLOUDSMITH_API_KEY }}
+
+      # Version tag always; the rolling `latest` tag only when requested. Note the Cloudsmith Docker
+      # path is a triple: <namespace>/<repo>/<image> = innovarhealthcare/bridgelink/bridgelink.
+      - name: Compute tags
+        id: tags
+        run: |
+          set -euo pipefail
+          BASE="docker.cloudsmith.io/${{ env.CLOUDSMITH_NAMESPACE }}/${{ env.CLOUDSMITH_REPO }}/bridgelink"
+          T="${BASE}:${{ github.event.inputs.version }}"
+          if [ "${{ github.event.inputs.latest }}" = "true" ]; then
+            T="$T"$'\n'"${BASE}:latest"
+          fi
+          { echo "list<<EOF"; echo "$T"; echo "EOF"; } >> "$GITHUB_OUTPUT"
+
+      - name: Build & push image to Cloudsmith
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            BINARY_URL=${{ steps.url.outputs.binary_url }}
+          secret-files: |
+            aws_credentials=${{ runner.temp }}/aws_credentials
+          tags: ${{ steps.tags.outputs.list }}
+
+  # ---------------------------------------------------------------------------
+  # Copy every release artifact from S3 and publish it to Cloudsmith as a raw package.
+  # ---------------------------------------------------------------------------
+  raw:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Download release artifacts from S3
+        run: |
+          set -euo pipefail
+          mkdir -p ./artifacts
+          aws s3 cp \
+            "s3://innovar-codebuild/bridgelink/${{ github.event.inputs.version }}/official-release/" \
+            ./artifacts/ --recursive
+          echo "Downloaded artifacts:"
+          ls -l ./artifacts/
+          if [ -z "$(ls -A ./artifacts/ 2>/dev/null)" ]; then
+            echo "::error::No artifacts found under s3://innovar-codebuild/bridgelink/${{ github.event.inputs.version }}/official-release/ — check the version."
+            exit 1
+          fi
+
+      - name: Install cloudsmith-cli
+        run: pip install --upgrade cloudsmith-cli
+
+      - name: Publish artifacts to Cloudsmith
+        env:
+          CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
+        run: |
+          set -euo pipefail
+          count=0
+          for f in ./artifacts/*; do
+            [ -f "$f" ] || continue
+            echo "Pushing $(basename "$f") ..."
+            cloudsmith push raw \
+              "${{ env.CLOUDSMITH_NAMESPACE }}/${{ env.CLOUDSMITH_REPO }}" \
+              "$f" \
+              --name bridgelink \
+              --version "${{ github.event.inputs.version }}" \
+              --no-wait-for-sync
+            count=$((count + 1))
+          done
+          echo "Published $count raw package(s) at version ${{ github.event.inputs.version }}."
