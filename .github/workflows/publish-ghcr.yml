@@ -78,12 +78,15 @@ jobs:
             echo "region=${AWS_REGION}"
           } > "${RUNNER_TEMP}/aws_credentials"
 
+      # Uses a PAT (write:packages) rather than GITHUB_TOKEN: the org blocks a repo's GITHUB_TOKEN
+      # from CREATING a new org package. After the package first exists and is linked to this repo,
+      # this can be switched back to GITHUB_TOKEN and the PAT retired.
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ secrets.GHCR_TOKEN }}
 
       - name: Compute tags
         id: tags
