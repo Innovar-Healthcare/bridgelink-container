@@ -96,17 +96,17 @@ host automatically.
 ## Installer / archive downloads
 
 The platform installers and archives are published as raw packages, one per file. Download any of
-them with your token in the URL — the file name is all you need:
+them with your token in the URL:
 
 ```
-https://dl.cloudsmith.io/<TOKEN>/innovarhealthcare/bridgelink/<filename>
+https://dl.cloudsmith.io/<TOKEN>/innovarhealthcare/bridgelink/raw/versions/<version>/<filename>
 ```
 
 For example, to download the Linux `.tar.gz` for 26.6.0:
 
 ```bash
 curl -fLO \
-  "https://dl.cloudsmith.io/<TOKEN>/innovarhealthcare/bridgelink/BridgeLink_unix_26_6_0.tar.gz"
+  "https://dl.cloudsmith.io/<TOKEN>/innovarhealthcare/bridgelink/raw/versions/26.6.0/BridgeLink_unix_26_6_0.tar.gz"
 ```
 
 Available files for a release (26.6.0 shown; note the underscores in the version part of each name):
