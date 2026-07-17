@@ -1,0 +1,109 @@
+# Publish the BridgeLink container image to GitHub Container Registry (GHCR)  —  IRT-1451
+#
+# Trial/alternative to the Cloudsmith docker publish. Builds the same multi-arch Rocky image (same
+# Dockerfile, same OIDC->S3 binary fetch) and pushes it to ghcr.io/innovar-healthcare/bridgelink.
+# GHCR auth uses the built-in GITHUB_TOKEN — no extra registry secrets. The raw installers are NOT
+# published here (GHCR is an OCI registry only); those stay on their own channel.
+#
+# Manual-only (workflow_dispatch). Does NOT touch publish-cloudsmith.yml — the two run side by side
+# so the registries can be compared.
+#
+# Required repo config (already present from the Cloudsmith workflow):
+#   Variable: AWS_ROLE_ARN   arn:aws:iam::403214344436:role/github-bridgelink-release-read
+#
+# The published package is created under the org and linked to this repo; it starts PRIVATE. Grant
+# customer pull access afterwards via the package's settings (Package settings -> Manage access).
+
+name: publish-ghcr
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "BridgeLink version to publish (e.g. 26.6.0)"
+        required: true
+      latest:
+        description: "Also tag the image `latest` in GHCR"
+        type: boolean
+        default: false
+
+permissions:
+  id-token: write   # OIDC to AWS for the s3:// binary fetch
+  contents: read
+  packages: write   # push to GHCR
+
+concurrency:
+  group: publish-ghcr-${{ github.event.inputs.version }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  # GHCR image names must be lowercase; the org is Innovar-Healthcare -> innovar-healthcare.
+  IMAGE: ghcr.io/innovar-healthcare/bridgelink
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      # OIDC -> temporary AWS creds for the in-build s3:// binary fetch (same as the Cloudsmith job).
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 3600   # headroom for the emulated arm64 build
+
+      - name: Compute BINARY_URL
+        id: url
+        run: |
+          set -euo pipefail
+          VERSION="${{ github.event.inputs.version }}"
+          VERSION_US="${VERSION//./_}"
+          echo "binary_url=s3://innovar-codebuild/bridgelink/${VERSION}/official-release/BridgeLink_unix_${VERSION_US}.tar.gz" >> "$GITHUB_OUTPUT"
+
+      # The Dockerfile fetches the binary during the build via a mounted aws_credentials secret.
+      - name: Stage AWS credentials for the build
+        run: |
+          set -euo pipefail
+          umask 077
+          {
+            echo "[default]"
+            echo "aws_access_key_id=${AWS_ACCESS_KEY_ID}"
+            echo "aws_secret_access_key=${AWS_SECRET_ACCESS_KEY}"
+            echo "aws_session_token=${AWS_SESSION_TOKEN}"
+            echo "region=${AWS_REGION}"
+          } > "${RUNNER_TEMP}/aws_credentials"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute tags
+        id: tags
+        run: |
+          set -euo pipefail
+          T="${{ env.IMAGE }}:${{ github.event.inputs.version }}"
+          if [ "${{ github.event.inputs.latest }}" = "true" ]; then
+            T="$T"$'\n'"${{ env.IMAGE }}:latest"
+          fi
+          { echo "list<<EOF"; echo "$T"; echo "EOF"; } >> "$GITHUB_OUTPUT"
+
+      - name: Build & push image to GHCR
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            BINARY_URL=${{ steps.url.outputs.binary_url }}
+          secret-files: |
+            aws_credentials=${{ runner.temp }}/aws_credentials
+          tags: ${{ steps.tags.outputs.list }}
