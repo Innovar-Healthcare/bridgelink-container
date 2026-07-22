@@ -1,0 +1,126 @@
+# One-off: publish a version-pinned BridgeLink WebAdmin image to public Docker Hub  —  IRT-1427
+#
+# Builds the WebAdmin image from a released install tarball and pushes it to the public
+# innovarhealthcare/bridgelink-webadmin repo, tagged `<version>` (e.g. 26.6.0) to match the Core
+# image's version tag (innovarhealthcare/bridgelink:<version>).
+#
+# WHY THIS EXISTS (and how it relates to the WebUI pipeline):
+#   The bridgelink-webui pipeline (build.yml, IRT-1427) ALREADY auto-publishes the plugin-free BASE
+#   image to this same repo on every push to main / nightly / release — but only as rolling
+#   `latest` / `<date>` / `sha-<sha>` tags tracking main HEAD, never a semver. This workflow fills the
+#   gap: a version-pinned `<version>` tag built from a specific release tarball.
+#
+#   NOTE — variant: the release install tarball is the COMMERCIAL build (commercial plugins baked in),
+#   whereas the pipeline's `latest` is the plugin-free BASE build. This job therefore does NOT move
+#   `latest` by default (that would both fight the pipeline and swap the variant under `latest`). It
+#   only adds the additive `<version>` tag. Set `latest=true` deliberately if you really want it moved.
+#
+# Manual-only (workflow_dispatch). The tarball is self-contained (it bundles the same Dockerfile,
+# entrypoint, and scripts/smoke-docker.sh the WebUI repo builds from), so this needs no WebUI checkout
+# and no commercial-plugins token. Public https download — no AWS creds.
+#
+# Reuses the existing DOCKERHUB_USERNAME / DOCKERHUB_TOKEN repo secrets (same innovarhealthcare
+# namespace as the Core publish).
+
+name: publish-webadmin-dockerhub
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "WebAdmin version to publish (e.g. 26.6.0)"
+        required: true
+      tarball_url:
+        description: "Override the install tarball URL (default: public S3 download for the version)"
+        required: false
+      latest:
+        description: "Also move the rolling `latest` tag (NOT recommended — the WebUI pipeline owns latest as the base image)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-webadmin-dockerhub-${{ github.event.inputs.version }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: innovarhealthcare/bridgelink-webadmin
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120   # emulated arm64 Next.js build is slow (see WebUI build.yml)
+    steps:
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      # Default to the public download URL for this version; honor an explicit override.
+      - name: Compute tarball URL
+        id: url
+        run: |
+          set -euo pipefail
+          URL="${{ github.event.inputs.tarball_url }}"
+          if [ -z "$URL" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+            URL="https://bridgelink-downloads.s3.us-east-2.amazonaws.com/bridgelink-webadmin/${VERSION}/BridgeLink-WebAdmin-${VERSION}-install.tar.gz"
+          fi
+          echo "tarball_url=$URL" >> "$GITHUB_OUTPUT"
+          echo "Using tarball URL: $URL"
+
+      # Download + extract the release tarball; it expands to ./ctx/bridgelink-webadmin (the build
+      # context, complete with its own Dockerfile, entrypoint and scripts).
+      - name: Download & extract WebAdmin install tarball
+        run: |
+          set -euo pipefail
+          mkdir -p ctx
+          curl -fL --retry 5 --retry-delay 10 --max-time 600 -o webadmin.tar.gz "${{ steps.url.outputs.tarball_url }}"
+          tar -xzf webadmin.tar.gz -C ctx
+          test -f ctx/bridgelink-webadmin/Dockerfile
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Compute tags
+        id: tags
+        run: |
+          set -euo pipefail
+          T="${{ env.IMAGE }}:${{ github.event.inputs.version }}"
+          if [ "${{ github.event.inputs.latest }}" = "true" ]; then
+            T="$T"$'\n'"${{ env.IMAGE }}:latest"
+          fi
+          { echo "list<<EOF"; echo "$T"; echo "EOF"; } >> "$GITHUB_OUTPUT"
+
+      # Build the amd64 image and boot-smoke it BEFORE any push, so a broken image never reaches a
+      # published tag (mirrors the WebUI pipeline's pre-push gate). Reuses the tarball's own
+      # smoke-docker.sh (boots the container, serves /login over HTTPS). The gha layer cache is shared
+      # with the multi-arch push below, so the amd64 layers are built once.
+      - name: Build amd64 image for smoke test
+        uses: docker/build-push-action@v6
+        with:
+          context: ctx/bridgelink-webadmin
+          file: ctx/bridgelink-webadmin/Dockerfile
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: ${{ env.IMAGE }}:smoke
+          cache-from: type=gha,scope=webadmin
+          cache-to: type=gha,mode=max,scope=webadmin
+
+      - name: Smoke test image (boots container, serves /login over HTTPS)
+        run: bash ctx/bridgelink-webadmin/scripts/smoke-docker.sh ${{ env.IMAGE }}:smoke 3113
+
+      - name: Build & push multi-arch image
+        uses: docker/build-push-action@v6
+        with:
+          context: ctx/bridgelink-webadmin
+          file: ctx/bridgelink-webadmin/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.tags.outputs.list }}
+          cache-from: type=gha,scope=webadmin
+          cache-to: type=gha,mode=max,scope=webadmin
