@@ -1,14 +1,13 @@
 # Publish the BridgeLink container image to GitHub Container Registry (GHCR)  —  IRT-1451
 #
-# Trial/alternative to the Cloudsmith docker publish. Builds the same multi-arch Rocky image (same
-# Dockerfile, same OIDC->S3 binary fetch) and pushes it to ghcr.io/innovar-healthcare/bridgelink.
-# GHCR auth uses the built-in GITHUB_TOKEN — no extra registry secrets. The raw installers are NOT
-# published here (GHCR is an OCI registry only); those stay on their own channel.
+# Builds the multi-arch Rocky image (same Dockerfile, OIDC->S3 binary fetch) and pushes it to
+# ghcr.io/innovar-healthcare/bridgelink. GHCR auth uses the built-in GITHUB_TOKEN — no extra registry
+# secrets. The raw installers are NOT published here (GHCR is an OCI registry only).
 #
-# Manual-only (workflow_dispatch). Does NOT touch publish-cloudsmith.yml — the two run side by side
-# so the registries can be compared.
+# Manual-only (workflow_dispatch). This uses the private s3:// binary fetch (OIDC); for the public
+# Docker Hub release the counterpart is publish-dockerhub.yml (public https, no AWS creds).
 #
-# Required repo config (already present from the Cloudsmith workflow):
+# Required repo config:
 #   Variable: AWS_ROLE_ARN   arn:aws:iam::403214344436:role/github-bridgelink-release-read
 #
 # The published package is created under the org and linked to this repo; it starts PRIVATE. Grant
@@ -49,7 +48,7 @@ jobs:
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
 
-      # OIDC -> temporary AWS creds for the in-build s3:// binary fetch (same as the Cloudsmith job).
+      # OIDC -> temporary AWS creds for the in-build s3:// binary fetch.
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:

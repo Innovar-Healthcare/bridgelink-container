@@ -1,0 +1,91 @@
+# Publish the BridgeLink Rocky image to Docker Hub (public)  —  IRT-1451
+#
+# Publishes the default Rocky image (Dockerfile) to the public innovarhealthcare/bridgelink
+# repository on Docker Hub, tagged `<version>` (+ optional `latest`). This replaces the old manual
+# "docker build && docker push" Rocky release step with a repeatable, multi-arch CI job — the
+# public-registry counterpart to publish-ghcr.yml.
+#
+# This fetches the release tarball from the PUBLIC download URL over https, so there is NO AWS OIDC /
+# s3:// step and no aws_credentials build secret. The default
+# BINARY_URL is computed from the version; override it with the binary_url input if needed.
+#
+# Manual-only (workflow_dispatch). Does NOT publish the DHI variant — that stays in build-images.yml.
+#
+# Required repo secrets (already present — reused by build-images.yml):
+#   DOCKERHUB_USERNAME / DOCKERHUB_TOKEN   push target (innovarhealthcare/bridgelink)
+
+name: publish-dockerhub
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "BridgeLink version to publish (e.g. 26.6.0)"
+        required: true
+      binary_url:
+        description: "Override the release tarball URL (default: public S3 download for the version)"
+        required: false
+      latest:
+        description: "Also move the rolling `latest` tag to this version"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-dockerhub-${{ github.event.inputs.version }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: innovarhealthcare/bridgelink
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      # Default to the public download URL for this version; honor an explicit override.
+      - name: Compute BINARY_URL
+        id: url
+        run: |
+          set -euo pipefail
+          BINARY_URL="${{ github.event.inputs.binary_url }}"
+          if [ -z "$BINARY_URL" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+            VERSION_US="${VERSION//./_}"
+            BINARY_URL="https://bridgelink-downloads.s3.us-east-2.amazonaws.com/bridgelink-server/${VERSION}/linux/BridgeLink_unix_${VERSION_US}.tar.gz"
+          fi
+          echo "binary_url=$BINARY_URL" >> "$GITHUB_OUTPUT"
+          echo "Using BINARY_URL=$BINARY_URL"
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Compute tags
+        id: tags
+        run: |
+          set -euo pipefail
+          T="${{ env.IMAGE }}:${{ github.event.inputs.version }}"
+          if [ "${{ github.event.inputs.latest }}" = "true" ]; then
+            T="$T"$'\n'"${{ env.IMAGE }}:latest"
+          fi
+          { echo "list<<EOF"; echo "$T"; echo "EOF"; } >> "$GITHUB_OUTPUT"
+
+      # Public https tarball -> plain curl fetch inside the build; no AWS creds needed.
+      - name: Build & push image to Docker Hub
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            BINARY_URL=${{ steps.url.outputs.binary_url }}
+          tags: ${{ steps.tags.outputs.list }}
