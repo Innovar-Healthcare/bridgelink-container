@@ -3,7 +3,6 @@
 
 * [Supported tags and respective Dockerfile links](#supported-tags)
 * [Supported Architectures](#supported-architectures)
-* [Pulling from Cloudsmith (licensed customers)](#cloudsmith)
 * [Quick Reference](#quick-reference)
 * [What is BridgeLink (formerly Mirth Connect)](#what-is-connect)
 * [Hardened (DHI) image](#hardened-dhi-image)
@@ -50,78 +49,6 @@ Docker images for BridgeLink 26.3.0 and later versions support both `linux/amd64
 ```
 docker pull --platform linux/arm64 innovarhealthcare/bridgelink:latest
 ```
-
-------------
-
-<a name="cloudsmith"></a>
-# Pulling from Cloudsmith (licensed customers) [↑](#top)
-
-BridgeLink source stays fully open on GitHub, and public releases continue. Licensed customers get
-earlier, more frequent builds through **Cloudsmith**, including
-security patches between public releases. The **26.6.0** packaged Docker image and installers are
-available now to licensed customers from the Cloudsmith repository `innovarhealthcare/bridgelink`,
-gated by your **entitlement token**. One token unlocks both the Docker image and the raw downloads.
-
-> Your entitlement token is issued with your license. Treat it like a password — do not commit it or
-> share it outside your organization.
-
-## Docker image
-
-Log in to the Cloudsmith Docker registry using your entitlement **token as the password**, then pull:
-
-```bash
-docker login docker.cloudsmith.io -u innovarhealthcare/bridgelink -p <ENTITLEMENT_TOKEN>
-docker pull docker.cloudsmith.io/innovarhealthcare/bridgelink/bridgelink:<version>
-```
-
-For example, for 26.6.0:
-
-```bash
-docker pull docker.cloudsmith.io/innovarhealthcare/bridgelink/bridgelink:26.6.0
-```
-
-The image is multi-arch (`linux/amd64` and `linux/arm64`); Docker selects the right variant for your
-host automatically.
-
-> **Recommended:** mirror the image into your own internal registry **once per release** rather than
-> pulling from Cloudsmith on every deploy. This avoids repeated authenticated pulls, protects you from
-> transient registry outages, and keeps deployments fast:
->
-> ```bash
-> docker pull docker.cloudsmith.io/innovarhealthcare/bridgelink/bridgelink:26.6.0
-> docker tag  docker.cloudsmith.io/innovarhealthcare/bridgelink/bridgelink:26.6.0 \
->             registry.internal.example.com/bridgelink:26.6.0
-> docker push registry.internal.example.com/bridgelink:26.6.0
-> ```
-
-## Installer / archive downloads
-
-The platform installers and archives are published as raw packages, one per file. Download any of
-them with your token in the URL — the file name is all you need:
-
-```
-https://dl.cloudsmith.io/<TOKEN>/innovarhealthcare/bridgelink/<filename>
-```
-
-For example, to download the Linux `.tar.gz` for 26.6.0:
-
-```bash
-curl -fLO \
-  "https://dl.cloudsmith.io/<TOKEN>/innovarhealthcare/bridgelink/BridgeLink_unix_26_6_0.tar.gz"
-```
-
-Available files for a release (26.6.0 shown; note the underscores in the version part of each name):
-
-| Platform | Filename |
-|---|---|
-| Linux (RPM) | `BridgeLink_linux_26_6_0.rpm` |
-| macOS (disk image) | `BridgeLink_macos_26_6_0.dmg` |
-| macOS (archive) | `BridgeLink_macos_26_6_0.tgz` |
-| Unix (installer script) | `BridgeLink_unix_26_6_0.sh` |
-| Unix (archive) | `BridgeLink_unix_26_6_0.tar.gz` |
-| Windows (installer) | `BridgeLink_windows-x64_26_6_0.exe` |
-| Windows (MSI) | `BridgeLink_windows-x64_26_6_0.msi` |
-| Windows (archive) | `BridgeLink_windows-x64_26_6_0.zip` |
 
 ------------
 

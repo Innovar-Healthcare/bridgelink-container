@@ -3,10 +3,10 @@
 # Publishes the default Rocky image (Dockerfile) to the public innovarhealthcare/bridgelink
 # repository on Docker Hub, tagged `<version>` (+ optional `latest`). This replaces the old manual
 # "docker build && docker push" Rocky release step with a repeatable, multi-arch CI job — the
-# counterpart to publish-ghcr.yml / publish-cloudsmith.yml, but targeting the fully-public registry.
+# public-registry counterpart to publish-ghcr.yml.
 #
-# Unlike the GHCR/Cloudsmith jobs, this fetches the release tarball from the PUBLIC download URL over
-# https, so there is NO AWS OIDC / s3:// step and no aws_credentials build secret. The default
+# This fetches the release tarball from the PUBLIC download URL over https, so there is NO AWS OIDC /
+# s3:// step and no aws_credentials build secret. The default
 # BINARY_URL is computed from the version; override it with the binary_url input if needed.
 #
 # Manual-only (workflow_dispatch). Does NOT publish the DHI variant — that stays in build-images.yml.
