@@ -19,7 +19,7 @@
 #                                {"version":"26.6.0","binary_url":"https://...","latest":true}]
 #                          Exactly one entry should have "latest": true — that's the one that gets
 #                          the rolling latest-dhi / latest-dhi-slim tags.
-#     DEFAULT_VERSION      / DEFAULT_BINARY_URL   single version used only to gate PRs (test-dhi /
+#     DEFAULT_VERSION      / DEFAULT_BINARY_URL   single version used only to gate PRs (dhi /
 #                          test-rocky on pull_request) — pin these to the current newest release.
 #
 # Multi-version rebuild: the weekly schedule (and a manual dispatch left without a `version` input)
@@ -51,11 +51,11 @@ on:
   # benefit. Rebuilds every version in the MAINTAINED_VERSIONS repo variable.
   schedule:
     - cron: "0 6 * * 1"   # Mondays 06:00 UTC
-  # PR gate: run the DHI acceptance suite (test-dhi) when the image-relevant files change. The
-  # publish job is skipped on pull_request (see its `if:`), so this never pushes. Uses the
-  # DEFAULT_VERSION / DEFAULT_BINARY_URL repo variables (a single version — no need to exercise
-  # every maintained line on every PR). Secrets are available because PRs come from branches in
-  # this repo (not forks).
+  # PR gate: run the DHI acceptance suite (dhi job) when the image-relevant files change. The
+  # publish steps within that job are skipped on pull_request (see their `if:`), so this never
+  # pushes. Uses the DEFAULT_VERSION / DEFAULT_BINARY_URL repo variables (a single version — no
+  # need to exercise every maintained line on every PR). Secrets are available because PRs come
+  # from branches in this repo (not forks).
   pull_request:
     branches: [main]
     paths:
@@ -78,7 +78,7 @@ concurrency:
 
 jobs:
   # Resolve inputs vs. scheduled-run defaults once, share with downstream jobs. Produces a `matrix`
-  # output (JSON array of {version, binary_url, latest}) that test-dhi/build fan out over:
+  # output (JSON array of {version, binary_url, latest}) that the dhi job fans out over:
   #   - pull_request              -> single entry from DEFAULT_VERSION/DEFAULT_BINARY_URL (PR gate)
   #   - workflow_dispatch w/version -> single ad hoc entry from the version/binary_url/update_latest inputs
   #   - schedule, or workflow_dispatch w/o version -> every entry in MAINTAINED_VERSIONS
@@ -91,33 +91,63 @@ jobs:
       rocky_binary_url: ${{ steps.p.outputs.rocky_binary_url }}
     steps:
       - id: p
+        env:
+          # Passed via env (not spliced into the script) so JSON/URL content can't break shell
+          # quoting or inject commands, regardless of what ends up in a repo variable or a manual
+          # dispatch input.
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+          INPUT_BINARY_URL: ${{ github.event.inputs.binary_url }}
+          INPUT_PUSH: ${{ github.event.inputs.push }}
+          INPUT_UPDATE_LATEST: ${{ github.event.inputs.update_latest }}
+          DEFAULT_VERSION: ${{ vars.DEFAULT_VERSION }}
+          DEFAULT_BINARY_URL: ${{ vars.DEFAULT_BINARY_URL }}
+          MAINTAINED_VERSIONS_RAW: ${{ vars.MAINTAINED_VERSIONS }}
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            MATRIX=$(jq -nc --arg v "${{ vars.DEFAULT_VERSION }}" --arg u "${{ vars.DEFAULT_BINARY_URL }}" \
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            MATRIX=$(jq -nc --arg v "$DEFAULT_VERSION" --arg u "$DEFAULT_BINARY_URL" \
               '[{version:$v, binary_url:$u, latest:false}]')
             PUSH="false"
-          elif [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.version }}" ]; then
+          elif [ "$EVENT_NAME" = "workflow_dispatch" ] && [ -n "$INPUT_VERSION" ]; then
+            if [ -z "$INPUT_BINARY_URL" ]; then
+              echo "::error::binary_url is required when version is set on a manual dispatch." >&2
+              exit 1
+            fi
             LATEST_FLAG="false"
-            [ "${{ github.event.inputs.update_latest }}" = "true" ] && LATEST_FLAG="true"
-            MATRIX=$(jq -nc --arg v "${{ github.event.inputs.version }}" --arg u "${{ github.event.inputs.binary_url }}" \
+            [ "$INPUT_UPDATE_LATEST" = "true" ] && LATEST_FLAG="true"
+            MATRIX=$(jq -nc --arg v "$INPUT_VERSION" --arg u "$INPUT_BINARY_URL" \
               --argjson l "$LATEST_FLAG" '[{version:$v, binary_url:$u, latest:$l}]')
-            PUSH="${{ github.event.inputs.push }}"
+            PUSH="$INPUT_PUSH"
           else
             # Scheduled weekly rebuild, or a manual dispatch with no version override: rebuild every
             # maintained version so latest-dhi stays patched *and* older supported lines keep
             # getting the weekly DHI base-image security refresh.
-            MATRIX='${{ vars.MAINTAINED_VERSIONS }}'
-            PUSH="${{ github.event_name == 'schedule' && 'true' || github.event.inputs.push }}"
+            if [ -z "$MAINTAINED_VERSIONS_RAW" ]; then
+              echo "::error::MAINTAINED_VERSIONS repo variable is empty or unset — nothing to rebuild." >&2
+              exit 1
+            fi
+            MATRIX=$(jq -c . <<<"$MAINTAINED_VERSIONS_RAW")
+            if [ "$(jq 'length' <<<"$MATRIX")" -eq 0 ]; then
+              echo "::error::MAINTAINED_VERSIONS repo variable parsed to an empty array — nothing to rebuild." >&2
+              exit 1
+            fi
+            PUSH="$([ "$EVENT_NAME" = "schedule" ] && echo true || echo "$INPUT_PUSH")"
           fi
           echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
           echo "push=$PUSH" >> "$GITHUB_OUTPUT"
-          echo "rocky_version=${{ github.event.inputs.version || vars.DEFAULT_VERSION }}" >> "$GITHUB_OUTPUT"
-          echo "rocky_binary_url=${{ github.event.inputs.binary_url || vars.DEFAULT_BINARY_URL }}" >> "$GITHUB_OUTPUT"
+          echo "rocky_version=${INPUT_VERSION:-$DEFAULT_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "rocky_binary_url=${INPUT_BINARY_URL:-$DEFAULT_BINARY_URL}" >> "$GITHUB_OUTPUT"
 
-  # Gate: build the DHI image single-arch and run the acceptance suite before anything publishes.
-  # Fans out over every version in needs.params.outputs.matrix (see params for what populates it).
-  test-dhi:
+  # Test + publish the hardened (DHI) image, one job run per matrix version (see params for what
+  # populates the matrix). Test and publish are steps of the SAME job run so a failure in one
+  # version's acceptance suite/Trivy gate only skips that version's publish steps — it does not
+  # block or skip the other versions' job runs, which are wholly independent (fail-fast: false).
+  # Publish steps are gated `if: github.event_name != 'pull_request'`, so a PR only exercises the
+  # test/gate steps and never pushes. The Rocky image (Dockerfile) is intentionally NOT built or
+  # pushed here — it keeps being published by its own existing process (test-rocky below only
+  # builds a throwaway local image for PR testing).
+  dhi:
     needs: params
     runs-on: ubuntu-latest
     permissions:
@@ -129,6 +159,7 @@ jobs:
         include: ${{ fromJson(needs.params.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3   # needed for the multi-arch publish build below
       - uses: docker/setup-buildx-action@v3
       - name: Log in to dhi.io (DHI base pull)
         uses: docker/login-action@v3
@@ -221,8 +252,66 @@ jobs:
         env:
           TRIVY_PKG_TYPES: os
 
+      # --- Publish (multi-arch) --------------------------------------------------------------------
+      # Everything below only runs on trusted (non-PR) events, and only for this matrix entry's
+      # version — a Trivy-gate failure above already stopped this job run before reaching here,
+      # without touching any other version's job run.
+      - name: Log in to Docker Hub (push target)
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Version tag always; rolling latest-dhi only when this matrix entry's `latest` flag is set
+      # (exactly one entry in MAINTAINED_VERSIONS should be latest:true). The slim variant
+      # (WebAdmin-only, no Swing Administrator) gets the same tags with a `-slim` suffix.
+      - name: Compute tags
+        if: github.event_name != 'pull_request'
+        id: tags
+        run: |
+          T="innovarhealthcare/bridgelink:${{ matrix.version }}-dhi"
+          S="innovarhealthcare/bridgelink:${{ matrix.version }}-dhi-slim"
+          if [ "${{ matrix.latest }}" = "true" ]; then
+            T="$T"$'\n'"innovarhealthcare/bridgelink:latest-dhi"
+            S="$S"$'\n'"innovarhealthcare/bridgelink:latest-dhi-slim"
+          fi
+          { echo "list<<EOF"; echo "$T"; echo "EOF"; } >> "$GITHUB_OUTPUT"
+          { echo "slim<<EOF"; echo "$S"; echo "EOF"; } >> "$GITHUB_OUTPUT"
+
+      - name: Build & push DHI image
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.dhi
+          platforms: linux/amd64,linux/arm64
+          push: ${{ needs.params.outputs.push == 'true' }}
+          build-args: |
+            BINARY_URL=${{ matrix.binary_url }}
+          # Mounted at /root/.aws/credentials for s3:// pulls (Dockerfile.dhi: --mount=type=secret,id=aws_credentials).
+          secrets: |
+            aws_credentials=${{ secrets.AWS_CREDENTIALS }}
+          tags: ${{ steps.tags.outputs.list }}
+
+      # WebAdmin-only variant: same image with the Swing Administrator stripped (INCLUDE_ADMIN_CLIENT=false).
+      - name: Build & push DHI slim image (WebAdmin-only)
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.dhi
+          platforms: linux/amd64,linux/arm64
+          push: ${{ needs.params.outputs.push == 'true' }}
+          build-args: |
+            BINARY_URL=${{ matrix.binary_url }}
+            INCLUDE_ADMIN_CLIENT=false
+          secrets: |
+            aws_credentials=${{ secrets.AWS_CREDENTIALS }}
+          tags: ${{ steps.tags.outputs.slim }}
+
   # Gate: build the Rocky image single-arch, run the same acceptance suite (UID 1000, shell present),
-  # then scan it (IRT-1391). Mirrors test-dhi. Rocky PUBLISHING is unaffected — this only builds a
+  # then scan it (IRT-1391). Mirrors the dhi job's test steps. Rocky PUBLISHING is unaffected — this only builds a
   # throwaway local image for PR testing; the Rocky image keeps being published by its own process.
   test-rocky:
     needs: params
@@ -250,7 +339,7 @@ jobs:
           tags: innovarhealthcare/bridgelink:rocky-test
           build-args: |
             BINARY_URL=${{ needs.params.outputs.rocky_binary_url }}
-          # Only pass AWS creds on trusted (non-PR) events — see test-dhi for the rationale.
+          # Only pass AWS creds on trusted (non-PR) events — see the dhi job's test steps for the rationale.
           secrets: |
             aws_credentials=${{ github.event_name != 'pull_request' && secrets.AWS_CREDENTIALS || '' }}
       - name: Run acceptance tests
@@ -289,90 +378,13 @@ jobs:
         env:
           TRIVY_PKG_TYPES: os
 
-  # Publish the hardened (DHI) image (multi-arch). Only runs if the acceptance suite passed, and
-  # never on pull_request. The Rocky image (Dockerfile) is intentionally NOT built or pushed here —
-  # it keeps being published by its existing process, fully unaffected. Fans out over the same
-  # version matrix as test-dhi (see params) — one build per maintained version on the weekly
-  # schedule, or a single version for an ad hoc workflow_dispatch.
-  build:
-    needs: [params, test-dhi]
-    if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJson(needs.params.outputs.matrix) }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
-
-      # Push target.
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      # Pull the hardened base from dhi.io.
-      - name: Log in to dhi.io (DHI base pull)
-        uses: docker/login-action@v3
-        with:
-          registry: dhi.io
-          username: ${{ secrets.DHI_USERNAME }}
-          password: ${{ secrets.DHI_TOKEN }}
-
-      # Version tag always; rolling latest-dhi only when this matrix entry's `latest` flag is set
-      # (exactly one entry in MAINTAINED_VERSIONS should be latest:true). The slim variant
-      # (WebAdmin-only, no Swing Administrator) gets the same tags with a `-slim` suffix.
-      - name: Compute tags
-        id: tags
-        run: |
-          T="innovarhealthcare/bridgelink:${{ matrix.version }}-dhi"
-          S="innovarhealthcare/bridgelink:${{ matrix.version }}-dhi-slim"
-          if [ "${{ matrix.latest }}" = "true" ]; then
-            T="$T"$'\n'"innovarhealthcare/bridgelink:latest-dhi"
-            S="$S"$'\n'"innovarhealthcare/bridgelink:latest-dhi-slim"
-          fi
-          { echo "list<<EOF"; echo "$T"; echo "EOF"; } >> "$GITHUB_OUTPUT"
-          { echo "slim<<EOF"; echo "$S"; echo "EOF"; } >> "$GITHUB_OUTPUT"
-
-      - name: Build & push DHI image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile.dhi
-          platforms: linux/amd64,linux/arm64
-          push: ${{ needs.params.outputs.push == 'true' }}
-          build-args: |
-            BINARY_URL=${{ matrix.binary_url }}
-          # Mounted at /root/.aws/credentials for s3:// pulls (Dockerfile.dhi: --mount=type=secret,id=aws_credentials).
-          secrets: |
-            aws_credentials=${{ secrets.AWS_CREDENTIALS }}
-          tags: ${{ steps.tags.outputs.list }}
-
-      # WebAdmin-only variant: same image with the Swing Administrator stripped (INCLUDE_ADMIN_CLIENT=false).
-      - name: Build & push DHI slim image (WebAdmin-only)
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile.dhi
-          platforms: linux/amd64,linux/arm64
-          push: ${{ needs.params.outputs.push == 'true' }}
-          build-args: |
-            BINARY_URL=${{ matrix.binary_url }}
-            INCLUDE_ADMIN_CLIENT=false
-          secrets: |
-            aws_credentials=${{ secrets.AWS_CREDENTIALS }}
-          tags: ${{ steps.tags.outputs.slim }}
-
   # Post the image-scan summary to Slack (IRT-1390). Fires on the weekly scheduled scan and on manual
   # workflow_dispatch (for an on-demand report) — never on pull_request, so PRs stay quiet (new-PR
   # notifications are handled by the GitHub Slack app). One message: each image's gate result + total
   # finding count + links. Skips silently if SLACK_WEBHOOK_URL is unset, and never reds the run on a
   # Slack hiccup (a delivery failure is a warning, not a build failure).
   notify-slack:
-    needs: [params, test-dhi, test-rocky]
+    needs: [params, dhi, test-rocky]
     if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     permissions:
@@ -382,7 +394,7 @@ jobs:
       - name: Post scan summary to Slack
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          DHI_RESULT: ${{ needs.test-dhi.result }}
+          DHI_RESULT: ${{ needs.dhi.result }}
           ROCKY_RESULT: ${{ needs.test-rocky.result }}
           MATRIX_JSON: ${{ needs.params.outputs.matrix }}
           GH_TOKEN: ${{ github.token }}
