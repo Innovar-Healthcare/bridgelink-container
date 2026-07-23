@@ -321,8 +321,11 @@ else
 fi
 
 # ---- 7. Graceful shutdown (SIGTERM forwarding) ------------------------------------------------
+# -t 30: docker stop's default 10s SIGTERM grace period can be shorter than BridgeLink actually
+# needs to log its shutdown line and exit on a loaded CI runner, which forces a SIGKILL before the
+# log line lands and flakes this check. 30s gives it enough headroom without masking a real hang.
 info "7. Graceful shutdown"
-docker stop bl-derby >/dev/null 2>&1
+docker stop -t 30 bl-derby >/dev/null 2>&1
 docker logs bl-derby 2>&1 | grep -qi 'shutting down mirth' && ok "graceful shutdown logged" || bad "no graceful shutdown"
 
 # ---- 8. appdata persistence across restart ----------------------------------------------------
