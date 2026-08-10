@@ -321,12 +321,38 @@ else
 fi
 
 # ---- 7. Graceful shutdown (SIGTERM forwarding) ------------------------------------------------
-# -t 30: docker stop's default 10s SIGTERM grace period can be shorter than BridgeLink actually
-# needs to log its shutdown line and exit on a loaded CI runner, which forces a SIGKILL before the
-# log line lands and flakes this check. 30s gives it enough headroom without masking a real hang.
+# What this image owes: PID 1 forwards docker's SIGTERM to the server, which then closes down of its
+# own accord instead of being SIGKILLed when the grace period expires.
+#
+# Asserted on two race-free signals:
+#   exit 143 (128+SIGTERM) -- the signal reached the server and it exited on it. A force-kill at the
+#                             end of the grace period would be 137, and a crash some other code.
+#   "Database shut down normally." -- written straight to stdout by the database layer rather than
+#                             through the application logger, so it is proof the shutdown actually
+#                             ran to completion and not merely that the process died.
+#
+# The server's own "shutting down" log line is deliberately NOT the assertion. It is emitted from a
+# JVM shutdown hook, and hooks run concurrently in unspecified order, so the logger's teardown hook
+# can drop the message even on a perfectly clean shutdown -- measured at 2 losses in 40 local runs,
+# and it failed CI runs 30803286012 and 31367340279 while the shutdown itself was fine. Kept below as
+# an informational note so a change in logging behaviour is still visible without gating the build.
+#
+# -t 30 leaves a loaded CI runner room to finish before docker escalates to SIGKILL, without hiding a
+# genuine hang: a hang still lands on 137 and fails.
 info "7. Graceful shutdown"
 docker stop -t 30 bl-derby >/dev/null 2>&1
-docker logs bl-derby 2>&1 | grep -qi 'shutting down mirth' && ok "graceful shutdown logged" || bad "no graceful shutdown"
+SHUT_EC="$(docker inspect bl-derby --format '{{.State.ExitCode}}' 2>/dev/null || echo '?')"
+DB_CLOSED=0
+docker logs bl-derby 2>&1 | grep -q 'Database shut down normally' && DB_CLOSED=1
+if [ "$SHUT_EC" = "143" ] && [ "$DB_CLOSED" = "1" ]; then
+  ok "graceful shutdown (exit 143 on SIGTERM, database closed normally)"
+else
+  bad "no graceful shutdown (exit=$SHUT_EC, database-closed=$DB_CLOSED)"
+  docker logs bl-derby 2>&1 | tail -20
+fi
+docker logs bl-derby 2>&1 | grep -qi 'shutting down' \
+  || echo "  NOTE: server shutdown log line absent (known logger-teardown race; graceful shutdown is" \
+          "asserted above on exit code + database close, not on this line)"
 
 # ---- 8. appdata persistence across restart ----------------------------------------------------
 info "8. Persistence across restart"
