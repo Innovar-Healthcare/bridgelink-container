@@ -249,8 +249,12 @@ still shows it. (Example already present: Apache Derby `CVE-2022-46337`.)
 From **26.9**, BridgeLink container images are available to customers only, from a
 private Amazon ECR registry. The source in this repository stays public; the built
 images do not. **26.6.0 and earlier remain on public Docker Hub** at
-`innovarhealthcare/bridgelink` and keep receiving their weekly base-image security
-rebuilds, so nothing you pull today stops working.
+`innovarhealthcare/bridgelink`, so nothing you pull today stops working.
+
+Note which of those keep getting patched. The hardened `-dhi` and `-dhi-slim` tags are
+rebuilt weekly, so a supported version picks up base-image security fixes on its
+existing tag. The standard tags (`26.3.1`, `26.6.0`) are built once per release and are
+**not** rebuilt, so OS-level CVEs in them accumulate until the next release.
 
 Three repositories are published per release:
 
@@ -293,6 +297,17 @@ docker pull <registry-url>/innovarhealthcare/bridgelink-dhi@sha256:<digest>
 ```
 
 Each release's digests are published in its release notes.
+
+**How long a digest stays pullable.** A digest never changes what it points at, but it
+does not live forever. Once a rebuild supersedes it, the superseded image is retained
+for **365 days** and then removed. So a pinned digest is good for at least a year from
+the day a newer build replaces it — long enough to hold a deployment steady, not a
+permanent archive. Separately, only the 5 most recent tagged releases per repository are
+kept, so a digest from an older release line can age out on that basis instead.
+
+If you need a specific build available for longer than that, tell us before it lapses
+rather than after — restoring an expired image means rebuilding it, which will not
+reproduce the original digest.
 
 ## Pointing the compose file and chart at the registry
 
