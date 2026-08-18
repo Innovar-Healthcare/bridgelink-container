@@ -18,14 +18,23 @@ set -euo pipefail
 # steps. Subsequent runs are a plain stack update.
 #
 # Configure via env vars; the defaults are the real deployment.
+#
+# NOTE on updates: CloudFormation keeps the PREVIOUS value of any parameter this
+# script does not pass, not the template default. Every parameter is therefore
+# passed explicitly below, so a change to a template default actually takes effect
+# on the next run rather than silently persisting the old value.
 # ---------------------------------------------------------------------------
 
 : "${STACK_NAME:=bridgelink-ecr}"
 : "${REGION:=us-east-2}"
-# Existing GitHub Actions OIDC role that CI assumes (vars.AWS_ROLE_ARN). The
-# stack attaches the ECR push policy to it. Set empty to skip that attachment.
-: "${PUBLISH_ROLE_NAME:=github-bridgelink-release-read}"
 : "${REPO_NAMESPACE:=innovarhealthcare}"
+# Only this branch may assume the publish role — see ecr-stack.yaml.
+: "${PUBLISH_BRANCH:=main}"
+: "${GITHUB_REPO:=Innovar-Healthcare/bridgelink-container}"
+# Tagged releases kept per repository, and how long a superseded digest stays
+# pullable. The latter is a customer-facing promise; keep it in step with README.md.
+: "${RETAINED_RELEASE_COUNT:=5}"
+: "${UNTAGGED_RETENTION_DAYS:=365}"
 
 # ---------------------------------------------------------------------------
 
@@ -68,8 +77,37 @@ if ! aws cloudformation list-stacks >/dev/null 2>&1; then
   exit 1
 fi
 
+stack_status() {
+  aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
+    --query 'Stacks[0].StackStatus' --output text 2>/dev/null
+}
+
 stack_exists() {
   aws cloudformation describe-stacks --stack-name "$STACK_NAME" >/dev/null 2>&1
+}
+
+# A failed import leaves a stack that exists but holds nothing, and every retry then
+# makes it worse: `describe-stacks` succeeds so the import branch is skipped, while
+# `aws cloudformation deploy` treats REVIEW_IN_PROGRESS as "no stack" and issues a
+# CREATE changeset, which fails AlreadyExists on the repository and drops the stack
+# into ROLLBACK_COMPLETE — from which no update is possible at all. Stop at the first
+# step instead and say so, since deleting an empty stack is safe and unblocks it.
+assert_stack_updatable() {
+  local status
+  status="$(stack_status)"
+  case "$status" in
+    REVIEW_IN_PROGRESS|IMPORT_ROLLBACK_*|ROLLBACK_COMPLETE|ROLLBACK_FAILED|CREATE_FAILED)
+      red "Stack $STACK_NAME is $status — a previous run failed partway and this"
+      red "state cannot be updated. Nothing was imported, so deleting the stack is"
+      red "safe (the repositories are Retain and survive it):"
+      red ""
+      red "    aws cloudformation delete-stack --region $REGION --stack-name $STACK_NAME"
+      red "    aws cloudformation wait stack-delete-complete --region $REGION --stack-name $STACK_NAME"
+      red ""
+      red "Then re-run this script."
+      exit 1
+      ;;
+  esac
 }
 
 repo_exists() {
@@ -81,7 +119,8 @@ repo_exists() {
 STANDARD_REPO="$REPO_NAMESPACE/bridgelink"
 
 if stack_exists; then
-  cyan ">> [1/2] Stack exists — skipping import step."
+  assert_stack_updatable
+  cyan ">> [1/2] Stack exists ($(stack_status)) — skipping import step."
 elif repo_exists "$STANDARD_REPO"; then
   cyan ">> [1/2] Stack does not exist but $STANDARD_REPO does — importing it."
   yellow "   The repository is imported, never recreated: it holds published"
@@ -164,7 +203,10 @@ aws cloudformation deploy \
   --capabilities CAPABILITY_NAMED_IAM \
   --parameter-overrides \
     "RepoNamespace=$REPO_NAMESPACE" \
-    "PublishRoleName=$PUBLISH_ROLE_NAME" \
+    "GitHubRepo=$GITHUB_REPO" \
+    "PublishBranch=$PUBLISH_BRANCH" \
+    "RetainedReleaseCount=$RETAINED_RELEASE_COUNT" \
+    "UntaggedRetentionDays=$UNTAGGED_RETENTION_DAYS" \
   --no-fail-on-empty-changeset
 
 green "   ✓ Stack deployed"
@@ -178,6 +220,7 @@ get_output() {
 
 REGISTRY_URL="$(get_output RegistryUrl)"
 REPO_ARNS="$(get_output RepositoryArns)"
+PUBLISH_ROLE_ARN="$(get_output PublishRoleArn)"
 
 cat <<EOF
 
@@ -202,8 +245,14 @@ NEXT STEPS:
      As of 2026-08-18 it covers ONLY the standard repository, so a customer
      holding it cannot pull -dhi or -dhi-slim. verify-ecr.sh checks this.
 
-  3. Confirm CI can now push (the push policy is attached to
-     $PUBLISH_ROLE_NAME), then land the workflow changes.
+  3. Set the publish role as a repo variable in GitHub Actions, then land the
+     workflow changes:
+
+       AWS_PUBLISH_ROLE_ARN = $PUBLISH_ROLE_ARN
+
+     It is assumable ONLY from '$PUBLISH_BRANCH', so a private publish cannot be
+     dispatched from a feature branch. That is deliberate: these tags are mutable,
+     so push access is push access to an already-released customer image.
 
 NOTE: tags in these repositories are MUTABLE by design — the weekly DHI rebuild
       re-pushes <version>-dhi after Docker repatches the hardened base. The

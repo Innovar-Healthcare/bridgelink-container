@@ -18,15 +18,29 @@ Parameters:
       <namespace>/bridgelink, matching the repo created by hand in 2026-04 and
       imported into this stack.
 
-  PublishRoleName:
+  GitHubRepo:
     Type: String
-    Default: github-bridgelink-release-read
+    Default: Innovar-Healthcare/bridgelink-container
     Description: >
-      Existing GitHub Actions OIDC role (vars.AWS_ROLE_ARN in this repo's
-      workflows) that CI assumes to fetch the s3:// release tarball. The push
-      policy below is attached to it, so CI needs no new long-lived credentials.
-      Leave blank to skip creating/attaching the policy (e.g. if the role
-      already carries ECR push rights).
+      owner/repo whose GitHub Actions workflows may assume the publish role.
+
+  PublishBranch:
+    Type: String
+    Default: main
+    Description: >
+      The ONLY branch whose workflow runs may assume the publish role. Push
+      access to the customer registry is deliberately not available to arbitrary
+      refs — see the publish role below.
+
+  ReleaseBucket:
+    Type: String
+    Default: innovar-codebuild
+    Description: S3 bucket holding the BridgeLink release tarballs.
+
+  ReleasePrefix:
+    Type: String
+    Default: bridgelink
+    Description: Key prefix within ReleaseBucket that the publish role may read.
 
   RetainedReleaseCount:
     Type: Number
@@ -35,14 +49,11 @@ Parameters:
 
   UntaggedRetentionDays:
     Type: Number
-    Default: 14
+    Default: 365
     Description: >
       Days to retain untagged manifests that are not referenced by a live manifest
-      list. Children of a live multi-arch index are protected by ECR regardless of
-      this value — see the lifecycle policy comment below before changing it.
-
-Conditions:
-  AttachPushPolicy: !Not [!Equals [!Ref PublishRoleName, '']]
+      list. This is the DIGEST DURABILITY WINDOW customers are promised — see the
+      lifecycle policy comment below before lowering it.
 
 Resources:
 
@@ -71,26 +82,38 @@ Resources:
   # already exists. deploy-ecr.sh detects and clears that case when the orphan is
   # empty, which is the only situation where discarding it loses nothing.
   #
-  # LIFECYCLE POLICY — read before editing the untagged rule.
+  # LIFECYCLE POLICY — rule 2's window is a customer-facing promise, read first.
+  #
   # buildx pushes a manifest LIST (an OCI image index); the per-architecture child
   # manifests beneath it, plus buildx's provenance/SBOM attestations, carry no tags
-  # of their own and never will. So an untagged rule selects them for as long as
-  # the image exists — a `sinceImagePushed` window does not "wait for them to
-  # become garbage", it just sets how old a live image's children have to be.
+  # of their own and never will. So an untagged rule selects them for as long as the
+  # image exists — a `sinceImagePushed` window does not "wait for them to become
+  # garbage", it just sets how old a live image's children have to be.
   #
-  # What makes this safe is that ECR's lifecycle evaluation is manifest-list aware:
-  # a child referenced by an index that is NOT itself expiring is not selected.
-  # Verified 2026-08-18 against innovarhealthcare/bridgelink, which held a live
-  # 26.3.1 index with four untagged children pushed 2026-05-27 (~12 weeks, well
-  # past the 14-day window): the lifecycle preview reported 0 expiring images.
-  # infra/verify-ecr.sh re-runs exactly that check, so a future ECR behaviour
-  # change surfaces as a failed verification rather than an unpullable release.
+  # Children of a LIVE index are safe: ECR's lifecycle evaluation is manifest-list
+  # aware and does not select a child whose index is not itself expiring. Verified
+  # 2026-08-18 against innovarhealthcare/bridgelink, which held a live 26.3.1 index
+  # with four untagged children pushed ~12 weeks earlier, far past the window then in
+  # force: the preview reported 0 expiring. verify-ecr.sh re-runs that check, so a
+  # change in ECR's behaviour fails verification instead of breaking a release.
   #
-  # Rule 1 (tagged, count-based) is what actually bounds storage growth. Rule 2
-  # reaps manifests that are genuinely orphaned — children left behind once rule 1
-  # expires their index — and its window governs only how long that garbage
-  # lingers. The "26." prefix on rule 1 deliberately does not match `latest*`, so
-  # rolling tags are never expiry candidates.
+  # What is NOT safe, and is why this window is 365 days rather than a fortnight:
+  # the weekly DHI rebuild re-pushes <version>-dhi as a NEW index, which leaves the
+  # PREVIOUS index untagged and referenced by nothing. That superseded index is a
+  # legitimate expiry candidate — and it is exactly the digest published in the
+  # release notes and pinned by customers who need a reference that cannot move.
+  # Because `sinceImagePushed` counts from the original push, a 14-day window would
+  # delete a recorded release digest roughly two weeks after release, while the
+  # README was still telling customers to pin it. The weekly repatch, not rule 1, is
+  # the dominant producer of untagged manifests here.
+  #
+  # So: rule 1 (tagged, count-based) bounds storage. Rule 2 is the DIGEST DURABILITY
+  # WINDOW — the length of time a published digest stays pullable after a newer build
+  # supersedes it. Lowering it shortens that guarantee; keep it in step with README.md.
+  #
+  # Rule 1 matches `2*` rather than a specific major so a 27.x line does not silently
+  # fall outside it, and does not match `latest*`, so rolling tags are never expiry
+  # candidates.
 
   StandardRepository:
     Type: AWS::ECR::Repository
@@ -110,7 +133,7 @@ Resources:
                 "description": "Keep the most recent ${RetainedReleaseCount} tagged releases.",
                 "selection": {
                   "tagStatus": "tagged",
-                  "tagPrefixList": ["26."],
+                  "tagPatternList": ["2*"],
                   "countType": "imageCountMoreThan",
                   "countNumber": ${RetainedReleaseCount}
                 },
@@ -118,7 +141,7 @@ Resources:
               },
               {
                 "rulePriority": 2,
-                "description": "Reap untagged images orphaned by rule 1 after ${UntaggedRetentionDays} days.",
+                "description": "Digest durability window: retain superseded manifests ${UntaggedRetentionDays} days.",
                 "selection": {
                   "tagStatus": "untagged",
                   "countType": "sinceImagePushed",
@@ -155,7 +178,7 @@ Resources:
                 "description": "Keep the most recent ${RetainedReleaseCount} tagged releases.",
                 "selection": {
                   "tagStatus": "tagged",
-                  "tagPrefixList": ["26."],
+                  "tagPatternList": ["2*"],
                   "countType": "imageCountMoreThan",
                   "countNumber": ${RetainedReleaseCount}
                 },
@@ -163,7 +186,7 @@ Resources:
               },
               {
                 "rulePriority": 2,
-                "description": "Reap untagged images orphaned by rule 1 after ${UntaggedRetentionDays} days.",
+                "description": "Digest durability window: retain superseded manifests ${UntaggedRetentionDays} days.",
                 "selection": {
                   "tagStatus": "untagged",
                   "countType": "sinceImagePushed",
@@ -200,7 +223,7 @@ Resources:
                 "description": "Keep the most recent ${RetainedReleaseCount} tagged releases.",
                 "selection": {
                   "tagStatus": "tagged",
-                  "tagPrefixList": ["26."],
+                  "tagPatternList": ["2*"],
                   "countType": "imageCountMoreThan",
                   "countNumber": ${RetainedReleaseCount}
                 },
@@ -208,7 +231,7 @@ Resources:
               },
               {
                 "rulePriority": 2,
-                "description": "Reap untagged images orphaned by rule 1 after ${UntaggedRetentionDays} days.",
+                "description": "Digest durability window: retain superseded manifests ${UntaggedRetentionDays} days.",
                 "selection": {
                   "tagStatus": "untagged",
                   "countType": "sinceImagePushed",
@@ -229,18 +252,80 @@ Resources:
 
   # --- CI push access --------------------------------------------------------
   #
-  # Attached to the EXISTING OIDC role rather than creating a new one, so the
-  # workflows keep using the single vars.AWS_ROLE_ARN they already resolve for
-  # the s3:// binary fetch. Roles: [...] attaches without importing the role
-  # into this stack, so the role's own definition stays wherever it lives today.
+  # A DEDICATED publish role, trusted only for ${PublishBranch}, rather than
+  # attaching push rights to the pre-existing github-bridgelink-release-read role.
+  # That role's trust policy admits repo:<owner>/<repo>:* — any ref — which was
+  # unremarkable while it could only read a release tarball from S3. Granting it
+  # ecr:PutImage on repositories whose tags are mutable would mean anyone able to
+  # push any branch could replace an already-released customer image, with no PR
+  # review and no signal to the customer on their next pull. For a healthcare
+  # supply chain that is too much reach for a branch push, so publishing is
+  # confined to the integration branch and the older role keeps only its S3 read.
   #
-  # GetAuthorizationToken cannot be resource-scoped — it is an account-level
-  # call that returns a registry token. Every action that touches image content
-  # is scoped to the three repository ARNs.
+  # The role carries BOTH permissions the publish workflows need — ECR push and
+  # the s3:// release-tarball read — so a publish run assumes exactly one role.
+  #
+  # MaxSessionDuration is 3h because a publish is a long job: the acceptance suite
+  # and Trivy gates run before the multi-arch build, whose emulated arm64 stage
+  # re-reads the tarball from S3 with the credentials staged at the start. The
+  # default 1h can expire mid-build (the pre-existing role is capped at 1h, which
+  # is why this one is created rather than reused).
+
+  PublishRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: bridgelink-publish
+      Description: >-
+        Publish BridgeLink release images to the private ECR repositories. Assumable
+        only by GitHub Actions runs on the integration branch (bridgelink-container,
+        IRT-1866).
+      MaxSessionDuration: 10800
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub 'arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com'
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                # Exact match, not StringLike: no wildcard, so no other ref of this
+                # repo — and no other repo — can assume it.
+                token.actions.githubusercontent.com:sub: !Sub 'repo:${GitHubRepo}:ref:refs/heads/${PublishBranch}'
+      ManagedPolicyArns:
+        - !Ref EcrPushPolicy
+      Policies:
+        - PolicyName: read-release-tarballs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: GetReleaseTarball
+                Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub 'arn:aws:s3:::${ReleaseBucket}/${ReleasePrefix}/*'
+              - Sid: ListReleasePrefix
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: !Sub 'arn:aws:s3:::${ReleaseBucket}'
+                Condition:
+                  StringLike:
+                    s3:prefix: !Sub '${ReleasePrefix}/*'
+      Tags:
+        - Key: Project
+          Value: bridgelink
+        - Key: ManagedBy
+          Value: bridgelink-container/infra/ecr-stack.yaml
+
+  # GetAuthorizationToken cannot be resource-scoped — it is an account-level call
+  # that returns a registry token. Every action that touches image content is
+  # scoped to the three repository ARNs.
+  #
+  # Kept as a standalone managed policy (rather than inlined on the role) so it can
+  # be attached elsewhere later without duplicating the action list.
 
   EcrPushPolicy:
     Type: AWS::IAM::ManagedPolicy
-    Condition: AttachPushPolicy
     Properties:
       ManagedPolicyName: bridgelink-ecr-push
       # `>-`, not `>`: the folded form keeps a trailing newline, and IAM validates
@@ -249,8 +334,6 @@ Resources:
       Description: >-
         Push BridgeLink release images to the private ECR repositories
         (bridgelink-container CI, IRT-1866).
-      Roles:
-        - !Ref PublishRoleName
       PolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -291,6 +374,12 @@ Outputs:
   DhiSlimRepositoryUri:
     Description: Hardened WebAdmin-only (dhi-slim) image repository URI.
     Value: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${DhiSlimRepository}'
+
+  PublishRoleArn:
+    Description: >
+      Role the publish workflows assume (vars.AWS_PUBLISH_ROLE_ARN). Assumable only
+      by workflow runs on the integration branch.
+    Value: !GetAtt PublishRole.Arn
 
   RepositoryArns:
     Description: >

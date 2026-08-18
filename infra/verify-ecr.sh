@@ -39,26 +39,26 @@ for cmd in aws jq; do
   command -v "$cmd" >/dev/null 2>&1 || { red "Missing required command: $cmd"; exit 1; }
 done
 
-# Deliberately a plain list, not an associative array — macOS ships bash 3.2,
-# which has no `declare -A`.
-REPOS="
-$REPO_NAMESPACE/bridgelink
-$REPO_NAMESPACE/bridgelink-dhi
-$REPO_NAMESPACE/bridgelink-dhi-slim
-"
+# An indexed array, which bash 3.2 (macOS) supports fine — only associative arrays
+# (`declare -A`) are unavailable there.
+REPOS=(
+  "$REPO_NAMESPACE/bridgelink"
+  "$REPO_NAMESPACE/bridgelink-dhi"
+  "$REPO_NAMESPACE/bridgelink-dhi-slim"
+)
 
 FAILED=0
 fail() { red "   x $*"; FAILED=1; }
 pass() { green "   + $*"; }
 
-FIRST_REPO="$(echo "$REPOS" | sed -n '2p')"
+FIRST_REPO="${REPOS[0]}"
 if ! aws ecr describe-repositories --repository-names "$FIRST_REPO" >/dev/null 2>&1; then
   red "Cannot describe $FIRST_REPO — the stack may not be deployed, or this"
   red "session is not MFA'd (Innovar-MFA-policy denies ECR without MFA)."
   exit 1
 fi
 
-for repo in $REPOS; do
+for repo in "${REPOS[@]}"; do
   cyan ">> $repo"
 
   # --- 1. Private: no repository policy ------------------------------------
@@ -106,8 +106,20 @@ for repo in $REPOS; do
     continue
   fi
 
-  aws ecr start-lifecycle-policy-preview --repository-name "$repo" \
-    --lifecycle-policy-text "$policy" >/dev/null 2>&1 || true
+  # The start failure must NOT be swallowed: get-lifecycle-policy-preview returns the
+  # LAST preview for the repository, so polling after a failed start reads a previous
+  # run's COMPLETE and reports a pass on stale results. A concurrent preview
+  # (LifecyclePolicyPreviewInProgressException) is the one benign case — fall through
+  # and poll that one.
+  if ! start_err="$(aws ecr start-lifecycle-policy-preview --repository-name "$repo" \
+       --lifecycle-policy-text "$policy" 2>&1 >/dev/null)"; then
+    if ! grep -q 'LifecyclePolicyPreviewInProgressException' <<<"$start_err"; then
+      fail "could not start a lifecycle preview, so the policy is UNVERIFIED:"
+      red  "     $start_err"
+      continue
+    fi
+    yellow "   - a preview was already running; polling that one"
+  fi
 
   status="UNKNOWN"
   for _ in $(seq 1 30); do
@@ -179,7 +191,7 @@ else
 
   # Compare on the "repository/<name>" tail so region/account wildcards in the ARN
   # do not matter. A resource ending in * covers every repository it prefixes.
-  for repo in $REPOS; do
+  for repo in "${REPOS[@]}"; do
     covered=0
     while IFS= read -r res; do
       [[ -n "$res" ]] || continue
