@@ -4,6 +4,10 @@
 # `latest-dhi`. It also builds + acceptance-tests + vuln-scans the Rocky image on PRs (IRT-1391 /
 # IRT-1390), but never publishes it — the Rocky image keeps being published by its existing process.
 #
+# Publish destination is per version (IRT-1866). From 26.9 the images are customer-only and go to the
+# private ECR registry; 26.6.0 and earlier stay on public Docker Hub and keep their weekly base-patch
+# re-push. A version is never published to both — see the `private` flag below.
+#
 # Live in production (weekly schedule + manual workflow_dispatch runs have been publishing
 # successfully since IRT-1356 landed). Required repo secrets/variables:
 #   Secrets:
@@ -15,10 +19,17 @@
 #                                            (notify-slack job); if unset, that job skips silently
 #   Variables:
 #     MAINTAINED_VERSIONS  JSON array of every DHI release line kept alive by the weekly rebuild,
-#                          e.g. [{"version":"26.3.1","binary_url":"https://...","latest":false},
-#                                {"version":"26.6.0","binary_url":"https://...","latest":true}]
+#                          e.g. [{"version":"26.6.0","binary_url":"https://...","latest":false},
+#                                {"version":"26.9.0","binary_url":"s3://...","latest":true,
+#                                 "private":true}]
 #                          Exactly one entry should have "latest": true — that's the one that gets
 #                          the rolling latest-dhi / latest-dhi-slim tags.
+#                          "private": true publishes that version to the private ECR registry
+#                          INSTEAD of public Docker Hub (26.9+). Optional; omitted means public,
+#                          so pre-26.9 entries need no edit.
+#     AWS_ROLE_ARN         OIDC role assumed for the ECR push (the same role the standard-image
+#                          publish workflow already assumes for its s3:// binary fetch). Only needed
+#                          once a "private" entry exists.
 #     DEFAULT_VERSION      / DEFAULT_BINARY_URL   single version used only to gate PRs (dhi /
 #                          test-rocky on pull_request) — pin these to the current newest release.
 #
@@ -47,6 +58,10 @@ on:
         description: "One-off only: also move the rolling latest-dhi tag for this version"
         type: boolean
         default: true
+      private:
+        description: "One-off only: publish to the private ECR registry instead of public Docker Hub (26.9+)"
+        type: boolean
+        default: false
   # Rebuild-on-base-update: DHI repatches frequently, so rebuild weekly to keep the near-zero-CVE
   # benefit. Rebuilds every version in the MAINTAINED_VERSIONS repo variable.
   schedule:
@@ -78,7 +93,7 @@ concurrency:
 
 jobs:
   # Resolve inputs vs. scheduled-run defaults once, share with downstream jobs. Produces a `matrix`
-  # output (JSON array of {version, binary_url, latest}) that the dhi job fans out over:
+  # output (JSON array of {version, binary_url, latest, private}) that the dhi job fans out over:
   #   - pull_request              -> single entry from DEFAULT_VERSION/DEFAULT_BINARY_URL (PR gate)
   #   - workflow_dispatch w/version -> single ad hoc entry from the version/binary_url/update_latest inputs
   #   - schedule, or workflow_dispatch w/o version -> every entry in MAINTAINED_VERSIONS
@@ -100,6 +115,7 @@ jobs:
           INPUT_BINARY_URL: ${{ github.event.inputs.binary_url }}
           INPUT_PUSH: ${{ github.event.inputs.push }}
           INPUT_UPDATE_LATEST: ${{ github.event.inputs.update_latest }}
+          INPUT_PRIVATE: ${{ github.event.inputs.private }}
           DEFAULT_VERSION: ${{ vars.DEFAULT_VERSION }}
           DEFAULT_BINARY_URL: ${{ vars.DEFAULT_BINARY_URL }}
           MAINTAINED_VERSIONS_RAW: ${{ vars.MAINTAINED_VERSIONS }}
@@ -107,7 +123,7 @@ jobs:
           set -euo pipefail
           if [ "$EVENT_NAME" = "pull_request" ]; then
             MATRIX=$(jq -nc --arg v "$DEFAULT_VERSION" --arg u "$DEFAULT_BINARY_URL" \
-              '[{version:$v, binary_url:$u, latest:false}]')
+              '[{version:$v, binary_url:$u, latest:false, private:false}]')
             PUSH="false"
           elif [ "$EVENT_NAME" = "workflow_dispatch" ] && [ -n "$INPUT_VERSION" ]; then
             if [ -z "$INPUT_BINARY_URL" ]; then
@@ -116,8 +132,11 @@ jobs:
             fi
             LATEST_FLAG="false"
             [ "$INPUT_UPDATE_LATEST" = "true" ] && LATEST_FLAG="true"
+            PRIVATE_FLAG="false"
+            [ "$INPUT_PRIVATE" = "true" ] && PRIVATE_FLAG="true"
             MATRIX=$(jq -nc --arg v "$INPUT_VERSION" --arg u "$INPUT_BINARY_URL" \
-              --argjson l "$LATEST_FLAG" '[{version:$v, binary_url:$u, latest:$l}]')
+              --argjson l "$LATEST_FLAG" --argjson p "$PRIVATE_FLAG" \
+              '[{version:$v, binary_url:$u, latest:$l, private:$p}]')
             PUSH="$INPUT_PUSH"
           else
             # Scheduled weekly rebuild, or a manual dispatch with no version override: rebuild every
@@ -127,7 +146,9 @@ jobs:
               echo "::error::MAINTAINED_VERSIONS repo variable is empty or unset — nothing to rebuild." >&2
               exit 1
             fi
-            MATRIX=$(jq -c . <<<"$MAINTAINED_VERSIONS_RAW")
+            # Normalize the optional `private` key to a real boolean so matrix.private is never
+            # the empty string downstream — entries predating private publishing simply omit it.
+            MATRIX=$(jq -c 'map(.private = (.private // false))' <<<"$MAINTAINED_VERSIONS_RAW")
             if [ "$(jq 'length' <<<"$MATRIX")" -eq 0 ]; then
               echo "::error::MAINTAINED_VERSIONS repo variable parsed to an empty array — nothing to rebuild." >&2
               exit 1
@@ -153,6 +174,7 @@ jobs:
     permissions:
       contents: read
       security-events: write   # upload the Trivy SARIF to Security > Code scanning (IRT-1390)
+      id-token: write          # OIDC to AWS for the private ECR push (IRT-1866)
     strategy:
       fail-fast: false
       matrix:
@@ -256,31 +278,79 @@ jobs:
       # Everything below only runs on trusted (non-PR) events, and only for this matrix entry's
       # version — a Trivy-gate failure above already stopped this job run before reaching here,
       # without touching any other version's job run.
+      #
+      # Destination is per matrix entry (IRT-1866). `private: true` publishes ONLY to the private ECR
+      # registry (26.9+, customer-only); otherwise ONLY to public Docker Hub, which is exactly the
+      # behaviour the 26.3.1 / 26.6.0 lines had before private publishing existed. The two are
+      # mutually exclusive on purpose: without that, the weekly rebuild would leak a private release
+      # to Docker Hub.
       - name: Log in to Docker Hub (push target)
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && !matrix.private
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      # OIDC -> temporary AWS creds for the ECR push. Same role the s3:// binary fetch already uses
+      # (vars.AWS_ROLE_ARN), so no new long-lived credentials — it carries the bridgelink-ecr-push
+      # policy from infra/ecr-stack.yaml. Region is us-east-2 (the registry); the in-build s3:// fetch
+      # keeps its own region from the AWS_CREDENTIALS secret and is unaffected.
+      # The role's trust policy is scoped to repo:Innovar-Healthcare/bridgelink-container:* (verified
+      # 2026-08-18), so any ref in this repo may assume it — scheduled runs on main and manual
+      # dispatches from a feature branch both work.
+      - name: Configure AWS credentials (OIDC)
+        if: github.event_name != 'pull_request' && matrix.private
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: us-east-2
+          role-duration-seconds: 3600   # headroom for the emulated arm64 build
+
+      - name: Log in to Amazon ECR (private push target)
+        if: github.event_name != 'pull_request' && matrix.private
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
       # Version tag always; rolling latest-dhi only when this matrix entry's `latest` flag is set
       # (exactly one entry in MAINTAINED_VERSIONS should be latest:true). The slim variant
       # (WebAdmin-only, no Swing Administrator) gets the same tags with a `-slim` suffix.
+      #
+      # The variant lives in the repository NAME for ECR (bridgelink-dhi) and in the TAG for Docker
+      # Hub (bridgelink:<ver>-dhi), because Docker Hub has one repository for everything while ECR
+      # gets one per variant. The `-dhi` tag suffix is kept on both so a single tag string identifies
+      # a build regardless of where it was published — worth the redundancy in `bridgelink-dhi:<ver>-dhi`
+      # while 26.6 and earlier are still on Docker Hub.
       - name: Compute tags
         if: github.event_name != 'pull_request'
         id: tags
         run: |
-          T="innovarhealthcare/bridgelink:${{ matrix.version }}-dhi"
-          S="innovarhealthcare/bridgelink:${{ matrix.version }}-dhi-slim"
-          if [ "${{ matrix.latest }}" = "true" ]; then
-            T="$T"$'\n'"innovarhealthcare/bridgelink:latest-dhi"
-            S="$S"$'\n'"innovarhealthcare/bridgelink:latest-dhi-slim"
+          set -euo pipefail
+          if [ "${{ matrix.private }}" = "true" ]; then
+            R="${{ steps.ecr.outputs.registry }}"
+            if [ -z "$R" ]; then
+              echo "::error::ECR login produced no registry — cannot publish ${{ matrix.version }} privately." >&2
+              exit 1
+            fi
+            T="$R/innovarhealthcare/bridgelink-dhi:${{ matrix.version }}-dhi"
+            S="$R/innovarhealthcare/bridgelink-dhi-slim:${{ matrix.version }}-dhi-slim"
+            if [ "${{ matrix.latest }}" = "true" ]; then
+              T="$T"$'\n'"$R/innovarhealthcare/bridgelink-dhi:latest-dhi"
+              S="$S"$'\n'"$R/innovarhealthcare/bridgelink-dhi-slim:latest-dhi-slim"
+            fi
+          else
+            T="innovarhealthcare/bridgelink:${{ matrix.version }}-dhi"
+            S="innovarhealthcare/bridgelink:${{ matrix.version }}-dhi-slim"
+            if [ "${{ matrix.latest }}" = "true" ]; then
+              T="$T"$'\n'"innovarhealthcare/bridgelink:latest-dhi"
+              S="$S"$'\n'"innovarhealthcare/bridgelink:latest-dhi-slim"
+            fi
           fi
           { echo "list<<EOF"; echo "$T"; echo "EOF"; } >> "$GITHUB_OUTPUT"
           { echo "slim<<EOF"; echo "$S"; echo "EOF"; } >> "$GITHUB_OUTPUT"
 
       - name: Build & push DHI image
         if: github.event_name != 'pull_request'
+        id: dhi
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -296,6 +366,7 @@ jobs:
 
       # WebAdmin-only variant: same image with the Swing Administrator stripped (INCLUDE_ADMIN_CLIENT=false).
       - name: Build & push DHI slim image (WebAdmin-only)
+        id: slim
         if: github.event_name != 'pull_request'
         uses: docker/build-push-action@v6
         with:
@@ -309,6 +380,31 @@ jobs:
           secrets: |
             aws_credentials=${{ secrets.AWS_CREDENTIALS }}
           tags: ${{ steps.tags.outputs.slim }}
+
+      # Tags in these repositories are MUTABLE by design — the weekly rebuild re-pushes
+      # <version>-dhi after Docker repatches the hardened base, which is the whole point of the DHI
+      # variant. The immutable release identity is therefore the manifest DIGEST, so surface it here:
+      # this is what goes in the release notes and what a customer pins when they need a reference
+      # that cannot move under them.
+      - name: Record published digests
+        if: github.event_name != 'pull_request' && needs.params.outputs.push == 'true'
+        # Values via env rather than spliced into the script, per this workflow's convention.
+        env:
+          VERSION: ${{ matrix.version }}
+          DESTINATION: ${{ matrix.private && 'private ECR' || 'public Docker Hub' }}
+          DHI_DIGEST: ${{ steps.dhi.outputs.digest }}
+          SLIM_DIGEST: ${{ steps.slim.outputs.digest }}
+        run: |
+          {
+            echo "### $VERSION ($DESTINATION)"
+            echo
+            echo "| variant | digest |"
+            echo "| --- | --- |"
+            echo "| dhi | \`$DHI_DIGEST\` |"
+            echo "| dhi-slim | \`$SLIM_DIGEST\` |"
+            echo
+            echo "Tags are mutable; pin by digest for an immutable reference."
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # Gate: build the Rocky image single-arch, run the same acceptance suite (UID 1000, shell present),
   # then scan it (IRT-1391). Mirrors the dhi job's test steps. Rocky PUBLISHING is unaffected — this only builds a
