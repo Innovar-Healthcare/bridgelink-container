@@ -1,0 +1,392 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  BridgeLink private container registry (IRT-1866): private ECR repositories for
+  the three published image variants (standard/Rocky, dhi, dhi-slim), their
+  lifecycle policies, and the push policy for the GitHub Actions OIDC role.
+
+  Deliberately a SEPARATE stack from innovar-portal: the portal serves binaries
+  and manages customer IAM users (IRT-1865), and image infrastructure must not
+  share the portal stack's lifecycle. Customer READ access lives with the portal
+  work, not here — this stack only produces the repositories it consumes.
+
+Parameters:
+  RepoNamespace:
+    Type: String
+    Default: innovarhealthcare
+    Description: >
+      Repository name prefix. The standard variant lives at
+      <namespace>/bridgelink, matching the repo created by hand in 2026-04 and
+      imported into this stack.
+
+  GitHubRepo:
+    Type: String
+    Default: Innovar-Healthcare/bridgelink-container
+    Description: >
+      owner/repo whose GitHub Actions workflows may assume the publish role.
+
+  PublishBranch:
+    Type: String
+    Default: main
+    Description: >
+      The ONLY branch whose workflow runs may assume the publish role. Push
+      access to the customer registry is deliberately not available to arbitrary
+      refs — see the publish role below.
+
+  ReleaseBucket:
+    Type: String
+    Default: innovar-codebuild
+    Description: S3 bucket holding the BridgeLink release tarballs.
+
+  ReleasePrefix:
+    Type: String
+    Default: bridgelink
+    Description: Key prefix within ReleaseBucket that the publish role may read.
+
+  RetainedReleaseCount:
+    Type: Number
+    Default: 5
+    Description: Number of tagged release images to keep per repository.
+
+  UntaggedRetentionDays:
+    Type: Number
+    Default: 365
+    Description: >
+      Days to retain untagged manifests that are not referenced by a live manifest
+      list. This is the DIGEST DURABILITY WINDOW customers are promised — see the
+      lifecycle policy comment below before lowering it.
+
+Resources:
+
+  # --- Repositories ----------------------------------------------------------
+  #
+  # Three repositories rather than one repository with tag suffixes, because:
+  #   * lifecycle rules that count tagged images evict unevenly when variants
+  #     share a repository (a burst of dhi releases would age out standard ones);
+  #   * IRT-1865 scopes per-customer IAM on repository ARNs, so separate repos
+  #     make "this customer gets dhi only" expressible;
+  #   * tag namespaces stay clean (26.9.0 vs 26.9.0-dhi vs 26.9.0-dhi-slim).
+  #
+  # NO RepositoryPolicyText on any repository. That absence is what makes these
+  # IAM-only: an ECR repository with no repository policy is reachable only by
+  # principals granted access through their own identity policies. Adding a
+  # repository policy here is how these images would accidentally become public,
+  # so there is intentionally nothing to edit.
+  #
+  # Retain on delete/replace: these hold customer-facing release images. A stack
+  # mistake must never be able to delete them.
+  #
+  # Consequence worth knowing: Retain also applies when a rollback unwinds a
+  # freshly-created repository, so a failed update leaves the new repositories
+  # behind, present in ECR but absent from the stack. The next attempt then fails
+  # AWS::EarlyValidation::ResourceExistenceCheck — the template asks to create what
+  # already exists. deploy-ecr.sh detects and clears that case when the orphan is
+  # empty, which is the only situation where discarding it loses nothing.
+  #
+  # LIFECYCLE POLICY — rule 2's window is a customer-facing promise, read first.
+  #
+  # buildx pushes a manifest LIST (an OCI image index); the per-architecture child
+  # manifests beneath it, plus buildx's provenance/SBOM attestations, carry no tags
+  # of their own and never will. So an untagged rule selects them for as long as the
+  # image exists — a `sinceImagePushed` window does not "wait for them to become
+  # garbage", it just sets how old a live image's children have to be.
+  #
+  # Children of a LIVE index are safe: ECR's lifecycle evaluation is manifest-list
+  # aware and does not select a child whose index is not itself expiring. Verified
+  # 2026-08-18 against innovarhealthcare/bridgelink, which held a live 26.3.1 index
+  # with four untagged children pushed ~12 weeks earlier, far past the window then in
+  # force: the preview reported 0 expiring. verify-ecr.sh re-runs that check, so a
+  # change in ECR's behaviour fails verification instead of breaking a release.
+  #
+  # What is NOT safe, and is why this window is 365 days rather than a fortnight:
+  # the weekly DHI rebuild re-pushes <version>-dhi as a NEW index, which leaves the
+  # PREVIOUS index untagged and referenced by nothing. That superseded index is a
+  # legitimate expiry candidate — and it is exactly the digest published in the
+  # release notes and pinned by customers who need a reference that cannot move.
+  # Because `sinceImagePushed` counts from the original push, a 14-day window would
+  # delete a recorded release digest roughly two weeks after release, while the
+  # README was still telling customers to pin it. The weekly repatch, not rule 1, is
+  # the dominant producer of untagged manifests here.
+  #
+  # So: rule 1 (tagged, count-based) bounds storage. Rule 2 is the DIGEST DURABILITY
+  # WINDOW — the length of time a published digest stays pullable after a newer build
+  # supersedes it. Lowering it shortens that guarantee; keep it in step with README.md.
+  #
+  # Rule 1 matches `2*` rather than a specific major so a 27.x line does not silently
+  # fall outside it, and does not match `latest*`, so rolling tags are never expiry
+  # candidates.
+
+  StandardRepository:
+    Type: AWS::ECR::Repository
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      RepositoryName: !Sub '${RepoNamespace}/bridgelink'
+      ImageTagMutability: MUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      LifecyclePolicy:
+        LifecyclePolicyText: !Sub |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep the most recent ${RetainedReleaseCount} tagged releases.",
+                "selection": {
+                  "tagStatus": "tagged",
+                  "tagPatternList": ["2*"],
+                  "countType": "imageCountMoreThan",
+                  "countNumber": ${RetainedReleaseCount}
+                },
+                "action": { "type": "expire" }
+              },
+              {
+                "rulePriority": 2,
+                "description": "Digest durability window: retain superseded manifests ${UntaggedRetentionDays} days.",
+                "selection": {
+                  "tagStatus": "untagged",
+                  "countType": "sinceImagePushed",
+                  "countUnit": "days",
+                  "countNumber": ${UntaggedRetentionDays}
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+      Tags:
+        - Key: Project
+          Value: bridgelink
+        - Key: Variant
+          Value: standard
+        - Key: ManagedBy
+          Value: bridgelink-container/infra/ecr-stack.yaml
+
+  DhiRepository:
+    Type: AWS::ECR::Repository
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      RepositoryName: !Sub '${RepoNamespace}/bridgelink-dhi'
+      ImageTagMutability: MUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      LifecyclePolicy:
+        LifecyclePolicyText: !Sub |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep the most recent ${RetainedReleaseCount} tagged releases.",
+                "selection": {
+                  "tagStatus": "tagged",
+                  "tagPatternList": ["2*"],
+                  "countType": "imageCountMoreThan",
+                  "countNumber": ${RetainedReleaseCount}
+                },
+                "action": { "type": "expire" }
+              },
+              {
+                "rulePriority": 2,
+                "description": "Digest durability window: retain superseded manifests ${UntaggedRetentionDays} days.",
+                "selection": {
+                  "tagStatus": "untagged",
+                  "countType": "sinceImagePushed",
+                  "countUnit": "days",
+                  "countNumber": ${UntaggedRetentionDays}
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+      Tags:
+        - Key: Project
+          Value: bridgelink
+        - Key: Variant
+          Value: dhi
+        - Key: ManagedBy
+          Value: bridgelink-container/infra/ecr-stack.yaml
+
+  DhiSlimRepository:
+    Type: AWS::ECR::Repository
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      RepositoryName: !Sub '${RepoNamespace}/bridgelink-dhi-slim'
+      ImageTagMutability: MUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      LifecyclePolicy:
+        LifecyclePolicyText: !Sub |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep the most recent ${RetainedReleaseCount} tagged releases.",
+                "selection": {
+                  "tagStatus": "tagged",
+                  "tagPatternList": ["2*"],
+                  "countType": "imageCountMoreThan",
+                  "countNumber": ${RetainedReleaseCount}
+                },
+                "action": { "type": "expire" }
+              },
+              {
+                "rulePriority": 2,
+                "description": "Digest durability window: retain superseded manifests ${UntaggedRetentionDays} days.",
+                "selection": {
+                  "tagStatus": "untagged",
+                  "countType": "sinceImagePushed",
+                  "countUnit": "days",
+                  "countNumber": ${UntaggedRetentionDays}
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+      Tags:
+        - Key: Project
+          Value: bridgelink
+        - Key: Variant
+          Value: dhi-slim
+        - Key: ManagedBy
+          Value: bridgelink-container/infra/ecr-stack.yaml
+
+  # --- CI push access --------------------------------------------------------
+  #
+  # A DEDICATED publish role, trusted only for ${PublishBranch}, rather than
+  # attaching push rights to the pre-existing github-bridgelink-release-read role.
+  # That role's trust policy admits repo:<owner>/<repo>:* — any ref — which was
+  # unremarkable while it could only read a release tarball from S3. Granting it
+  # ecr:PutImage on repositories whose tags are mutable would mean anyone able to
+  # push any branch could replace an already-released customer image, with no PR
+  # review and no signal to the customer on their next pull. For a healthcare
+  # supply chain that is too much reach for a branch push, so publishing is
+  # confined to the integration branch and the older role keeps only its S3 read.
+  #
+  # The role carries BOTH permissions the publish workflows need — ECR push and
+  # the s3:// release-tarball read — so a publish run assumes exactly one role.
+  #
+  # MaxSessionDuration is 3h because a publish is a long job: the acceptance suite
+  # and Trivy gates run before the multi-arch build, whose emulated arm64 stage
+  # re-reads the tarball from S3 with the credentials staged at the start. The
+  # default 1h can expire mid-build (the pre-existing role is capped at 1h, which
+  # is why this one is created rather than reused).
+
+  PublishRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: bridgelink-publish
+      Description: >-
+        Publish BridgeLink release images to the private ECR repositories. Assumable
+        only by GitHub Actions runs on the integration branch (bridgelink-container,
+        IRT-1866).
+      MaxSessionDuration: 10800
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub 'arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com'
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                # Exact match, not StringLike: no wildcard, so no other ref of this
+                # repo — and no other repo — can assume it.
+                token.actions.githubusercontent.com:sub: !Sub 'repo:${GitHubRepo}:ref:refs/heads/${PublishBranch}'
+      ManagedPolicyArns:
+        - !Ref EcrPushPolicy
+      Policies:
+        - PolicyName: read-release-tarballs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: GetReleaseTarball
+                Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub 'arn:aws:s3:::${ReleaseBucket}/${ReleasePrefix}/*'
+              - Sid: ListReleasePrefix
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: !Sub 'arn:aws:s3:::${ReleaseBucket}'
+                Condition:
+                  StringLike:
+                    s3:prefix: !Sub '${ReleasePrefix}/*'
+      Tags:
+        - Key: Project
+          Value: bridgelink
+        - Key: ManagedBy
+          Value: bridgelink-container/infra/ecr-stack.yaml
+
+  # GetAuthorizationToken cannot be resource-scoped — it is an account-level call
+  # that returns a registry token. Every action that touches image content is
+  # scoped to the three repository ARNs.
+  #
+  # Kept as a standalone managed policy (rather than inlined on the role) so it can
+  # be attached elsewhere later without duplicating the action list.
+
+  EcrPushPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: bridgelink-ecr-push
+      # `>-`, not `>`: the folded form keeps a trailing newline, and IAM validates
+      # descriptions against [\p{L}\p{M}\p{Z}\p{S}\p{N}\p{P}]* which excludes control
+      # characters, so a plain `>` fails with a 400 on create.
+      Description: >-
+        Push BridgeLink release images to the private ECR repositories
+        (bridgelink-container CI, IRT-1866).
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: GetRegistryToken
+            Effect: Allow
+            Action: ecr:GetAuthorizationToken
+            Resource: '*'
+          - Sid: PushAndInspectBridgeLinkImages
+            Effect: Allow
+            Action:
+              - ecr:BatchCheckLayerAvailability
+              - ecr:InitiateLayerUpload
+              - ecr:UploadLayerPart
+              - ecr:CompleteLayerUpload
+              - ecr:PutImage
+              - ecr:BatchGetImage
+              - ecr:GetDownloadUrlForLayer
+              - ecr:DescribeImages
+              - ecr:DescribeRepositories
+            Resource:
+              - !GetAtt StandardRepository.Arn
+              - !GetAtt DhiRepository.Arn
+              - !GetAtt DhiSlimRepository.Arn
+
+Outputs:
+  RegistryUrl:
+    Description: Registry host for docker login / image references.
+    Value: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com'
+
+  StandardRepositoryUri:
+    Description: Standard (Rocky, UID 1000) image repository URI.
+    Value: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${StandardRepository}'
+
+  DhiRepositoryUri:
+    Description: Hardened (DHI, UID 65532) image repository URI.
+    Value: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${DhiRepository}'
+
+  DhiSlimRepositoryUri:
+    Description: Hardened WebAdmin-only (dhi-slim) image repository URI.
+    Value: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${DhiSlimRepository}'
+
+  PublishRoleArn:
+    Description: >
+      Role the publish workflows assume (vars.AWS_PUBLISH_ROLE_ARN). Assumable only
+      by workflow runs on the integration branch.
+    Value: !GetAtt PublishRole.Arn
+
+  RepositoryArns:
+    Description: >
+      Repository ARNs — hand these to IRT-1865 for the customer read policy
+      (bridgelink-ecr-readOnly) scope.
+    Value: !Join
+      - ','
+      - - !GetAtt StandardRepository.Arn
+        - !GetAtt DhiRepository.Arn
+        - !GetAtt DhiSlimRepository.Arn

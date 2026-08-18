@@ -1,0 +1,28 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  ONE-TIME USE (IRT-1866): minimal template for importing the pre-existing
+  innovarhealthcare/bridgelink ECR repository into the bridgelink-ecr stack.
+
+  A new-stack CloudFormation import requires the template to contain ONLY the
+  resources being imported, so the full ecr-stack.yaml cannot be used for this
+  step. Properties are deliberately minimal — the full-template update that
+  follows immediately applies the lifecycle policy, scan-on-push and tags, which
+  also clears the drift this bare definition would otherwise leave behind.
+
+  deploy-ecr.sh runs this automatically when the stack does not yet exist and the
+  repository does. It should never need to be applied by hand, and is inert once
+  the stack exists.
+
+Parameters:
+  RepoNamespace:
+    Type: String
+    Default: innovarhealthcare
+
+Resources:
+  StandardRepository:
+    Type: AWS::ECR::Repository
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      RepositoryName: !Sub '${RepoNamespace}/bridgelink'
+      ImageTagMutability: MUTABLE
