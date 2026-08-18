@@ -19,8 +19,11 @@
 # OIDC — no long-lived AWS credentials.
 #
 # Required repo config:
-#   Variable: AWS_ROLE_ARN   arn:aws:iam::403214344436:role/github-bridgelink-release-read
-#                            (carries the bridgelink-ecr-push policy from infra/ecr-stack.yaml)
+#   Variable: AWS_PUBLISH_ROLE_ARN   the bridgelink-publish role created by
+#                            infra/ecr-stack.yaml. It carries both the ECR push policy and the
+#                            s3:// release read, and is assumable from the integration branch
+#                            ONLY — these tags are mutable, so push access is the ability to
+#                            replace an already-released customer image.
 #   Secrets:  DOCKERHUB_USERNAME / DOCKERHUB_TOKEN   authenticated base-image pulls only, never a
 #                            push target here — avoids the anonymous pull-rate limit on shared runners.
 #
@@ -59,6 +62,9 @@ env:
   # build carries the bucket's region for `aws s3 cp`.
   ECR_REGION: us-east-2
   S3_REGION: us-east-1
+  # 3h, the MaxSessionDuration of bridgelink-publish. The emulated arm64 stage of the
+  # multi-arch build re-reads the tarball from S3 and is slow, so the session has to outlast it.
+  SESSION_SECONDS: "10800"
   ECR_REPOSITORY: innovarhealthcare/bridgelink
   TEST_IMAGE: innovarhealthcare/bridgelink:rocky-release-test
 
@@ -74,9 +80,9 @@ jobs:
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          role-to-assume: ${{ vars.AWS_PUBLISH_ROLE_ARN }}
           aws-region: ${{ env.ECR_REGION }}
-          role-duration-seconds: 3600   # headroom for the emulated arm64 build
+          role-duration-seconds: ${{ env.SESSION_SECONDS }}
 
       - name: Compute BINARY_URL
         id: url
@@ -169,6 +175,36 @@ jobs:
           TRIVY_PKG_TYPES: os
 
       # --- Publish (multi-arch) --------------------------------------------------------------------
+      #
+      # Re-assume before the release build. The credentials file staged above carries a session
+      # token that expires on its own clock, and everything between then and here — a single-arch
+      # build, the acceptance suite with its database containers, two Trivy scans — runs first.
+      # The multi-arch build then re-reads the tarball from S3 inside the emulated arm64 stage,
+      # which is the slowest part of the job and the last thing to need those credentials. A
+      # single session assumed at the top of the job can expire before it gets there, failing the
+      # release deep inside BuildKit with an S3 auth error. Raising the duration alone is not
+      # enough: the pre-existing read role is capped at 1h by MaxSessionDuration, which is part of
+      # why bridgelink-publish exists (it allows 3h).
+      - name: Re-assume AWS credentials for the release build (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_PUBLISH_ROLE_ARN }}
+          aws-region: ${{ env.ECR_REGION }}
+          role-duration-seconds: ${{ env.SESSION_SECONDS }}
+
+      - name: Re-stage AWS credentials for the release build
+        run: |
+          set -euo pipefail
+          umask 077
+          {
+            echo "[default]"
+            echo "aws_access_key_id=${AWS_ACCESS_KEY_ID}"
+            echo "aws_secret_access_key=${AWS_SECRET_ACCESS_KEY}"
+            echo "aws_session_token=${AWS_SESSION_TOKEN}"
+            echo "region=${S3_REGION}"
+          } > "${RUNNER_TEMP}/aws_credentials"
+
+      # After the re-assume above, so the login token is fresh too (it lasts 12h regardless).
       - name: Log in to Amazon ECR
         id: ecr
         uses: aws-actions/amazon-ecr-login@v2
