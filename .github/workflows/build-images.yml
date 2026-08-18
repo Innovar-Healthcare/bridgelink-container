@@ -27,8 +27,9 @@
 #                          "private": true publishes that version to the private ECR registry
 #                          INSTEAD of public Docker Hub (26.9+). Optional; omitted means public,
 #                          so pre-26.9 entries need no edit.
-#     AWS_ROLE_ARN         OIDC role assumed for the ECR push (the same role the standard-image
-#                          publish workflow already assumes for its s3:// binary fetch). Only needed
+#     AWS_PUBLISH_ROLE_ARN OIDC role assumed for the ECR push (bridgelink-publish, created by
+#                          infra/ecr-stack.yaml). Assumable from the integration branch ONLY, so a
+#                          private publish cannot be dispatched from a feature branch. Only needed
 #                          once a "private" entry exists.
 #     DEFAULT_VERSION      / DEFAULT_BINARY_URL   single version used only to gate PRs (dhi /
 #                          test-rocky on pull_request) — pin these to the current newest release.
@@ -146,8 +147,22 @@ jobs:
               echo "::error::MAINTAINED_VERSIONS repo variable is empty or unset — nothing to rebuild." >&2
               exit 1
             fi
-            # Normalize the optional `private` key to a real boolean so matrix.private is never
-            # the empty string downstream — entries predating private publishing simply omit it.
+            # `private` must be a real JSON boolean or absent. Validate rather than coerce:
+            # a string survives `.private // false` intact, and the two places that read it
+            # disagree about what is true — GitHub `if:` expressions treat ANY non-empty
+            # string as true, while Compute tags does [ "$v" = "true" ]. So "True" would take
+            # the ECR branch for the login steps and the DOCKER HUB branch for the tags, and
+            # the push would succeed because the job is already Docker Hub authenticated for
+            # base-image pulls. That publishes a customer-only release publicly, on a green run.
+            # Coercing with `.private == true` would be worse: someone who typed "yes" meaning
+            # private would silently get a public push instead of an error.
+            if ! jq -e 'all(.[]; (has("private") | not) or (.private | type == "boolean"))' \
+                 <<<"$MAINTAINED_VERSIONS_RAW" >/dev/null; then
+              echo "::error::MAINTAINED_VERSIONS has a non-boolean \"private\" value. Use true or false (unquoted), or omit the key." >&2
+              jq -c '.[] | select(has("private") and (.private | type != "boolean")) | {version, private}' \
+                <<<"$MAINTAINED_VERSIONS_RAW" >&2 || true
+              exit 1
+            fi
             MATRIX=$(jq -c 'map(.private = (.private // false))' <<<"$MAINTAINED_VERSIONS_RAW")
             if [ "$(jq 'length' <<<"$MATRIX")" -eq 0 ]; then
               echo "::error::MAINTAINED_VERSIONS repo variable parsed to an empty array — nothing to rebuild." >&2
@@ -190,7 +205,8 @@ jobs:
           username: ${{ secrets.DHI_USERNAME }}
           password: ${{ secrets.DHI_TOKEN }}
       # Authenticate Docker Hub pulls so the suite's nginx/postgres/mysql pulls don't hit the
-      # anonymous pull-rate limit on shared runner IPs.
+      # anonymous pull-rate limit on shared runner IPs. These credentials also carry push
+      # rights, so they are what a public release is pushed with further down.
       - name: Log in to Docker Hub (authenticated pulls)
         uses: docker/login-action@v3
         with:
@@ -284,27 +300,31 @@ jobs:
       # behaviour the 26.3.1 / 26.6.0 lines had before private publishing existed. The two are
       # mutually exclusive on purpose: without that, the weekly rebuild would leak a private release
       # to Docker Hub.
-      - name: Log in to Docker Hub (push target)
-        if: github.event_name != 'pull_request' && !matrix.private
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
+      # No Docker Hub login here: the unconditional "authenticated pulls" step above already
+      # authenticated this job with the same credentials, which carry push rights. A second
+      # conditional login would read as the public/private safety valve without being one —
+      # buildx pushes with whatever auth the daemon already holds, so what actually decides
+      # the destination is the tag list computed below.
+      #
       # OIDC -> temporary AWS creds for the ECR push. Same role the s3:// binary fetch already uses
       # (vars.AWS_ROLE_ARN), so no new long-lived credentials — it carries the bridgelink-ecr-push
       # policy from infra/ecr-stack.yaml. Region is us-east-2 (the registry); the in-build s3:// fetch
       # keeps its own region from the AWS_CREDENTIALS secret and is unaffected.
-      # The role's trust policy is scoped to repo:Innovar-Healthcare/bridgelink-container:* (verified
-      # 2026-08-18), so any ref in this repo may assume it — scheduled runs on main and manual
-      # dispatches from a feature branch both work.
+      # bridgelink-publish (infra/ecr-stack.yaml) is trusted for refs/heads/main ONLY, because
+      # these tags are mutable: push access is the ability to replace an already-released
+      # customer image. The weekly schedule runs on main, so it is unaffected; a private publish
+      # dispatched from a feature branch will fail to assume the role, which is intended. Use
+      # push: false for a feature-branch dry run.
       - name: Configure AWS credentials (OIDC)
         if: github.event_name != 'pull_request' && matrix.private
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          role-to-assume: ${{ vars.AWS_PUBLISH_ROLE_ARN }}
           aws-region: us-east-2
-          role-duration-seconds: 3600   # headroom for the emulated arm64 build
+          # The session is used ONLY for the ECR login here — the in-build s3:// fetch uses the
+          # AWS_CREDENTIALS secret, and the long multi-arch build rides the 12h ECR token, so
+          # this duration does not have to cover the build.
+          role-duration-seconds: 3600
 
       - name: Log in to Amazon ECR (private push target)
         if: github.event_name != 'pull_request' && matrix.private
@@ -323,24 +343,30 @@ jobs:
       - name: Compute tags
         if: github.event_name != 'pull_request'
         id: tags
+        # Values via env rather than spliced into the script, per this workflow's convention:
+        # VERSION originates from a repo variable or a dispatch input.
+        env:
+          PRIVATE: ${{ matrix.private }}
+          LATEST: ${{ matrix.latest }}
+          VERSION: ${{ matrix.version }}
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
         run: |
           set -euo pipefail
-          if [ "${{ matrix.private }}" = "true" ]; then
-            R="${{ steps.ecr.outputs.registry }}"
-            if [ -z "$R" ]; then
-              echo "::error::ECR login produced no registry — cannot publish ${{ matrix.version }} privately." >&2
+          if [ "$PRIVATE" = "true" ]; then
+            if [ -z "$REGISTRY" ]; then
+              echo "::error::ECR login produced no registry — cannot publish $VERSION privately." >&2
               exit 1
             fi
-            T="$R/innovarhealthcare/bridgelink-dhi:${{ matrix.version }}-dhi"
-            S="$R/innovarhealthcare/bridgelink-dhi-slim:${{ matrix.version }}-dhi-slim"
-            if [ "${{ matrix.latest }}" = "true" ]; then
-              T="$T"$'\n'"$R/innovarhealthcare/bridgelink-dhi:latest-dhi"
-              S="$S"$'\n'"$R/innovarhealthcare/bridgelink-dhi-slim:latest-dhi-slim"
+            T="$REGISTRY/innovarhealthcare/bridgelink-dhi:${VERSION}-dhi"
+            S="$REGISTRY/innovarhealthcare/bridgelink-dhi-slim:${VERSION}-dhi-slim"
+            if [ "$LATEST" = "true" ]; then
+              T="$T"$'\n'"$REGISTRY/innovarhealthcare/bridgelink-dhi:latest-dhi"
+              S="$S"$'\n'"$REGISTRY/innovarhealthcare/bridgelink-dhi-slim:latest-dhi-slim"
             fi
           else
-            T="innovarhealthcare/bridgelink:${{ matrix.version }}-dhi"
-            S="innovarhealthcare/bridgelink:${{ matrix.version }}-dhi-slim"
-            if [ "${{ matrix.latest }}" = "true" ]; then
+            T="innovarhealthcare/bridgelink:${VERSION}-dhi"
+            S="innovarhealthcare/bridgelink:${VERSION}-dhi-slim"
+            if [ "$LATEST" = "true" ]; then
               T="$T"$'\n'"innovarhealthcare/bridgelink:latest-dhi"
               S="$S"$'\n'"innovarhealthcare/bridgelink:latest-dhi-slim"
             fi
