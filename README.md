@@ -7,6 +7,7 @@
 * [What is BridgeLink (formerly Mirth Connect)](#what-is-connect)
 * [Hardened (DHI) image](#hardened-dhi-image)
 * [Image security scanning](#image-security-scanning)
+* [Getting the images (26.9 and later)](#private-registry)
 * [How to use this image](#how-to-use)
   * [Start a BridgeLink instance](#start-bridgelink)
   * [Using `docker stack deploy` or `docker-compose`](#using-docker-compose)
@@ -239,6 +240,86 @@ scope (the gate scans OS packages only) and stays visible on the Security tab re
 has assessed one as not-exploitable / unfixable, you may also record it in [`.trivyignore`](.trivyignore)
 with that justification so local `trivy image` / `--pkg-types library` scans are clean; the CI SARIF
 still shows it. (Example already present: Apache Derby `CVE-2022-46337`.)
+
+------------
+
+<a name="private-registry"></a>
+# Getting the images (26.9 and later) [↑](#top)
+
+From **26.9**, BridgeLink container images are available to customers only, from a
+private Amazon ECR registry. The source in this repository stays public; the built
+images do not. **26.6.0 and earlier remain on public Docker Hub** at
+`innovarhealthcare/bridgelink` and keep receiving their weekly base-image security
+rebuilds, so nothing you pull today stops working.
+
+Three repositories are published per release:
+
+| Repository | Variant | Runs as |
+| --- | --- | --- |
+| `innovarhealthcare/bridgelink` | Standard (Rocky Linux 9 + OpenJDK 17) | UID 1000 |
+| `innovarhealthcare/bridgelink-dhi` | Hardened ([DHI](#hardened-dhi-image)) | UID 65532 |
+| `innovarhealthcare/bridgelink-dhi-slim` | Hardened, WebAdmin-only (no Swing Administrator) | UID 65532 |
+
+## Signing in
+
+Innovar issues you an AWS access key pair and the exact registry URL. Configure the
+key pair (`aws configure`), then authenticate Docker against the registry:
+
+```bash
+aws ecr get-login-password --region us-east-2 | docker login --username AWS --password-stdin <registry-url>
+```
+
+```bash
+docker pull <registry-url>/innovarhealthcare/bridgelink-dhi:26.9.0-dhi
+```
+
+The login token is valid for **12 hours**. For anything automated — CI, a scheduled
+`docker compose pull`, a node that reboots — install the
+[Amazon ECR credential helper](https://github.com/awslabs/amazon-ecr-credential-helper)
+instead of re-running the login. With `"credsStore": "ecr-login"` in
+`~/.docker/config.json` it fetches and refreshes tokens on demand, so expiry stops
+being something you schedule around.
+
+## Pinning a release
+
+Tags in these repositories are **mutable by design**. When the upstream hardened
+base image is repatched, the same `<version>-dhi` tag is rebuilt and re-pushed so
+that pulling a supported version keeps getting OS security fixes without you
+changing anything. That is deliberate, and it is the reason to pin by **digest**
+when you need a reference that cannot change:
+
+```bash
+docker pull <registry-url>/innovarhealthcare/bridgelink-dhi@sha256:<digest>
+```
+
+Each release's digests are published in its release notes.
+
+## Pointing the compose file and chart at the registry
+
+Both default to Docker Hub, so point them at the registry for private pulls. The
+compose files name the image directly — edit the `image:` line of the `bl` service
+in `docker-compose.yml` (or `docker-compose.dhi.yml`):
+
+```yaml
+services:
+  bl:
+    image: <registry-url>/innovarhealthcare/bridgelink-dhi:26.9.0-dhi
+```
+
+For the Helm chart, override the values:
+
+```yaml
+# Helm values
+bridgelink:
+  image:
+    repository: <registry-url>/innovarhealthcare/bridgelink-dhi
+    tag: 26.9.0-dhi
+  runAsUser: 65532      # DHI images; use 1000 for the standard image
+  runAsGroup: 65532
+```
+
+On Kubernetes you will also need an `imagePullSecret` for the registry. The chart
+does not template one yet — contact Innovar if you are deploying to Kubernetes.
 
 ------------
 
