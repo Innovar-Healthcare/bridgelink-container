@@ -1,0 +1,222 @@
+# Publish the standard (Rocky) BridgeLink image to the private ECR registry  —  IRT-1866
+#
+# From 26.9 the container images are customer-only (parent IRT-1851), served from a private AWS ECR
+# registry with per-customer IAM credentials. This is the standard/Rocky variant's release path; the
+# hardened dhi / dhi-slim variants are published by build-images.yml, which also carries the weekly
+# rebuild-on-base-update schedule.
+#
+# Replaces the former publish-ghcr.yml. GHCR was retired rather than kept alongside ECR: the parent
+# ruled it out on quota grounds (Free-plan 500 MB storage / 1 GB month transfer cannot carry a 1.33 GB
+# multi-arch image), and a second private channel would mean two access surfaces to revoke when a
+# customer is offboarded. The public Docker Hub path (publish-dockerhub.yml) is unchanged and still
+# serves 26.6.0 and earlier.
+#
+# Unlike its GHCR predecessor this gates the release: the acceptance suite and the Trivy
+# fixable-HIGH/CRITICAL OS gate both run against a locally built image before anything is pushed.
+# Publishing an unverified image was tolerable for an internal channel; it is not for a paid one.
+#
+# Manual-only (workflow_dispatch). Fetches the release tarball from the private s3:// location via
+# OIDC — no long-lived AWS credentials.
+#
+# Required repo config:
+#   Variable: AWS_ROLE_ARN   arn:aws:iam::403214344436:role/github-bridgelink-release-read
+#                            (carries the bridgelink-ecr-push policy from infra/ecr-stack.yaml)
+#   Secrets:  DOCKERHUB_USERNAME / DOCKERHUB_TOKEN   authenticated base-image pulls only, never a
+#                            push target here — avoids the anonymous pull-rate limit on shared runners.
+#
+# Images are pullable only with credentials: the repositories carry no repository policy, so access is
+# IAM-only. Customer access (per-customer IAM users, portal visibility, offboarding) is IRT-1865.
+
+name: publish-ecr
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "BridgeLink version to publish (e.g. 26.9.0)"
+        required: true
+      latest:
+        description: "Also move the rolling `latest` tag to this version"
+        type: boolean
+        default: false
+      push:
+        description: "Push the image (uncheck for a build + test + scan dry run)"
+        type: boolean
+        default: true
+
+permissions:
+  id-token: write        # OIDC to AWS for the s3:// binary fetch and the ECR push
+  contents: read
+  security-events: write # upload the Trivy SARIF to Security > Code scanning
+
+concurrency:
+  group: publish-ecr-${{ github.event.inputs.version }}
+  cancel-in-progress: false
+
+env:
+  # The registry is in us-east-2; the release-tarball bucket is in us-east-1. These are deliberately
+  # separate: the session region drives the ECR login, while the credentials file mounted into the
+  # build carries the bucket's region for `aws s3 cp`.
+  ECR_REGION: us-east-2
+  S3_REGION: us-east-1
+  ECR_REPOSITORY: innovarhealthcare/bridgelink
+  TEST_IMAGE: innovarhealthcare/bridgelink:rocky-release-test
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      # OIDC -> temporary AWS creds, used both for the in-build s3:// fetch and the ECR push.
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.ECR_REGION }}
+          role-duration-seconds: 3600   # headroom for the emulated arm64 build
+
+      - name: Compute BINARY_URL
+        id: url
+        env:
+          VERSION: ${{ github.event.inputs.version }}
+        run: |
+          set -euo pipefail
+          VERSION_US="${VERSION//./_}"
+          echo "binary_url=s3://innovar-codebuild/bridgelink/${VERSION}/official-release/BridgeLink_unix_${VERSION_US}.tar.gz" >> "$GITHUB_OUTPUT"
+
+      # The Dockerfile fetches the binary during the build via a mounted aws_credentials secret.
+      # region is the BUCKET's region, not the session's — see the env block above.
+      - name: Stage AWS credentials for the build
+        run: |
+          set -euo pipefail
+          umask 077
+          {
+            echo "[default]"
+            echo "aws_access_key_id=${AWS_ACCESS_KEY_ID}"
+            echo "aws_secret_access_key=${AWS_SECRET_ACCESS_KEY}"
+            echo "aws_session_token=${AWS_SESSION_TOKEN}"
+            echo "region=${S3_REGION}"
+          } > "${RUNNER_TEMP}/aws_credentials"
+
+      # Authenticated pulls only (the rockylinux base plus the acceptance suite's
+      # nginx/postgres/mysql images). Docker Hub is not a push target in this workflow.
+      - name: Log in to Docker Hub (authenticated pulls)
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # --- Gate: build, acceptance-test and scan before publishing ---------------------------------
+      # Single-arch local build, mirroring build-images.yml's test-rocky job. The multi-arch publish
+      # build below reuses the same layers from the buildx cache.
+      - name: Build Rocky test image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          load: true
+          push: false
+          tags: ${{ env.TEST_IMAGE }}
+          build-args: |
+            BINARY_URL=${{ steps.url.outputs.binary_url }}
+          secret-files: |
+            aws_credentials=${{ runner.temp }}/aws_credentials
+
+      - name: Run acceptance tests
+        # Rocky runs as UID 1000 and ships a shell, so the no-shell assertion is skipped for it.
+        run: |
+          IMAGE="$TEST_IMAGE" SKIP_BUILD=1 \
+            DOCKERFILE=Dockerfile EXPECTED_UID=1000 CHECK_NO_SHELL=0 \
+            bash test/image-test.sh
+
+      - name: Trivy scan (SARIF, full report)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ env.TEST_IMAGE }}
+          scanners: vuln
+          format: sarif
+          output: trivy-rocky-release.sarif
+          exit-code: "0"
+        env:
+          # Full report must include everything; .trivyignore stays scoped to the gate step below.
+          TRIVY_IGNOREFILE: /dev/null
+
+      - name: Upload Trivy SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-rocky-release.sarif
+          # Distinct from build-images.yml's trivy-rocky category so the two do not overwrite each
+          # other's findings in the Security tab.
+          category: trivy-rocky-release-${{ github.event.inputs.version }}
+
+      # Gate: fail on FIXABLE HIGH/CRITICAL in OS/base packages — the layer this repo owns. Library
+      # CVEs from the bundled BridgeLink app JARs come from the Core release tarball and can't be
+      # fixed here; they stay visible in the SARIF above and are tracked against Core (IRT-1396).
+      - name: Trivy gate (fixable HIGH/CRITICAL, OS packages)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ env.TEST_IMAGE }}
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          format: table
+          exit-code: "1"
+        env:
+          TRIVY_PKG_TYPES: os
+
+      # --- Publish (multi-arch) --------------------------------------------------------------------
+      - name: Log in to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Compute tags
+        id: tags
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          VERSION: ${{ github.event.inputs.version }}
+          LATEST: ${{ github.event.inputs.latest }}
+        run: |
+          set -euo pipefail
+          if [ -z "$REGISTRY" ]; then
+            echo "::error::ECR login produced no registry — refusing to publish with an unqualified tag." >&2
+            exit 1
+          fi
+          T="$REGISTRY/$ECR_REPOSITORY:${VERSION}"
+          if [ "$LATEST" = "true" ]; then
+            T="$T"$'\n'"$REGISTRY/$ECR_REPOSITORY:latest"
+          fi
+          { echo "list<<EOF"; echo "$T"; echo "EOF"; } >> "$GITHUB_OUTPUT"
+
+      - name: Build & push image to ECR
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event.inputs.push == 'true' }}
+          build-args: |
+            BINARY_URL=${{ steps.url.outputs.binary_url }}
+          secret-files: |
+            aws_credentials=${{ runner.temp }}/aws_credentials
+          tags: ${{ steps.tags.outputs.list }}
+
+      # Tags in this repository are MUTABLE by design (see infra/README.md), so the manifest digest is
+      # the immutable release identity. Record it for the release notes.
+      - name: Record published digest
+        if: github.event.inputs.push == 'true'
+        env:
+          VERSION: ${{ github.event.inputs.version }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          {
+            echo "### $VERSION (standard/Rocky, private ECR)"
+            echo
+            echo "Digest: \`$DIGEST\`"
+            echo
+            echo "Tags are mutable; pin by digest for an immutable reference."
+          } >> "$GITHUB_STEP_SUMMARY"
