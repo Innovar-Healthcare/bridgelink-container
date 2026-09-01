@@ -200,9 +200,15 @@ if [ -n "$KEYSTORE_DOWNLOAD" ]; then
     # Create the appdata directory if it doesn't exist
     mkdir -p "$APPDATA_DIR"
 
-    # Download the keystore file quietly
+    # Download the keystore file quietly. ALLOW_INSECURE is honored here for the same reason it is
+    # honored by the three download knobs above: the documented contract (README, CLAUDE.md) says
+    # it covers the keystore pull, and the DHI bootstrap already does. This call site was the only
+    # one missing it, so a self-signed keystore host worked on the hardened image and failed here
+    # (IRT-2015).
+    CURL_OPTS="-fSL"
+    [ "${ALLOW_INSECURE}" = "true" ] && CURL_OPTS="-kfSL"
     echo "Downloading keystore from: $KEYSTORE_DOWNLOAD"
-    curl --silent --show-error -fSL "$KEYSTORE_DOWNLOAD" -o "$KEYSTORE_FILE"
+    curl --silent --show-error ${CURL_OPTS} "$KEYSTORE_DOWNLOAD" -o "$KEYSTORE_FILE"
 
     # Check if the download was successful
     if [ $? -eq 0 ]; then

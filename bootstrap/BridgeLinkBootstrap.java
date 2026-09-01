@@ -58,6 +58,28 @@ public final class BridgeLinkBootstrap {
 
     static final boolean ALLOW_INSECURE = "true".equalsIgnoreCase(System.getenv("ALLOW_INSECURE"));
 
+    /*
+     * ALLOW_INSECURE must disable the HOSTNAME check as well as certificate trust, or this image
+     * is stricter than the Rocky one and the "both images behave identically" promise above is
+     * false. entrypoint.sh passes curl -k, which skips both; insecureSslContext() below only
+     * covers trust, because HttpClient enforces hostname verification independently of the
+     * SSLContext and HttpClient.Builder.sslParameters() cannot override it — this system property
+     * is the only supported way off it. So ALLOW_INSECURE=true against a self-signed host whose
+     * CN does not match the URL used to work on Rocky and fail here (IRT-2015).
+     *
+     * This lives in a static initializer rather than at the top of main() on purpose: the property
+     * is read from a static initializer inside jdk.internal.net.http.common.Utils, so it must be
+     * set before ANY java.net.http class loads. A static block on the main class always runs
+     * first; a line in main() would silently stop working the moment someone reordered the calls
+     * there, and the only symptom would be a download failing for a customer using a mismatched
+     * certificate. Do not move it.
+     */
+    static {
+        if (ALLOW_INSECURE) {
+            System.setProperty("jdk.internal.httpclient.disableHostnameVerification", "true");
+        }
+    }
+
     public static void main(String[] args) throws Exception {
         // Mirrors scripts/entrypoint.sh order exactly.
         writeServerId();
