@@ -58,9 +58,25 @@ public final class BridgeLinkHealthcheck {
     static final String DEFAULT_PORT    = "8443";
     static final String STATUS_PATH     = "/api/server/status";
 
-    /* Comfortably inside the HEALTHCHECK --timeout=5s and the probes' timeoutSeconds: 5, so the
-     * probe always reports a decision rather than being killed mid-flight. */
-    static final int TIMEOUT_MS = 4000;
+    /* One overall budget, enforced end to end, so the probe reports a decision rather than being
+     * killed mid-flight by the HEALTHCHECK --timeout=5s / probes' timeoutSeconds: 5.
+     *
+     * It has to be a single deadline rather than a per-phase timeout. setConnectTimeout and
+     * setReadTimeout are independent, and setReadTimeout applies per read() call, so a server that
+     * accepts the connection and then trickles bytes can hold a naive probe open for
+     * connect + (reads x timeout) — well past 5s, at which point docker records ITS kill message
+     * and the probe's own reason is lost.
+     *
+     * Sized so the WHOLE PROCESS fits in 5s, JVM startup included (~0.3-0.5s, more on a loaded
+     * node). A single read can still overshoot the deadline by up to READ_SLICE_MS, since a read
+     * already in flight cannot be shortened — hence the slice cap rather than one 3s read timeout.
+     * Worst case ~= 0.5 + 3.0 + 1.0 = 4.5s. Measured against a server trickling one byte every
+     * 1.5s forever: 3s, exit 1, reason recorded. */
+    static final int BUDGET_MS = 3000;
+
+    /* Per-read ceiling. On loopback a 9-byte body needs microseconds; 1s is already pathological,
+     * and bounding it is what keeps the last read from pushing the total past docker's timeout. */
+    static final int READ_SLICE_MS = 1000;
 
     /* Bounds the read on a server that answers the socket but streams nothing useful. The real
      * body is 9 bytes; anything remotely this large is already a bug. */
@@ -156,22 +172,26 @@ public final class BridgeLinkHealthcheck {
      * defaults to keep-alive, so a naive read-to-EOF blocks until the socket timeout on every
      * single probe. HttpURLConnection is in java.base and handles all of it.
      *
-     * Certificate and hostname verification are both disabled, which is correct here and nowhere
-     * else: this is a loopback request to the server's own self-signed keystore, whose CN will not
-     * be 127.0.0.1. Note that setHostnameVerifier is the reason this is HttpsURLConnection rather
-     * than java.net.http.HttpClient, whose hostname check cannot be disabled through an SSLContext
-     * (see the note on ALLOW_INSECURE in BridgeLinkBootstrap).
+     * Certificate and hostname verification are disabled for a LOOPBACK target only — see
+     * skipVerification(). setHostnameVerifier is the reason this is HttpsURLConnection rather than
+     * java.net.http.HttpClient, whose hostname check cannot be disabled through an SSLContext (see
+     * the note on ALLOW_INSECURE in BridgeLinkBootstrap).
      */
     static Response get(String url) throws Exception {
-        HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
+        long deadline = System.nanoTime() + BUDGET_MS * 1_000_000L;
+        URL target = new URL(url);
+        HttpURLConnection conn = (HttpURLConnection) target.openConnection();
         if (conn instanceof HttpsURLConnection) {
-            HttpsURLConnection https = (HttpsURLConnection) conn;
-            https.setSSLSocketFactory(insecureSslContext().getSocketFactory());
-            https.setHostnameVerifier((hostname, session) -> true);
+            // Verification is disabled only for a loopback target. See skipVerification().
+            if (skipVerification(target)) {
+                HttpsURLConnection https = (HttpsURLConnection) conn;
+                https.setSSLSocketFactory(insecureSslContext().getSocketFactory());
+                https.setHostnameVerifier((hostname, session) -> true);
+            }
         }
         conn.setRequestMethod("GET");
-        conn.setConnectTimeout(TIMEOUT_MS);
-        conn.setReadTimeout(TIMEOUT_MS);
+        conn.setConnectTimeout(remainingMs(deadline));
+        conn.setReadTimeout(Math.min(remainingMs(deadline), READ_SLICE_MS));
         conn.setInstanceFollowRedirects(false);
         // Required by default, and 400 without it — see trap 3 in the header comment.
         conn.setRequestProperty("X-Requested-With", "bridgelink-healthcheck");
@@ -182,18 +202,51 @@ public final class BridgeLinkHealthcheck {
             int code = conn.getResponseCode();
             // Read the error stream on a non-2xx: the body is what says why.
             InputStream in = code >= 400 ? conn.getErrorStream() : conn.getInputStream();
-            return new Response(code, in == null ? "" : read(in));
+            return new Response(code, in == null ? "" : read(in, deadline));
         } finally {
             conn.disconnect();
         }
     }
 
-    static String read(InputStream in) throws IOException {
+    /** Milliseconds left in the budget, floored at 1 — 0 would mean "no timeout" to the JDK. */
+    static int remainingMs(long deadline) {
+        long ms = (deadline - System.nanoTime()) / 1_000_000L;
+        return ms < 1 ? 1 : (int) Math.min(ms, BUDGET_MS);
+    }
+
+    static String read(InputStream in, long deadline) throws IOException {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         byte[] buf = new byte[1024];
         int n;
-        while ((n = in.read(buf)) > 0 && out.size() < MAX_BODY_BYTES) out.write(buf, 0, n);
+        // Stop on the shared deadline as well as the size cap: setReadTimeout bounds each read(),
+        // not the sequence of them, so a trickling server would otherwise outlive the budget.
+        while (out.size() < MAX_BODY_BYTES
+                && System.nanoTime() < deadline
+                && (n = in.read(buf)) > 0) {
+            out.write(buf, 0, n);
+        }
         return out.toString(StandardCharsets.UTF_8);
+    }
+
+    /**
+     * Skip TLS verification only where doing so cannot be attacked: a loopback address, where the
+     * peer is this container's own server presenting its own self-signed keystore (whose CN is
+     * never 127.0.0.1, which is why plain verification cannot work).
+     *
+     * BL_HEALTH_URL can name another host, and there verification must stay ON by default: a probe
+     * that trusts anything on a shared network lets anyone on the path forge the health verdict —
+     * holding a dead node "healthy" under Swarm, or forcing restarts. BL_HEALTH_INSECURE=true is
+     * the explicit opt-out for an operator who knowingly points this at a self-signed non-local
+     * endpoint.
+     */
+    static boolean skipVerification(URL target) {
+        if ("true".equalsIgnoreCase(System.getenv("BL_HEALTH_INSECURE"))) return true;
+        String host = target.getHost();
+        if (host == null) return false;
+        String h = host.toLowerCase();
+        if (h.startsWith("[") && h.endsWith("]")) h = h.substring(1, h.length() - 1);  // [::1]
+        return h.equals("localhost") || h.equals("127.0.0.1") || h.equals("::1")
+                || h.startsWith("127.");
     }
 
     // ---- parsing --------------------------------------------------------------------------------
