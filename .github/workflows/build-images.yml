@@ -550,6 +550,12 @@ jobs:
           dep = next(d for d in docs if d['kind'] == 'Deployment' and d['metadata']['name'].endswith('-bl'))
           c = next(c for c in dep['spec']['template']['spec']['containers'] if c['name'] == 'bridgelink')
           assert 'httpGet' in c['livenessProbe'], 'livenessProbe must be httpGet, not exec'
+          # Pinned: /status BLOCKS when the database is unreachable (isDatabaseRunning ->
+          # testDatabase waits on the pool), so a liveness probe against it times out and restarts
+          # the pod on any database outage. /version reads an in-memory value and answers iff the
+          # process is serving. Measured 200-in-73ms vs no-response-in-10s on the same server.
+          assert c['livenessProbe']['httpGet']['path'] == '/api/server/version', \
+              'livenessProbe must target /api/server/version, not /status (which hangs on DB loss)'
           hdrs = {h['name']: h['value'] for h in c['livenessProbe']['httpGet'].get('httpHeaders', [])}
           assert 'X-Requested-With' in hdrs, 'livenessProbe httpGet needs X-Requested-With or the API returns 400'
           assert c['livenessProbe']['httpGet']['scheme'] == 'HTTPS', 'livenessProbe must use HTTPS'

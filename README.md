@@ -782,15 +782,31 @@ the container, so `httpGet` and `exec` probes need nothing installed in the imag
 ships all three probes configured (see `bridgelink.startupProbe`, `readinessProbe`, `livenessProbe`
 in [`charts/bridgelink/values.yaml`](charts/bridgelink/values.yaml)):
 
-* **startup** and **readiness** `exec` the same probe binary the `HEALTHCHECK` uses, because they
-  must distinguish *ready* from *still starting*, and only the response body says which.
-* **liveness** is a cheap `httpGet` that accepts any 200. That is deliberate: liveness restarts the
-  pod, and a restart does not fix a database outage. Readiness already removes the pod from the
-  Service without killing it.
+* **startup** and **readiness** `exec` the same probe the `HEALTHCHECK` uses, because they must
+  distinguish *ready* from *still starting*, and only the response body says which.
+* **liveness** is a cheap `httpGet` against **`/api/server/version`**, not `/api/server/status`.
+  Liveness restarts the pod, and a restart does not fix a database outage — readiness already
+  removes the pod from the Service without killing it.
 
-Two gotchas if you write these yourself: exec probes default to `timeoutSeconds: 1`, which a cold
-JVM plus a TLS handshake will exceed, and an `httpGet` probe needs the `X-Requested-With` header or
-it gets a 400. The kubelet does not verify the certificate on an HTTPS probe, so the self-signed
+That last path choice is not cosmetic. When the database becomes unreachable, `/api/server/status`
+does not return `1` — it **blocks**, because computing the status opens a database connection.
+Measured on one server with its database stopped:
+
+| Endpoint | Result with the database down |
+|---|---|
+| `/api/server/version` | `200` in 73 ms |
+| `/api/server/status` | no response in 10 s |
+
+So a liveness probe pointed at `/api/server/status` times out and restarts the pod after
+`failureThreshold × periodSeconds` of *any* database outage. `/api/server/version` returns an
+in-memory value and needs no authentication, so it answers if and only if the JVM and Jetty are
+actually serving — which is what liveness should mean. Readiness still uses the status body, which
+is correct: there, a timeout *should* mean not-ready.
+
+Three gotchas if you write these yourself: exec probes default to `timeoutSeconds: 1`, which a cold
+JVM plus a TLS handshake will exceed; an `httpGet` probe needs the `X-Requested-With` header or it
+gets a 400; and any body-parsing check needs its own timeout, or a database outage hangs it
+indefinitely. The kubelet does not verify the certificate on an HTTPS probe, so the self-signed
 keystore needs no special handling.
 
 ------------

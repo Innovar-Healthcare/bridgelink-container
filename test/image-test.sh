@@ -437,11 +437,37 @@ if docker inspect bl-pg --format '{{.State.Running}}' 2>/dev/null | grep -q true
         # Not a pass: if the port died too, this run did not discriminate between the two at all.
         bad "health went unhealthy but 8443 stopped answering — assertion did not isolate engine state from port state"
       fi
-      # Healthcheck output lands in .State.Health.Log[].Output, never in container stdout.
-      docker inspect bl-pg --format '{{range .State.Health.Log}}{{.Output}}{{end}}' 2>/dev/null \
-        | grep -q 'unhealthy:.*status 1' \
-        && ok "probe recorded a diagnosable reason (status 1 = UNAVAILABLE)" \
-        || bad "probe verdict recorded without a usable reason in .State.Health.Log"
+      # Healthcheck output lands in .State.Health.Log[].Output, never in container stdout. Two
+      # reasons are both correct here, and which one you get depends on the failure: "status 1"
+      # when getStatus() returns UNAVAILABLE, or a read timeout when it BLOCKS instead — for total
+      # database loss the timeout is what actually happens, because isDatabaseRunning() ->
+      # testDatabase() waits on the connection pool rather than failing fast. Asserting only
+      # "status 1" pinned the wrong one of the two and failed a run where the probe behaved
+      # correctly. What must hold is that the probe, not docker's timeout killer, produced a
+      # readable reason — an empty Output would mean the probe was killed with nothing to show.
+      HLOG="$(docker inspect bl-pg --format '{{range .State.Health.Log}}{{.Output}}{{end}}' 2>/dev/null)"
+      if printf '%s' "$HLOG" | grep -qE 'unhealthy:.*(status 1|Timeout|timed out)'; then
+        ok "probe recorded a diagnosable reason ($(printf '%s' "$HLOG" | grep -o 'unhealthy:.*' | tail -1 | cut -c1-90))"
+      else
+        bad "probe verdict recorded without a usable reason in .State.Health.Log"
+        printf '    health log: %s\n' "$(printf '%s' "$HLOG" | tail -c 300)"
+      fi
+
+      # Liveness rationale, pinned empirically rather than asserted in a comment: /version keeps
+      # answering while /status is unusable. This is why the chart's livenessProbe targets /version
+      # — pointed at /status it would time out and restart the pod on any database outage.
+      VCODE="$(curl -k -s -o /dev/null -m 10 -w '%{http_code}' -H 'X-Requested-With: XMLHttpRequest' \
+                 "https://localhost:$PGPORT/api/server/version" 2>/dev/null)"
+      SCODE="$(curl -k -s -o /dev/null -m 10 -w '%{http_code}' -H 'X-Requested-With: XMLHttpRequest' \
+                 "https://localhost:$PGPORT/api/server/status" 2>/dev/null)"
+      if [ "$VCODE" = "200" ] && [ "$SCODE" != "200" ]; then
+        ok "/api/server/version still 200 while /api/server/status is unusable ($SCODE) — why liveness uses version"
+      else
+        # Not fatal to the change, but the chart's liveness target is chosen on this behaviour, so
+        # say so loudly if it ever stops holding.
+        echo "  NOTE: version=$VCODE status=$SCODE — expected version 200 and status not-200 with the DB down."
+        echo "        If /status now fails fast instead of blocking, revisit the chart's livenessProbe target."
+      fi
     else
       bad "health did not become unhealthy after the database was stopped"
       docker inspect bl-pg --format '{{json .State.Health}}' 2>/dev/null | head -c 600; echo

@@ -82,13 +82,24 @@ bridgelink:
     timeoutSeconds: 5
     failureThreshold: 3
 
-  # -- Liveness probe. Restarts the pod only when the API stops answering at all. kubelet does not
-  # verify the certificate on an HTTPS probe, so the self-signed keystore needs no configuration.
-  # The X-Requested-With header is required (server.api.require-requested-with, default true) —
-  # without it the endpoint returns HTTP 400 even though it needs no authentication.
+  # -- Liveness probe. Restarts the pod only when the API stops answering at all.
+  #
+  # Deliberately /api/server/version, NOT /api/server/status. When the database goes away,
+  # getStatus() calls isDatabaseRunning() -> testDatabase(), which blocks on the connection pool, so
+  # /status does not return UNAVAILABLE — it HANGS (measured: no response in 10s, while /version
+  # answered 200 in 73ms on the same server). A liveness probe pointed at /status would therefore
+  # time out and restart the pod after failureThreshold x periodSeconds of any database outage,
+  # which is exactly what liveness must not do: a restart does not fix a database, and readiness
+  # already removes the pod from the Service. /version reads an in-memory value
+  # (versionConfig.getString) and needs no authentication (@DontCheckAuthorized), so it answers iff
+  # the JVM and Jetty are actually serving — which is what liveness should mean.
+  #
+  # kubelet does not verify the certificate on an HTTPS probe, so the self-signed keystore needs no
+  # configuration. The X-Requested-With header is required (server.api.require-requested-with,
+  # default true) — without it the endpoint returns HTTP 400 even though it needs no authentication.
   livenessProbe:
     httpGet:
-      path: /api/server/status
+      path: /api/server/version
       port: https
       scheme: HTTPS
       httpHeaders:
