@@ -57,9 +57,14 @@ RUN chmod +x /opt/scripts/install.sh
 RUN --mount=type=secret,id=aws_credentials,target=/root/.aws/credentials \
     /opt/scripts/install.sh
 
-# Compile the shell-free bootstrap launcher (single class, default package).
+# Compile the shell-free bootstrap launcher and the healthcheck probe (default package). The probe
+# backs the HEALTHCHECK below; it is a separate class from the launcher so the probe path can never
+# re-enter config templating (IRT-2015).
 COPY bootstrap/BridgeLinkBootstrap.java /opt/bridgelink/bootstrap/BridgeLinkBootstrap.java
-RUN javac -d /opt/bridgelink/bootstrap /opt/bridgelink/bootstrap/BridgeLinkBootstrap.java
+COPY bootstrap/BridgeLinkHealthcheck.java /opt/bridgelink/bootstrap/BridgeLinkHealthcheck.java
+RUN javac -d /opt/bridgelink/bootstrap \
+      /opt/bridgelink/bootstrap/BridgeLinkBootstrap.java \
+      /opt/bridgelink/bootstrap/BridgeLinkHealthcheck.java
 
 # Drop unused launchers/libs (matches the Rocky image). blcommand/blmanager run outside the
 # server container; removing their launchers alongside the jars/libs avoids a dangling launcher
@@ -95,6 +100,25 @@ VOLUME /opt/bridgelink/appdata
 VOLUME /opt/bridgelink/custom-extensions
 
 USER 65532
+
+# Readiness probe (IRT-2015, issue #38). JSON exec form, so docker runs it directly rather than via
+# /bin/sh -c — there is no shell in this runtime, which is why the reporter's `curl -kf` healthcheck
+# could not work here and why the probe is Java.
+#
+# It checks GET /api/server/status for status 0, NOT that port 8443 answers: the engine brings its
+# web server up before the engine and before the initial channel deploy, so a port check reports
+# healthy during precisely the window a dependent container must not start in. The endpoint also
+# returns HTTP 200 even when UNAVAILABLE, so the body has to be parsed.
+#
+# start-period covers a cold first boot: database connect-with-retry, schema migration, extension
+# migration and the startup channel deploy all precede STATUS_OK. With interval+retries the real
+# unhealthy horizon is ~345s. Being generous costs only a slower first FAILURE report, whereas
+# being tight turns a slow boot into a restart loop under Docker Swarm (plain docker never restarts
+# on unhealthy; Swarm does). Override per-service with `healthcheck: {disable: true}` in compose, or
+# `docker run --no-healthcheck`.
+HEALTHCHECK --interval=15s --timeout=5s --start-period=300s --retries=3 \
+  CMD ["java", "-XX:TieredStopAtLevel=1", "-XX:+UseSerialGC", "-XX:-UsePerfData", "-Xmx32m", \
+       "-cp", "/opt/bridgelink/bootstrap", "BridgeLinkHealthcheck"]
 
 # Shell-free entrypoint: the bootstrap templates config, then launches the server in-process.
 ENTRYPOINT ["java", "-cp", "/opt/bridgelink/bootstrap", "BridgeLinkBootstrap"]

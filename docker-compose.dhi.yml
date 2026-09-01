@@ -1,6 +1,19 @@
 # Hardened (Docker Hardened Image / DHI) variant of docker-compose.yml.
 # Differences vs the Rocky compose: the -dhi image tag and the non-root UID (65532, not 1000).
 # The mounted ./appdata dir must be writable by UID 65532 (e.g. `chown -R 65532:65532 ./appdata`).
+# Both images declare a HEALTHCHECK (IRT-2015), so no `healthcheck:` block is needed here — it
+# probes GET /api/server/status and reports healthy only once the engine is running and the startup
+# channel deploy has finished, not merely once port 8443 answers.
+#
+# A container that must not start until BridgeLink is genuinely ready can therefore gate on it:
+#
+#   my-config-loader:
+#     depends_on:
+#       bl:
+#         condition: service_healthy
+#         restart: true
+#
+# To opt out of the image's healthcheck for a service, add `healthcheck: {disable: true}`.
 services:
   bl:
     image: innovarhealthcare/bridgelink:26.3.1-dhi

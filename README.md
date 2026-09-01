@@ -19,6 +19,7 @@
   * [Using Volumes](#using-volumes)
     * [The appdata folder](#the-appdata-folder)
     * [Additional extensions](#additional-extensions)
+  * [Health checks and readiness](#health-checks)
 * [License](#license)
 
 ------------
@@ -713,6 +714,84 @@ Example:
     environment:
       ...
 ```
+
+------------
+
+<a name="health-checks"></a>
+## Health checks and readiness [↑](#top)
+
+Both images declare a `HEALTHCHECK`, so `docker ps` shows a health column and Compose's
+`depends_on: {condition: service_healthy}` works without you writing a probe.
+
+```yaml
+  my-config-loader:
+    depends_on:
+      bl:
+        condition: service_healthy
+        restart: true
+```
+
+### What it checks, and why not the port
+
+The probe queries `GET /api/server/status` and passes only on status **0**:
+
+| Code | Meaning |
+|---|---|
+| `0` | OK — database reachable, engine running, startup deploy finished |
+| `1` | UNAVAILABLE — database or engine not running |
+| `2` | ENGINE_STARTING |
+| `3` | INITIAL_DEPLOY — engine up, startup channels still deploying |
+
+A check against the port or the web root (for example `curl -kf https://localhost:8443`) is **not**
+equivalent, and not merely coarser. BridgeLink starts its web server *before* the engine and before
+the initial channel deploy, so 8443 completes a TLS handshake and serves the web UI while the engine
+is still starting. A dependent container gated on a port check can therefore start during exactly
+the window in which the API will reject or mis-serve its calls.
+
+Three things to know if you write your own check against this endpoint:
+
+1. **It always returns HTTP 200**, with the status in the body, even when the server is
+   UNAVAILABLE. `curl -f`, and any check that keys on the HTTP status — including a Kubernetes
+   `httpGet` probe — passes while the engine is down. You must read the body.
+2. **The body is not a bare integer.** It is `<int>0</int>`, or `{"int":0}` if you send
+   `Accept: application/json`.
+3. **`X-Requested-With` is required** (`server.api.require-requested-with`, default `true`).
+   Without it the endpoint returns **HTTP 400**, even though it needs no authentication.
+
+### Tuning and opting out
+
+| Knob | Default | Notes |
+|---|---|---|
+| `BL_HEALTH_URL` | `https://127.0.0.1:<https.port>/api/server/status` | Point the probe elsewhere (plain HTTP, another port, a context path). Otherwise `https.port` is read from `mirth.properties`, so `MP_HTTPS_PORT` is followed automatically. |
+| `--start-period` | `300s` | Covers a cold boot: database connect-with-retry, schema migration, extension migration and the startup deploy all precede status 0. Raise it for a large migration. |
+| `--interval` / `--retries` | `15s` / `3` | Once the first check succeeds, three consecutive failures (~45s) mark the container unhealthy. |
+
+To disable it for a service, add `healthcheck: {disable: true}` in Compose, or run with
+`docker run --no-healthcheck`.
+
+**If you already run the Rocky image:** it previously declared no healthcheck, so
+`condition: service_healthy` needed a `healthcheck:` block of your own and now gates on this one
+instead. Plain `docker` never restarts an unhealthy container, but **Docker Swarm does** — if your
+first boot can exceed the start period, raise it. **Amazon ECS is unaffected**: it honours only the
+`healthCheck` in the task definition and ignores the image's.
+
+### Kubernetes
+
+Kubernetes ignores a Docker `HEALTHCHECK` entirely — the kubelet runs its own probes, from outside
+the container, so `httpGet` and `exec` probes need nothing installed in the image. The Helm chart
+ships all three probes configured (see `bridgelink.startupProbe`, `readinessProbe`, `livenessProbe`
+in [`charts/bridgelink/values.yaml`](charts/bridgelink/values.yaml)):
+
+* **startup** and **readiness** `exec` the same probe binary the `HEALTHCHECK` uses, because they
+  must distinguish *ready* from *still starting*, and only the response body says which.
+* **liveness** is a cheap `httpGet` that accepts any 200. That is deliberate: liveness restarts the
+  pod, and a restart does not fix a database outage. Readiness already removes the pod from the
+  Service without killing it.
+
+Two gotchas if you write these yourself: exec probes default to `timeoutSeconds: 1`, which a cold
+JVM plus a TLS handshake will exceed, and an `httpGet` probe needs the `X-Requested-With` header or
+it gets a 400. The kubelet does not verify the certificate on an HTTPS probe, so the self-signed
+keystore needs no special handling.
 
 ------------
 

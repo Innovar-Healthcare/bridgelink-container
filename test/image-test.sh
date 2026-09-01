@@ -85,6 +85,33 @@ wait_for_log() {
 # Discover the ephemeral host port docker assigned to container port 8443.
 https_port() { docker port "$1" 8443/tcp | head -1 | sed 's/.*://'; }
 
+# Poll docker's own healthcheck verdict until it reaches $2 (default: healthy). Returns non-zero on
+# timeout. Health goes through "starting" first, so a bare inspect right after `run` proves nothing.
+wait_for_health() {
+  local name="$1" want="${2:-healthy}" timeout="${3:-180}" i=0 got=
+  while [ "$i" -lt "$timeout" ]; do
+    got="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$name" 2>/dev/null)"
+    [ "$got" = "$want" ] && return 0
+    sleep 1; i=$((i+1))
+  done
+  echo "    (last health status: ${got:-unknown})"
+  return 1
+}
+
+# Is 8443 still answering TLS+HTTP at all? Measured from the HOST, so it depends on nothing inside
+# the image — the assertion is precisely that the port stays open while the engine is not OK.
+# `%{http_code}` is 000 when the connection or handshake fails and an HTTP status otherwise, so any
+# non-000 means the port answered. Deliberately NOT `-f`: the status code is irrelevant here, only
+# whether something replied.
+port_answers() {
+  local code
+  code="$(curl -k -s -o /dev/null -m 10 -w '%{http_code}' "https://localhost:$1/" 2>/dev/null)"
+  [ -n "$code" ] && [ "$code" != "000" ]
+}
+
+# The reporter's exact healthcheck from issue #38, for the side-by-side in test 6c.
+reporter_check() { curl -kf -s -o /dev/null -m 10 "https://localhost:$1"; }
+
 api_code() {
   curl -k -s -o /dev/null -w '%{http_code}' \
        -H 'X-Requested-With: XMLHttpRequest' "https://localhost:$1/api/server/version"
@@ -117,6 +144,26 @@ if [ "$SKIP_BUILD" != "1" ]; then
 fi
 
 docker network create "$NET" >/dev/null
+
+# ---- 0. Unit: healthcheck response parsing (host-side, no container) --------------------------
+# Guards the one piece of real logic in the probe. Skipped rather than failed where there is no JDK
+# on the host: this suite's contract is to test an image, and a missing host javac is not an image
+# defect. CI runners have one.
+info "0. Healthcheck response parsing (unit)"
+if command -v javac >/dev/null && command -v java >/dev/null; then
+  if javac -d "$WORK/unit" "$REPO_ROOT/bootstrap/BridgeLinkHealthcheck.java" \
+       "$SCRIPT_DIR/BridgeLinkHealthcheckParseTest.java" >"$WORK/javac.log" 2>&1; then
+    if java -cp "$WORK/unit" BridgeLinkHealthcheckParseTest; then
+      ok "parseStatus handles both response shapes and rejects digit-bearing error bodies"
+    else
+      bad "parseStatus unit cases failed (see above)"
+    fi
+  else
+    bad "healthcheck probe did not compile"; cat "$WORK/javac.log"
+  fi
+else
+  echo "  SKIP: no host JDK — parse unit cases not run"
+fi
 
 # ---- 1. Hardening: no shell / no bash in the runtime (DHI only) -------------------------------
 if [ "$CHECK_NO_SHELL" = "1" ]; then
@@ -259,7 +306,9 @@ server {
   location / { root /usr/share/nginx/html; }
 }
 NG
-  docker run -d --name fileserver-https --network "$NET" \
+  # insecure-alias: a SECOND name for the same server, deliberately not the cert's CN, so lane (c)
+  # below can fetch the same file through a name the certificate does not cover.
+  docker run -d --name fileserver-https --network "$NET" --network-alias insecure-alias \
     -v "$WORK/httproot:/usr/share/nginx/html:ro" \
     -v "$WORK/tls:/etc/nginx/certs:ro" \
     -v "$WORK/tls/default.conf:/etc/nginx/conf.d/default.conf:ro" \
@@ -279,6 +328,26 @@ NG
       bad "self-signed https downloaded WITHOUT ALLOW_INSECURE (cert not verified)"
     else ok "self-signed https rejected without ALLOW_INSECURE"; fi
   else bad "server did not start (secure)"; fi
+
+  # (c) HOSTNAME mismatch under ALLOW_INSECURE — regression guard for IRT-2015.
+  #
+  # Cases (a)/(b) above cannot catch the bug they look like they cover: the cert is issued for
+  # CN=fileserver-https and fetched from exactly that name, so it matches (Java falls back to CN
+  # when a cert carries no SAN). This lane fetches the SAME cert through a different hostname, so
+  # the identity check has to fail unless it is genuinely disabled.
+  #
+  # What it caught: ALLOW_INSECURE=true made the DHI bootstrap trust any certificate but left
+  # HttpClient's hostname verification on — that check is independent of the SSLContext and cannot
+  # be switched off through it. Rocky's `curl -k` skips both, so this worked on one image and not
+  # the other, contradicting the bootstrap's "both images behave identically" contract. Runs
+  # against whichever IMAGE is under test, which is the point: it is a parity assertion.
+  run bl-hostmm --network "$NET" -e ALLOW_INSECURE=true \
+    -e EXTENSIONS_DOWNLOAD="https://insecure-alias/myextension.zip"
+  if wait_for_log bl-hostmm; then
+    docker cp bl-hostmm:/opt/bridgelink/extensions/myextension/plugin.txt "$WORK/phm" >/dev/null 2>&1 \
+      && ok "ALLOW_INSECURE=true ignores a hostname mismatch (cert CN != URL host)" \
+      || bad "hostname mismatch still rejected with ALLOW_INSECURE=true (IRT-2015 regression)"
+  else bad "server did not start (hostname mismatch)"; fi
 else
   echo "  SKIP: openssl not available — ALLOW_INSECURE lane"
 fi
@@ -318,6 +387,71 @@ if wait_for_log bl-mysql 'successfully started' 180; then
   [ "$(api_code "$(https_port bl-mysql)")" = "200" ] && ok "API 200 (mysql)" || bad "API not 200 (mysql)"
 else
   bad "server did not start (mysql)"; docker logs bl-mysql 2>&1 | tail -20
+fi
+
+# ---- 6c. HEALTHCHECK: declared, reaches healthy, and reflects ENGINE state not port state -----
+# IRT-2015 / issue #38. Consumes the bl-pg + pg pair from test 6 (which is finished with them) —
+# tests 7 and 8 below use bl-derby and bl-persist, so nothing later depends on them.
+#
+# The third assertion is the one that matters. `curl -kf https://localhost:8443` (what the reporter
+# had, and all a port check can do) passes as soon as Jetty is listening, which happens BEFORE the
+# engine starts and before the initial channel deploy. So the probe has to be shown reporting
+# unhealthy while the port is still perfectly answerable. That is why the DB is stopped UNDER a
+# running server rather than never provided: with no DB at boot the server exhausts its connection
+# retries and exits before it ever opens 8443, so the container would just die and a port check
+# would "fail" too — proving nothing about the probe.
+info "6c. HEALTHCHECK"
+
+HC="$(docker image inspect "$IMAGE" --format '{{if .Config.Healthcheck}}{{json .Config.Healthcheck.Test}}{{else}}none{{end}}')"
+case "$HC" in
+  none) bad "image declares no HEALTHCHECK" ;;
+  *CMD-SHELL*) bad "HEALTHCHECK uses CMD-SHELL — needs /bin/sh, which the hardened runtime lacks ($HC)" ;;
+  *BridgeLinkHealthcheck*) ok "image declares an exec-form HEALTHCHECK ($HC)" ;;
+  *) bad "unexpected HEALTHCHECK: $HC" ;;
+esac
+
+if docker inspect bl-pg --format '{{.State.Running}}' 2>/dev/null | grep -q true; then
+  PGPORT="$(https_port bl-pg)"
+  if wait_for_health bl-pg healthy 180; then
+    ok "container reports healthy while the engine is up"
+
+    # Stop the database out from under a healthy server. Jetty keeps listening; getStatus() flips to
+    # UNAVAILABLE because isDatabaseRunning() goes false.
+    #
+    # Timing note, because 300s of --start-period looks like it should make this test take 5 minutes
+    # and does not: docker treats the container as started the moment a check first SUCCEEDS during
+    # the start period, after which failures count toward --retries immediately. The container went
+    # healthy above, so the flip takes retries x interval (~45s), not the full start period.
+    docker stop pg >/dev/null 2>&1
+    if wait_for_health bl-pg unhealthy 120; then
+      if port_answers "$PGPORT"; then
+        ok "health flips to unhealthy on DB loss WHILE 8443 still answers (the port check could not see this)"
+        # The whole point of issue #38, made explicit: the old check is green here and is wrong.
+        if reporter_check "$PGPORT"; then
+          ok "side-by-side: \`curl -kf https://localhost:8443\` still PASSES here — why it was the wrong check"
+        else
+          echo "  NOTE: the reporter's bare curl -kf also failed at this moment; the port-vs-engine"
+          echo "        distinction is still proven by the assertion above, which ignores status codes."
+        fi
+      else
+        # Not a pass: if the port died too, this run did not discriminate between the two at all.
+        bad "health went unhealthy but 8443 stopped answering — assertion did not isolate engine state from port state"
+      fi
+      # Healthcheck output lands in .State.Health.Log[].Output, never in container stdout.
+      docker inspect bl-pg --format '{{range .State.Health.Log}}{{.Output}}{{end}}' 2>/dev/null \
+        | grep -q 'unhealthy:.*status 1' \
+        && ok "probe recorded a diagnosable reason (status 1 = UNAVAILABLE)" \
+        || bad "probe verdict recorded without a usable reason in .State.Health.Log"
+    else
+      bad "health did not become unhealthy after the database was stopped"
+      docker inspect bl-pg --format '{{json .State.Health}}' 2>/dev/null | head -c 600; echo
+    fi
+  else
+    bad "container never reported healthy"
+    docker inspect bl-pg --format '{{json .State.Health}}' 2>/dev/null | head -c 600; echo
+  fi
+else
+  bad "bl-pg is not running — cannot exercise the healthcheck (see test 6)"
 fi
 
 # ---- 7. Graceful shutdown (SIGTERM forwarding) ------------------------------------------------
