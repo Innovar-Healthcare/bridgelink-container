@@ -127,6 +127,14 @@ USER bridgelink
 # healthy during precisely the window a dependent container must not start in. The endpoint also
 # returns HTTP 200 even when UNAVAILABLE, so the body has to be parsed.
 #
+# TWO PHASES: /status until the server first reports ready, then /api/server/version. /status leaks
+# one Jetty worker thread per request, permanently, whenever the database is unreachable (it blocks
+# in the pool checkout; a client-side timeout does not release it -- IRT-2018). Polling it every 15s
+# would leak ~240 threads/hour during an outage. Confining those calls to the pre-ready window,
+# where the database is necessarily up, avoids that. Consequence to know: after first-ready a
+# database outage leaves health green -- `depends_on: service_healthy` is a startup gate, which is
+# what it is used for. BL_HEALTH_ALWAYS_STATUS=true restores continuous checking and the leak.
+#
 # NOTE for existing users of this long-shipping image: it previously declared no healthcheck, so
 # compose `depends_on: {condition: service_healthy}` required your own `healthcheck:` block and now
 # gates on this one instead. Plain docker never restarts an unhealthy container, but Docker Swarm

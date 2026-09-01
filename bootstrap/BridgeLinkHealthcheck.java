@@ -22,7 +22,35 @@
  * (config loader, CLI script) must not run in. Only status 0 means the database is reachable,
  * the engine is running and the startup deploy has finished.
  *
- * Three traps in this endpoint, all confirmed against a live server:
+ * TWO PHASES, and the reason is a resource leak rather than efficiency (IRT-2015 / IRT-2018):
+ *
+ *   before first success:  GET /api/server/status   -- is the engine actually ready?
+ *   after  first success:  GET /api/server/version  -- is the process still serving?
+ *
+ * /api/server/status leaks one Jetty worker thread per request, permanently, whenever the database
+ * is unreachable. getStatus() blocks in the Hikari pool checkout and the thread never unwinds; a
+ * client-side timeout does not release it. Measured: 20 requests with postgres stopped left 19 extra
+ * threads named "ConfigurationServlet Thread (Get status)", still held after 90s idle, while 20
+ * requests to /version cost nothing. A HEALTHCHECK polling /status every 15s therefore leaks ~240
+ * threads/hour during an outage and eventually kills the JVM -- worst possible moment for the
+ * server to also run out of threads.
+ *
+ * Polling /status only until the server first reports ready confines those requests to a window in
+ * which the database is necessarily reachable (the server does not open 8443 at all until it has
+ * connected -- Mirth.java exits before startWebServer() if the connection retries are exhausted),
+ * so the leak never triggers. Measured with the database up: no per-request retention, only ordinary
+ * Jetty pool elasticity that unwinds on idle.
+ *
+ * What this deliberately gives up: after first-ready the container stops reporting engine state, so
+ * a later database outage leaves docker health green. That is the right trade for how docker health
+ * is actually consumed -- `depends_on: condition: service_healthy` is a startup gate -- and it is
+ * the same reasoning that points the chart's liveness probe at /version. Readiness that keeps
+ * tracking engine state needs the Core fix in IRT-2018 first.
+ *
+ * Set BL_HEALTH_ALWAYS_STATUS=true to poll /status every time regardless. That restores continuous
+ * engine-state reporting AND the leak; only use it against a server carrying the IRT-2018 fix.
+ *
+ * Three traps in the status endpoint, all confirmed against a live server:
  *   1. It ALWAYS returns HTTP 200, with the status in the body — even when UNAVAILABLE. So
  *      fail-on-non-2xx (curl -f, or a Kubernetes httpGet probe) passes while the engine is down.
  *      The body must be parsed; that is the whole reason this class exists.
@@ -57,6 +85,23 @@ public final class BridgeLinkHealthcheck {
     static final Path   PROPERTIES_FILE = Paths.get(HOME, "conf", "mirth.properties");
     static final String DEFAULT_PORT    = "8443";
     static final String STATUS_PATH     = "/api/server/status";
+    static final String VERSION_PATH    = "/api/server/version";
+
+    /* Accept follows the PATH, not preference: these two endpoints publish different media types and
+     * Jersey answers 406 for the wrong one. /status is @Produces(XML, JSON) and 406s on text/plain;
+     * /version is @Produces(TEXT_PLAIN) and 406s on application/json. Sending one header for both
+     * silently broke the whole post-ready phase (measured: HTTP 406 on every probe once the marker
+     * was written), so keep these paired with their paths. */
+    static final String STATUS_ACCEPT   = "application/json";
+    static final String VERSION_ACCEPT  = "text/plain, */*";
+
+    /* Marker for "this container has been ready at least once". Container-local and deliberately
+     * not on a mounted volume: a restarted container must re-prove readiness from scratch, and a
+     * volume shared between containers would let one satisfy another's startup gate. /tmp is
+     * writable in both images (the bootstrap already creates temp files there). */
+    static final Path READY_MARKER = Paths.get(env("BL_HEALTH_MARKER", "/tmp/.bridgelink-was-ready"));
+
+    static final boolean ALWAYS_STATUS = "true".equalsIgnoreCase(System.getenv("BL_HEALTH_ALWAYS_STATUS"));
 
     /* One overall budget, enforced end to end, so the probe reports a decision rather than being
      * killed mid-flight by the HEALTHCHECK --timeout=5s / probes' timeoutSeconds: 5.
@@ -85,9 +130,21 @@ public final class BridgeLinkHealthcheck {
     static final int STATUS_OK = 0;
 
     public static void main(String[] args) {
-        String url = targetUrl();
+        boolean liveOnly = !ALWAYS_STATUS && wasReady();
+        String url = targetUrl(liveOnly ? VERSION_PATH : STATUS_PATH);
         try {
-            Response resp = get(url);
+            Response resp = get(url, liveOnly ? VERSION_ACCEPT : STATUS_ACCEPT);
+            if (liveOnly) {
+                // Post-ready phase: /version is a static in-memory value, so a 200 is the whole
+                // signal. Nothing to parse, and nothing that can touch the database.
+                if (resp.code == 200) {
+                    System.out.println("healthy: " + url + " -> HTTP 200 (serving; engine state not"
+                            + " re-checked after first ready — see BL_HEALTH_ALWAYS_STATUS)");
+                    System.exit(0);
+                }
+                fail(url, "HTTP " + resp.code + " (expected 200)", resp.body);
+                return;
+            }
             Integer status = parseStatus(resp.body);
             if (resp.code != 200) {
                 fail(url, "HTTP " + resp.code + " (expected 200)", resp.body);
@@ -96,12 +153,35 @@ public final class BridgeLinkHealthcheck {
             } else if (status != STATUS_OK) {
                 fail(url, "server status " + status + " (" + describe(status) + "), not 0 (OK)", resp.body);
             } else {
+                markReady();
                 System.out.println("healthy: " + url + " -> status 0 (OK)");
                 System.exit(0);
             }
         } catch (Exception e) {
             // Connection refused / TLS failure / timeout: not yet listening, or wedged.
             fail(url, e.getClass().getSimpleName() + ": " + e.getMessage(), null);
+        }
+    }
+
+    static boolean wasReady() {
+        try {
+            return Files.isRegularFile(READY_MARKER);
+        } catch (Exception e) {
+            // Unreadable marker: stay in the /status phase. Costs correctness of the leak avoidance
+            // rather than correctness of the verdict, which is the safer way round.
+            return false;
+        }
+    }
+
+    static void markReady() {
+        try {
+            Files.writeString(READY_MARKER, "ready\n", StandardCharsets.ISO_8859_1);
+        } catch (Exception e) {
+            // Non-fatal: the probe still reported the right answer, it just cannot remember it, so
+            // the next run polls /status again. Say so rather than failing silently.
+            System.out.println("note: could not write " + READY_MARKER + " (" + e + ") — will keep"
+                    + " polling " + STATUS_PATH + ", which leaks a thread per call during a database"
+                    + " outage (IRT-2018)");
         }
     }
 
@@ -126,13 +206,14 @@ public final class BridgeLinkHealthcheck {
 
     /**
      * BL_HEALTH_URL wins outright (lets an operator point the probe at http, another host, or a
-     * non-default context path). Otherwise track https.port out of mirth.properties, since
-     * MP_HTTPS_PORT can move it and a hardcoded 8443 would then probe a closed port forever.
+     * non-default context path) — note it pins ONE path, so it also pins the phase. Otherwise track
+     * https.port out of mirth.properties, since MP_HTTPS_PORT can move it and a hardcoded 8443
+     * would then probe a closed port forever.
      */
-    static String targetUrl() {
+    static String targetUrl(String path) {
         String override = System.getenv("BL_HEALTH_URL");
         if (isSet(override)) return override;
-        return "https://127.0.0.1:" + readProperty("https.port", DEFAULT_PORT) + STATUS_PATH;
+        return "https://127.0.0.1:" + readProperty("https.port", DEFAULT_PORT) + path;
     }
 
     /**
@@ -177,7 +258,7 @@ public final class BridgeLinkHealthcheck {
      * java.net.http.HttpClient, whose hostname check cannot be disabled through an SSLContext (see
      * the note on ALLOW_INSECURE in BridgeLinkBootstrap).
      */
-    static Response get(String url) throws Exception {
+    static Response get(String url, String accept) throws Exception {
         long deadline = System.nanoTime() + BUDGET_MS * 1_000_000L;
         URL target = new URL(url);
         HttpURLConnection conn = (HttpURLConnection) target.openConnection();
@@ -195,9 +276,9 @@ public final class BridgeLinkHealthcheck {
         conn.setInstanceFollowRedirects(false);
         // Required by default, and 400 without it — see trap 3 in the header comment.
         conn.setRequestProperty("X-Requested-With", "bridgelink-healthcheck");
-        // Ask for JSON explicitly; without it the endpoint negotiates to XML. Both are parsed
-        // below, so this is about pinning a predictable shape rather than a hard requirement.
-        conn.setRequestProperty("Accept", "application/json");
+        // Must match the endpoint — see STATUS_ACCEPT / VERSION_ACCEPT. Not a preference: the wrong
+        // media type here is a 406, not a fallback.
+        conn.setRequestProperty("Accept", accept);
         try {
             int code = conn.getResponseCode();
             // Read the error stream on a non-2xx: the body is what says why.

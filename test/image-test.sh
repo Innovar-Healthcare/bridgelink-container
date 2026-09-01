@@ -98,19 +98,8 @@ wait_for_health() {
   return 1
 }
 
-# Is 8443 still answering TLS+HTTP at all? Measured from the HOST, so it depends on nothing inside
-# the image — the assertion is precisely that the port stays open while the engine is not OK.
-# `%{http_code}` is 000 when the connection or handshake fails and an HTTP status otherwise, so any
-# non-000 means the port answered. Deliberately NOT `-f`: the status code is irrelevant here, only
-# whether something replied.
-port_answers() {
-  local code
-  code="$(curl -k -s -o /dev/null -m 10 -w '%{http_code}' "https://localhost:$1/" 2>/dev/null)"
-  [ -n "$code" ] && [ "$code" != "000" ]
-}
-
-# The reporter's exact healthcheck from issue #38, for the side-by-side in test 6c.
-reporter_check() { curl -kf -s -o /dev/null -m 10 "https://localhost:$1"; }
+# The reporter's exact healthcheck from issue #38: does the bare port answer?
+reporter_check() { curl -kf -s -o /dev/null -m 5 "https://localhost:$1" 2>/dev/null; }
 
 api_code() {
   curl -k -s -o /dev/null -w '%{http_code}' \
@@ -389,17 +378,18 @@ else
   bad "server did not start (mysql)"; docker logs bl-mysql 2>&1 | tail -20
 fi
 
-# ---- 6c. HEALTHCHECK: declared, reaches healthy, and reflects ENGINE state not port state -----
-# IRT-2015 / issue #38. Consumes the bl-pg + pg pair from test 6 (which is finished with them) —
-# tests 7 and 8 below use bl-derby and bl-persist, so nothing later depends on them.
+# ---- 6c. HEALTHCHECK: two-phase probe, and the thread leak it exists to avoid ----------------
+# IRT-2015 / issue #38. Consumes the bl-pg + pg pair from test 6 (finished with them) — tests 7 and
+# 8 use bl-derby and bl-persist, so nothing later depends on them.
 #
-# The third assertion is the one that matters. `curl -kf https://localhost:8443` (what the reporter
-# had, and all a port check can do) passes as soon as Jetty is listening, which happens BEFORE the
-# engine starts and before the initial channel deploy. So the probe has to be shown reporting
-# unhealthy while the port is still perfectly answerable. That is why the DB is stopped UNDER a
-# running server rather than never provided: with no DB at boot the server exhausts its connection
-# retries and exits before it ever opens 8443, so the container would just die and a port check
-# would "fail" too — proving nothing about the probe.
+# The probe polls /api/server/status until the server first reports ready, then switches to
+# /api/server/version. That is not an optimisation: /status leaks one Jetty worker thread per request
+# permanently whenever the database is unreachable (it blocks in the Hikari pool checkout and a
+# client-side timeout does not release it — IRT-2018). A HEALTHCHECK polling it every 15s would leak
+# ~240 threads/hour during an outage and eventually kill the JVM.
+#
+# So the assertions below deliberately do NOT expect health to flip on database loss any more. What
+# they pin instead is that the leak is gone, and that the escape hatch still reports engine state.
 info "6c. HEALTHCHECK"
 
 HC="$(docker image inspect "$IMAGE" --format '{{if .Config.Healthcheck}}{{json .Config.Healthcheck.Test}}{{else}}none{{end}}')"
@@ -410,67 +400,71 @@ case "$HC" in
   *) bad "unexpected HEALTHCHECK: $HC" ;;
 esac
 
+# Thread count of the server JVM (PID 1), read from /proc so it needs no shell in the image and no
+# jcmd. NB the process is install4j...MirthLauncher_blserver, not mirth-server-launcher — a grep for
+# the latter silently matched nothing and reported 0 threads for a live JVM during development.
+jvm_threads() { docker exec "$1" sh -c 'ls /proc/1/task | wc -l' 2>/dev/null | tr -d '[:space:]'; }
+stuck_in_status() { docker exec "$1" sh -c 'jcmd 1 Thread.print 2>/dev/null | grep -c "Get status"' 2>/dev/null | tr -d '[:space:]'; }
+
 if docker inspect bl-pg --format '{{.State.Running}}' 2>/dev/null | grep -q true; then
   PGPORT="$(https_port bl-pg)"
   if wait_for_health bl-pg healthy 180; then
-    ok "container reports healthy while the engine is up"
+    ok "container reports healthy once the engine is ready"
 
-    # Stop the database out from under a healthy server. Jetty keeps listening; getStatus() flips to
-    # UNAVAILABLE because isDatabaseRunning() goes false.
-    #
-    # Timing note, because 300s of --start-period looks like it should make this test take 5 minutes
-    # and does not: docker treats the container as started the moment a check first SUCCEEDS during
-    # the start period, after which failures count toward --retries immediately. The container went
-    # healthy above, so the flip takes retries x interval (~45s), not the full start period.
+    # Phase switch: the marker is written on the first successful /status check.
+    docker exec bl-pg sh -c 'test -f /tmp/.bridgelink-was-ready' 2>/dev/null \
+      && ok "ready marker written — probe has switched to the /version phase" \
+      || bad "ready marker absent; probe would keep polling /status and leaking during an outage"
+
+    T0="$(jvm_threads bl-pg)"
+    S0="$(stuck_in_status bl-pg)"
     docker stop pg >/dev/null 2>&1
-    if wait_for_health bl-pg unhealthy 120; then
-      if port_answers "$PGPORT"; then
-        ok "health flips to unhealthy on DB loss WHILE 8443 still answers (the port check could not see this)"
-        # The whole point of issue #38, made explicit: the old check is green here and is wrong.
-        if reporter_check "$PGPORT"; then
-          ok "side-by-side: \`curl -kf https://localhost:8443\` still PASSES here — why it was the wrong check"
-        else
-          echo "  NOTE: the reporter's bare curl -kf also failed at this moment; the port-vs-engine"
-          echo "        distinction is still proven by the assertion above, which ignores status codes."
-        fi
-      else
-        # Not a pass: if the port died too, this run did not discriminate between the two at all.
-        bad "health went unhealthy but 8443 stopped answering — assertion did not isolate engine state from port state"
-      fi
-      # Healthcheck output lands in .State.Health.Log[].Output, never in container stdout. Two
-      # reasons are both correct here, and which one you get depends on the failure: "status 1"
-      # when getStatus() returns UNAVAILABLE, or a read timeout when it BLOCKS instead — for total
-      # database loss the timeout is what actually happens, because isDatabaseRunning() ->
-      # testDatabase() waits on the connection pool rather than failing fast. Asserting only
-      # "status 1" pinned the wrong one of the two and failed a run where the probe behaved
-      # correctly. What must hold is that the probe, not docker's timeout killer, produced a
-      # readable reason — an empty Output would mean the probe was killed with nothing to show.
-      HLOG="$(docker inspect bl-pg --format '{{range .State.Health.Log}}{{.Output}}{{end}}' 2>/dev/null)"
-      if printf '%s' "$HLOG" | grep -qE 'unhealthy:.*(status 1|Timeout|timed out)'; then
-        ok "probe recorded a diagnosable reason ($(printf '%s' "$HLOG" | grep -o 'unhealthy:.*' | tail -1 | cut -c1-90))"
-      else
-        bad "probe verdict recorded without a usable reason in .State.Health.Log"
-        printf '    health log: %s\n' "$(printf '%s' "$HLOG" | tail -c 300)"
-      fi
+    # ~8 healthcheck intervals at 15s. If the probe were still polling /status this window alone
+    # would strand roughly that many threads in the Get status handler, permanently.
+    sleep 120
+    T1="$(jvm_threads bl-pg)"
+    S1="$(stuck_in_status bl-pg)"
+    GROWTH=$(( ${T1:-0} - ${T0:-0} ))
 
-      # Liveness rationale, pinned empirically rather than asserted in a comment: /version keeps
-      # answering while /status is unusable. This is why the chart's livenessProbe targets /version
-      # — pointed at /status it would time out and restart the pod on any database outage.
-      VCODE="$(curl -k -s -o /dev/null -m 10 -w '%{http_code}' -H 'X-Requested-With: XMLHttpRequest' \
-                 "https://localhost:$PGPORT/api/server/version" 2>/dev/null)"
-      SCODE="$(curl -k -s -o /dev/null -m 10 -w '%{http_code}' -H 'X-Requested-With: XMLHttpRequest' \
-                 "https://localhost:$PGPORT/api/server/status" 2>/dev/null)"
-      if [ "$VCODE" = "200" ] && [ "$SCODE" != "200" ]; then
-        ok "/api/server/version still 200 while /api/server/status is unusable ($SCODE) — why liveness uses version"
-      else
-        # Not fatal to the change, but the chart's liveness target is chosen on this behaviour, so
-        # say so loudly if it ever stops holding.
-        echo "  NOTE: version=$VCODE status=$SCODE — expected version 200 and status not-200 with the DB down."
-        echo "        If /status now fails fast instead of blocking, revisit the chart's livenessProbe target."
-      fi
+    if [ "${S1:-0}" -le "$(( ${S0:-0} + 1 ))" ]; then
+      ok "no threads stranded in the status handler after 2 min of DB outage (was ${S0:-?}, now ${S1:-?})"
     else
-      bad "health did not become unhealthy after the database was stopped"
-      docker inspect bl-pg --format '{{json .State.Health}}' 2>/dev/null | head -c 600; echo
+      bad "threads stranded in the status handler: ${S0:-?} -> ${S1:-?} — the probe is polling /status past first-ready (IRT-2018 leak)"
+    fi
+    # Jetty's pool flexes by a handful under load; a per-request leak is an order of magnitude more.
+    if [ "$GROWTH" -le 12 ]; then
+      ok "JVM thread count stable across the outage (${T0:-?} -> ${T1:-?})"
+    else
+      bad "JVM threads grew by $GROWTH across a 2 min outage (${T0:-?} -> ${T1:-?}) — expected flat"
+    fi
+
+    # Documented trade-off, asserted rather than noted. This started life as an informational NOTE
+    # and that hedge hid a real bug: the probe sent Accept: application/json to /api/server/version,
+    # which is @Produces(TEXT_PLAIN), so every post-ready probe got HTTP 406 and the container went
+    # unhealthy for entirely the wrong reason -- through a 35/35 suite run. If behaviour we document
+    # is worth documenting, it is worth failing on.
+    H="$(docker inspect --format '{{.State.Health.Status}}' bl-pg 2>/dev/null)"
+    if [ "$H" = "healthy" ]; then
+      ok "post-ready phase reports liveness, so a DB outage leaves health healthy (documented trade-off)"
+    else
+      bad "health is '$H' after the outage; the /version phase should keep it healthy"
+      docker inspect bl-pg --format '{{range .State.Health.Log}}{{.Output}}{{end}}' 2>/dev/null | tail -c 400; echo
+    fi
+
+    # /version must genuinely still answer — that is what the phase relies on.
+    VCODE="$(curl -k -s -o /dev/null -m 10 -w '%{http_code}' -H 'X-Requested-With: XMLHttpRequest' \
+               "https://localhost:$PGPORT/api/server/version" 2>/dev/null)"
+    [ "$VCODE" = "200" ] \
+      && ok "/api/server/version still 200 with the database down" \
+      || bad "/api/server/version returned $VCODE with the database down — the post-ready phase has no signal"
+
+    # The escape hatch still sees engine state: one explicit /status check must report unhealthy.
+    if docker exec -e BL_HEALTH_ALWAYS_STATUS=true bl-pg \
+         java -XX:TieredStopAtLevel=1 -XX:+UseSerialGC -XX:-UsePerfData -Xmx32m \
+         -cp /opt/bridgelink/bootstrap BridgeLinkHealthcheck 2>&1 | grep -q 'unhealthy:'; then
+      ok "BL_HEALTH_ALWAYS_STATUS=true still detects the engine is unavailable"
+    else
+      bad "BL_HEALTH_ALWAYS_STATUS=true did not report unhealthy with the database down"
     fi
   else
     bad "container never reported healthy"
@@ -478,6 +472,39 @@ if docker inspect bl-pg --format '{{.State.Running}}' 2>/dev/null | grep -q true
   fi
 else
   bad "bl-pg is not running — cannot exercise the healthcheck (see test 6)"
+fi
+
+# ---- 6d. The startup window: why a port check is the wrong check ------------------------------
+# The point of issue #38, measured rather than argued. The engine calls startWebServer() BEFORE the
+# engine starts and before the startup channel deploy, so `curl -kf https://localhost:8443` — the
+# reporter's check — goes green well before the server can be driven. A dependent container gated on
+# it starts too early.
+#
+# Timed, not sampled at an instant, so it is not a race: record when the bare port first answers and
+# when docker first reports healthy. The probe is only worth having if the second is strictly later.
+info "6d. Startup window (port answers before the engine is ready)"
+run bl-window -p 8443
+WPORT=""; PORT_AT=""; HEALTHY_AT=""; W0=$(date +%s)
+for i in $(seq 1 240); do
+  [ -z "$WPORT" ] && WPORT="$(https_port bl-window 2>/dev/null)"
+  if [ -n "$WPORT" ]; then
+    [ -z "$PORT_AT" ] && reporter_check "$WPORT" && PORT_AT=$(( $(date +%s) - W0 ))
+    [ -z "$HEALTHY_AT" ] && [ "$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' bl-window 2>/dev/null)" = healthy ] \
+      && HEALTHY_AT=$(( $(date +%s) - W0 ))
+  fi
+  [ -n "$PORT_AT" ] && [ -n "$HEALTHY_AT" ] && break
+  sleep 1
+done
+if [ -n "$PORT_AT" ] && [ -n "$HEALTHY_AT" ]; then
+  if [ "$PORT_AT" -lt "$HEALTHY_AT" ]; then
+    ok "port answered at ${PORT_AT}s but healthy only at ${HEALTHY_AT}s — a $(( HEALTHY_AT - PORT_AT ))s window in which the reporter's curl check is green and the server is not ready"
+  else
+    # Not a pass: if they coincide, this run did not demonstrate the gap the probe exists to close.
+    bad "port (${PORT_AT}s) and healthy (${HEALTHY_AT}s) coincided — the startup window was not observed, so this run does not exercise the difference"
+  fi
+else
+  bad "did not observe both signals (port=${PORT_AT:-never} healthy=${HEALTHY_AT:-never})"
+  docker logs bl-window 2>&1 | tail -10
 fi
 
 # ---- 7. Graceful shutdown (SIGTERM forwarding) ------------------------------------------------

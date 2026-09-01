@@ -75,6 +75,14 @@ bridgelink:
   #       timeoutSeconds: 5
   #       failureThreshold: 3
   #
+  # BEFORE ENABLING readinessProbe, know this: the probe polls /api/server/status only until the
+  # server first reports ready, then switches to /api/server/version, because /status leaks one
+  # server thread per request permanently while the database is unreachable (IRT-2018). So an
+  # enabled readinessProbe gates the initial rollout correctly but will NOT de-register a pod on a
+  # later database outage — it reports liveness from then on. Setting BL_HEALTH_ALWAYS_STATUS=true in
+  # the container env restores continuous readiness and the leak with it. Readiness that tracks
+  # engine state without leaking needs the Core fix in IRT-2018 first.
+  #
   # Why those two must be `exec` and not `httpGet`: /api/server/status returns HTTP 200 even when
   # the engine is UNAVAILABLE, so only reading the response body distinguishes ready from starting.
   # Why timeoutSeconds is mandatory: Kubernetes defaults exec probes to 1s and enforces it, which a

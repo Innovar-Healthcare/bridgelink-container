@@ -733,7 +733,28 @@ Both images declare a `HEALTHCHECK`, so `docker ps` shows a health column and Co
 
 ### What it checks, and why not the port
 
-The probe queries `GET /api/server/status` and passes only on status **0**:
+The probe runs in two phases:
+
+| Phase | Endpoint | Passes when |
+|---|---|---|
+| Until the server is first ready | `/api/server/status` | body says status **0** |
+| Once it has been ready | `/api/server/version` | HTTP **200** |
+
+The first phase is the readiness gate. The second is a liveness check, and exists because
+`/api/server/status` **leaks one server thread per request while the database is unreachable** — it
+blocks in the connection-pool checkout and a client-side timeout does not release it. Polling it
+every 15s would strand roughly 240 threads an hour during an outage and eventually exhaust the JVM,
+at the worst possible moment. Restricting those calls to the pre-ready window avoids that entirely,
+because the server does not open port 8443 at all until it has reached the database.
+
+The consequence, stated plainly: **after the container has once been ready, a database outage no
+longer marks it unhealthy.** That is the right trade for how this is consumed —
+`depends_on: condition: service_healthy` is a startup gate — and it matches why the Helm chart's
+liveness probe also avoids `/status`. Set `BL_HEALTH_ALWAYS_STATUS=true` to check engine state on
+every probe instead, accepting the leak; do that only against a server carrying the fix for the
+underlying issue.
+
+The status codes the first phase reads:
 
 | Code | Meaning |
 |---|---|
@@ -762,7 +783,9 @@ Three things to know if you write your own check against this endpoint:
 
 | Knob | Default | Notes |
 |---|---|---|
-| `BL_HEALTH_URL` | `https://127.0.0.1:<https.port>/api/server/status` | Point the probe elsewhere (plain HTTP, another port, a context path). Otherwise `https.port` is read from `mirth.properties`, so `MP_HTTPS_PORT` is followed automatically. |
+| `BL_HEALTH_URL` | derived from `https.port` | Point the probe elsewhere (plain HTTP, another port, a context path). Note it pins one path, so it also pins the phase. Otherwise `https.port` is read from `mirth.properties`, so `MP_HTTPS_PORT` is followed automatically. TLS verification is skipped only for a loopback host; for anything else set `BL_HEALTH_INSECURE=true` if the certificate is self-signed. |
+| `BL_HEALTH_ALWAYS_STATUS` | unset | `true` polls `/api/server/status` on every probe, restoring continuous engine-state reporting and the thread leak described above. |
+| `BL_HEALTH_MARKER` | `/tmp/.bridgelink-was-ready` | Where the first-ready marker is written. Container-local by design: a restart re-proves readiness from scratch. |
 | `--start-period` | `300s` | Covers a cold boot: database connect-with-retry, schema migration, extension migration and the startup deploy all precede status 0. Raise it for a large migration. |
 | `--interval` / `--retries` | `15s` / `3` | Once the first check succeeds, three consecutive failures (~45s) mark the container unhealthy. |
 
