@@ -214,8 +214,8 @@ Both images are scanned for OS and library vulnerabilities with [Trivy](https://
   patch yet) don't fail the build but are still reported.
 - **Library / application-JAR CVEs are _not_ gated here.** They come from the BridgeLink release
   tarball baked in via `BINARY_URL` (see [What this repo is](#what-this-repo-is)); this repo can't fix
-  them — only a new Core release can. They are reported in the SARIF above and tracked against Core in
-  [IRT-1396](https://innovarhealthcare.atlassian.net/browse/IRT-1396).
+  them — only a new Core release can. They are reported in the SARIF above and tracked against Core
+  separately.
 
 ### Scan locally
 
@@ -235,8 +235,7 @@ trivy image --severity HIGH,CRITICAL --ignore-unfixed --pkg-types os --exit-code
    erratum), add its CVE ID to [`.trivyignore`](.trivyignore) with a justification and a review date.
    Allowlisted entries are suppressed from the gate, so keep the list short and re-review dated entries.
 
-For a library/app-JAR CVE, track it in the Core ticket
-([IRT-1396](https://innovarhealthcare.atlassian.net/browse/IRT-1396)) — it is outside the CI gate
+For a library/app-JAR CVE, raise it against Core rather than here — it is outside the CI gate
 scope (the gate scans OS packages only) and stays visible on the Security tab regardless. Once Core
 has assessed one as not-exploitable / unfixable, you may also record it in [`.trivyignore`](.trivyignore)
 with that justification so local `trivy image` / `--pkg-types library` scans are clean; the CI SARIF
