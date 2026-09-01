@@ -44,55 +44,65 @@ bridgelink:
       # -- Memory limit for BridgeLink pods
       memory: 2Gi
 
-  # Probes (IRT-2015). Before this the chart shipped NONE: deployment.yaml templated liveness and
-  # readiness, but no values defined them and values.schema.json forbade extra keys, so the
-  # templates were unreachable and `--set bridgelink.readinessProbe...` was schema-rejected.
+  # Probes (IRT-2015). Before this the chart shipped NONE, and could not: deployment.yaml templated
+  # liveness and readiness, but no values defined them and values.schema.json forbade extra keys, so
+  # the templates were unreachable and `--set bridgelink.readinessProbe...` was schema-rejected.
+  # That schema bug is fixed, so all three are now settable.
   #
-  # Startup and readiness `exec` the probe class baked into both images. They parse the body of
-  # /api/server/status, because that endpoint returns HTTP 200 even when the engine is UNAVAILABLE
-  # — so an httpGet probe cannot tell ready from starting. Liveness deliberately IS the cheap
-  # httpGet: it must not restart the pod merely because the engine reports UNAVAILABLE during a
-  # transient database outage, since a restart does not fix a database. Readiness handles that by
-  # pulling the pod out of the Service without killing it.
+  # Only livenessProbe is ON by default, deliberately. The startup and readiness probes exec a probe
+  # binary at /opt/bridgelink/bootstrap/BridgeLinkHealthcheck, which exists only in images built from
+  # this repo at or after the commit that added it (IRT-2015). Enabling them against an older
+  # published image gives a container that cannot run the probe, a startup probe that exhausts its
+  # failureThreshold, and a kubelet restart loop. Since this chart is installed straight from a
+  # checkout rather than a published chart repo, a default that assumes an unreleased image would
+  # break `scripts/deploy-minikube.sh` for anyone on main. livenessProbe has no such dependency: it
+  # is a plain HTTPS GET that works against every image.
   #
-  # Set `startupProbe: null` (etc.) to disable any of them.
+  # ENABLE the exec probes once your image carries the probe (the image's own `docker inspect`
+  # Healthcheck field is present iff it does). Paste into your values file:
+  #
+  #   bridgelink:
+  #     startupProbe:
+  #       exec:
+  #         command: ["java", "-XX:TieredStopAtLevel=1", "-XX:+UseSerialGC", "-XX:-UsePerfData", "-Xmx32m", "-cp", "/opt/bridgelink/bootstrap", "BridgeLinkHealthcheck"]
+  #       periodSeconds: 10
+  #       failureThreshold: 30      # 300s budget: DB migration + startup channel deploy
+  #       timeoutSeconds: 5         # NOT optional — see the note below
+  #     readinessProbe:
+  #       exec:
+  #         command: ["java", "-XX:TieredStopAtLevel=1", "-XX:+UseSerialGC", "-XX:-UsePerfData", "-Xmx32m", "-cp", "/opt/bridgelink/bootstrap", "BridgeLinkHealthcheck"]
+  #       periodSeconds: 15
+  #       timeoutSeconds: 5
+  #       failureThreshold: 3
+  #
+  # Why those two must be `exec` and not `httpGet`: /api/server/status returns HTTP 200 even when
+  # the engine is UNAVAILABLE, so only reading the response body distinguishes ready from starting.
+  # Why timeoutSeconds is mandatory: Kubernetes defaults exec probes to 1s and enforces it, which a
+  # cold JVM plus a TLS handshake exceeds on a loaded node — the startup probe would never succeed.
+  # Why readiness is 15s and not 5s: an exec probe's JVM is charged to this container's cgroup
+  # (~50-80MB alongside the server), so leave headroom under resources.limits.memory if you raise
+  # -Xmx toward the limit.
 
-  # -- Startup probe. Gates the other two until the first boot finishes: database connect-with-retry,
-  # schema migration and the startup channel deploy all precede status 0. 5s x 60 = 300s budget,
-  # matching the images' HEALTHCHECK start-period; a first boot exceeding it gets the pod killed, so
-  # raise failureThreshold for a large migration.
-  startupProbe:
-    exec:
-      command: ["java", "-XX:TieredStopAtLevel=1", "-XX:+UseSerialGC", "-XX:-UsePerfData", "-Xmx32m", "-cp", "/opt/bridgelink/bootstrap", "BridgeLinkHealthcheck"]
-    periodSeconds: 5
-    failureThreshold: 60
-    # timeoutSeconds is NOT optional: Kubernetes defaults exec probes to 1s and enforces it, and a
-    # cold JVM plus a TLS handshake against a server mid-migration exceeds that on a loaded node —
-    # the probe would then never succeed. Must stay above the probe's own 4s internal timeout.
-    timeoutSeconds: 5
+  # -- Startup probe. Disabled by default because it needs an image carrying the probe binary — see
+  # the block above for the values to paste in once it does.
+  startupProbe: null
 
-  # -- Readiness probe. Gates Service traffic on engine status 0 (database up, engine running,
-  # startup deploy done). 15s rather than 5s because an exec probe's JVM is charged to this
-  # container's cgroup: ~50-80MB alongside the server. Fine at the default heap, but leave headroom
-  # under `resources.limits.memory` if you raise -Xmx toward the limit.
-  readinessProbe:
-    exec:
-      command: ["java", "-XX:TieredStopAtLevel=1", "-XX:+UseSerialGC", "-XX:-UsePerfData", "-Xmx32m", "-cp", "/opt/bridgelink/bootstrap", "BridgeLinkHealthcheck"]
-    periodSeconds: 15
-    timeoutSeconds: 5
-    failureThreshold: 3
+  # -- Readiness probe. Disabled by default for the same reason as startupProbe; see above. Note
+  # that until you enable it, a pod is considered Ready as soon as its container is running, which
+  # means Service traffic can reach BridgeLink while the engine is still deploying channels.
+  readinessProbe: null
 
-  # -- Liveness probe. Restarts the pod only when the API stops answering at all.
+  # -- Liveness probe. Enabled by default: it is a plain HTTPS GET and works against any image.
+  # Restarts the pod only when the API stops answering at all.
   #
   # Deliberately /api/server/version, NOT /api/server/status. When the database goes away,
   # getStatus() calls isDatabaseRunning() -> testDatabase(), which blocks on the connection pool, so
   # /status does not return UNAVAILABLE — it HANGS (measured: no response in 10s, while /version
-  # answered 200 in 73ms on the same server). A liveness probe pointed at /status would therefore
-  # time out and restart the pod after failureThreshold x periodSeconds of any database outage,
-  # which is exactly what liveness must not do: a restart does not fix a database, and readiness
-  # already removes the pod from the Service. /version reads an in-memory value
-  # (versionConfig.getString) and needs no authentication (@DontCheckAuthorized), so it answers iff
-  # the JVM and Jetty are actually serving — which is what liveness should mean.
+  # answered 200 in 73ms on the same server; tracked as IRT-2018). A liveness probe pointed at
+  # /status would therefore time out and restart the pod after failureThreshold x periodSeconds of
+  # any database outage, which is exactly what liveness must not do: a restart does not fix a
+  # database. /version reads an in-memory value and needs no authentication
+  # (@DontCheckAuthorized), so it answers iff the JVM and Jetty are actually serving.
   #
   # kubelet does not verify the certificate on an HTTPS probe, so the self-signed keystore needs no
   # configuration. The X-Requested-With header is required (server.api.require-requested-with,

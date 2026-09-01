@@ -778,15 +778,21 @@ first boot can exceed the start period, raise it. **Amazon ECS is unaffected**: 
 ### Kubernetes
 
 Kubernetes ignores a Docker `HEALTHCHECK` entirely — the kubelet runs its own probes, from outside
-the container, so `httpGet` and `exec` probes need nothing installed in the image. The Helm chart
-ships all three probes configured (see `bridgelink.startupProbe`, `readinessProbe`, `livenessProbe`
-in [`charts/bridgelink/values.yaml`](charts/bridgelink/values.yaml)):
+the container. The Helm chart configures all three (see
+[`charts/bridgelink/values.yaml`](charts/bridgelink/values.yaml)), but **only `livenessProbe` is
+enabled by default**:
 
-* **startup** and **readiness** `exec` the same probe the `HEALTHCHECK` uses, because they must
-  distinguish *ready* from *still starting*, and only the response body says which.
-* **liveness** is a cheap `httpGet` against **`/api/server/version`**, not `/api/server/status`.
-  Liveness restarts the pod, and a restart does not fix a database outage — readiness already
-  removes the pod from the Service without killing it.
+* **liveness** (on by default) is a cheap `httpGet` against **`/api/server/version`**, not
+  `/api/server/status`. Liveness restarts the pod, and a restart does not fix a database outage —
+  readiness already removes the pod from the Service without killing it. It needs nothing in the
+  image, so it works against any published tag.
+* **startup** and **readiness** (`null` by default, opt-in) `exec` the same probe the `HEALTHCHECK`
+  uses, because they must distinguish *ready* from *still starting*, and only the response body says
+  which. They are off by default because that probe exists only in images built from this repo at or
+  after the change that added it, and this chart is installed from a checkout rather than a published
+  chart repo — so a default assuming a newer image would restart-loop for anyone on `main`.
+  `values.yaml` carries the exact block to paste in, and the chart prints a reminder to verify your
+  image when you enable them.
 
 That last path choice is not cosmetic. When the database becomes unreachable, `/api/server/status`
 does not return `1` — it **blocks**, because computing the status opens a database connection.

@@ -33,5 +33,22 @@ Database connection:
   Database: {{ .Values.postgres.credentials.database }}
   Username: {{ .Values.postgres.credentials.username }}
 
+{{ if or .Values.bridgelink.startupProbe .Values.bridgelink.readinessProbe }}
+NOTE — you have enabled the exec probes. Check your image carries the probe binary:
+
+  startupProbe/readinessProbe exec /opt/bridgelink/bootstrap/BridgeLinkHealthcheck, present only in
+  images built from bridgelink-container at or after IRT-2015. Against an older image the probe
+  cannot run, the startup probe exhausts its failureThreshold, and the kubelet restarts the
+  container in a loop.
+
+  This release is using image:
+    {{ .Values.bridgelink.image.repository }}:{{ .Values.bridgelink.image.tag | default .Chart.AppVersion }}
+
+  Confirm with:
+    docker image inspect {{ .Values.bridgelink.image.repository }}:{{ .Values.bridgelink.image.tag | default .Chart.AppVersion }} --format '{{ "{{" }}.Config.Healthcheck{{ "}}" }}'
+
+  A non-empty Healthcheck means the probe is present. If it is empty, unset these two probes:
+    --set bridgelink.startupProbe=null --set bridgelink.readinessProbe=null
+{{ end }}
 For more information and configuration options, please visit:
 {{ .Chart.Home }}
