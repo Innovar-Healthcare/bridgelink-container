@@ -94,6 +94,10 @@ spec:
               value: /opt/bridgelink/secrets/vmoptions
           resources:
             {{- toYaml .Values.bridgelink.resources | nindent 12 }}
+          {{- if .Values.bridgelink.startupProbe }}
+          startupProbe:
+            {{- toYaml .Values.bridgelink.startupProbe | nindent 12 }}
+          {{- end }}
           {{- if .Values.bridgelink.livenessProbe }}
           livenessProbe:
             {{- toYaml .Values.bridgelink.livenessProbe | nindent 12 }}

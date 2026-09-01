@@ -44,6 +44,60 @@ bridgelink:
       # -- Memory limit for BridgeLink pods
       memory: 2Gi
 
+  # Probes (IRT-2015). Before this the chart shipped NONE: deployment.yaml templated liveness and
+  # readiness, but no values defined them and values.schema.json forbade extra keys, so the
+  # templates were unreachable and `--set bridgelink.readinessProbe...` was schema-rejected.
+  #
+  # Startup and readiness `exec` the probe class baked into both images. They parse the body of
+  # /api/server/status, because that endpoint returns HTTP 200 even when the engine is UNAVAILABLE
+  # — so an httpGet probe cannot tell ready from starting. Liveness deliberately IS the cheap
+  # httpGet: it must not restart the pod merely because the engine reports UNAVAILABLE during a
+  # transient database outage, since a restart does not fix a database. Readiness handles that by
+  # pulling the pod out of the Service without killing it.
+  #
+  # Set `startupProbe: null` (etc.) to disable any of them.
+
+  # -- Startup probe. Gates the other two until the first boot finishes: database connect-with-retry,
+  # schema migration and the startup channel deploy all precede status 0. 5s x 60 = 300s budget,
+  # matching the images' HEALTHCHECK start-period; a first boot exceeding it gets the pod killed, so
+  # raise failureThreshold for a large migration.
+  startupProbe:
+    exec:
+      command: ["java", "-XX:TieredStopAtLevel=1", "-XX:+UseSerialGC", "-XX:-UsePerfData", "-Xmx32m", "-cp", "/opt/bridgelink/bootstrap", "BridgeLinkHealthcheck"]
+    periodSeconds: 5
+    failureThreshold: 60
+    # timeoutSeconds is NOT optional: Kubernetes defaults exec probes to 1s and enforces it, and a
+    # cold JVM plus a TLS handshake against a server mid-migration exceeds that on a loaded node —
+    # the probe would then never succeed. Must stay above the probe's own 4s internal timeout.
+    timeoutSeconds: 5
+
+  # -- Readiness probe. Gates Service traffic on engine status 0 (database up, engine running,
+  # startup deploy done). 15s rather than 5s because an exec probe's JVM is charged to this
+  # container's cgroup: ~50-80MB alongside the server. Fine at the default heap, but leave headroom
+  # under `resources.limits.memory` if you raise -Xmx toward the limit.
+  readinessProbe:
+    exec:
+      command: ["java", "-XX:TieredStopAtLevel=1", "-XX:+UseSerialGC", "-XX:-UsePerfData", "-Xmx32m", "-cp", "/opt/bridgelink/bootstrap", "BridgeLinkHealthcheck"]
+    periodSeconds: 15
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+  # -- Liveness probe. Restarts the pod only when the API stops answering at all. kubelet does not
+  # verify the certificate on an HTTPS probe, so the self-signed keystore needs no configuration.
+  # The X-Requested-With header is required (server.api.require-requested-with, default true) —
+  # without it the endpoint returns HTTP 400 even though it needs no authentication.
+  livenessProbe:
+    httpGet:
+      path: /api/server/status
+      port: https
+      scheme: HTTPS
+      httpHeaders:
+        - name: X-Requested-With
+          value: kube-probe
+    periodSeconds: 20
+    timeoutSeconds: 5
+    failureThreshold: 3
+
   # -- Node selector for BridgeLink pods
   nodeSelector: {}
   # -- Pod tolerations for BridgeLink
