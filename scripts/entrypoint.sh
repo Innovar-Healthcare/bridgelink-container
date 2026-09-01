@@ -205,8 +205,8 @@ if [ -n "$KEYSTORE_DOWNLOAD" ]; then
     # it covers the keystore pull, and the DHI bootstrap already does. This call site was the only
     # one missing it, so a self-signed keystore host worked on the hardened image and failed here
     # (IRT-2015).
-    CURL_OPTS="-fSL"
-    [ "${ALLOW_INSECURE}" = "true" ] && CURL_OPTS="-kfSL"
+    CURL_OPTS="-sSLf"
+    [ "${ALLOW_INSECURE}" = "true" ] && CURL_OPTS="-ksSLf"
     echo "Downloading keystore from: $KEYSTORE_DOWNLOAD"
     curl --silent --show-error ${CURL_OPTS} "$KEYSTORE_DOWNLOAD" -o "$KEYSTORE_FILE"
 

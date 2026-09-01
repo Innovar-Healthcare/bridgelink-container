@@ -1,0 +1,133 @@
+# Helm chart gate — IRT-2015
+#
+# Separate from build-images.yml on purpose. GitHub path filters are WORKFLOW-scoped, not per-job,
+# so putting charts/** in that workflow would fire the full multi-arch image builds (and consume the
+# release BINARY_URL) on a chart-only PR. Here a chart change gets a real check in well under a
+# minute, with no registry login, no BINARY_URL and no secrets.
+#
+# The chart had no CI of any kind before this: nothing ran helm lint, which is how
+# values.schema.json came to declare additionalProperties: false while deployment.yaml templated
+# livenessProbe/readinessProbe — the templates were unreachable and any attempt to set a probe was
+# rejected, with nothing to catch it.
+
+name: chart
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "charts/**"
+      - ".github/workflows/chart.yml"
+  push:
+    branches: [main]
+    paths:
+      - "charts/**"
+      - ".github/workflows/chart.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  chart:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - name: helm lint
+        run: helm lint charts/bridgelink
+  
+      - name: helm template (defaults)
+        run: helm template bl charts/bridgelink > /tmp/rendered.yaml
+  
+      - name: Default probes are safe against any published image
+        run: |
+          set -euo pipefail
+          python3 -c "import yaml" 2>/dev/null || python3 -m pip install --quiet pyyaml
+          python3 - <<'PY'
+          import yaml
+          docs = [d for d in yaml.safe_load_all(open('/tmp/rendered.yaml')) if d]
+          deps = [d for d in docs if d['kind'] == 'Deployment' and d['metadata']['name'].endswith('-bl')]
+          assert deps, 'no Deployment matching *-bl in rendered output (release name or template renamed?)'
+          cs = [c for c in deps[0]['spec']['template']['spec']['containers'] if c['name'] == 'bridgelink']
+          assert cs, "no container named 'bridgelink' (Chart.Name renamed?)"
+          c = cs[0]
+
+          # The exec probes must stay OFF by default. They run a probe binary that exists only in
+          # images built from this repo at or after IRT-2015, and this chart is installed straight
+          # from a checkout -- so defaulting them on means a kubelet restart loop for anyone on main
+          # whose image predates it. Enabling them is a documented opt-in (see values.yaml).
+          for p in ('startupProbe', 'readinessProbe'):
+              assert p not in c, (
+                  f'{p} is enabled by default. It execs BridgeLinkHealthcheck, which older published '
+                  'images do not contain -> restart loop. Keep it null and document the opt-in.')
+
+          # Liveness IS on by default, because it works against every image.
+          lp = c.get('livenessProbe')
+          assert lp and 'httpGet' in lp, 'livenessProbe must be enabled by default and be httpGet'
+          # Pinned: /status BLOCKS when the database is unreachable (isDatabaseRunning ->
+          # testDatabase waits on the pool; IRT-2018), so liveness against it times out and restarts
+          # the pod on any database outage. /version reads an in-memory value. Measured
+          # 200-in-73ms vs no-response-in-10s on the same server.
+          assert lp['httpGet']['path'] == '/api/server/version', \
+              'livenessProbe must target /api/server/version, not /status (which hangs on DB loss)'
+          assert lp['httpGet']['scheme'] == 'HTTPS', 'livenessProbe must use HTTPS'
+          hdrs = {h['name']: h['value'] for h in lp['httpGet'].get('httpHeaders', [])}
+          assert 'X-Requested-With' in hdrs, \
+              'livenessProbe httpGet needs X-Requested-With or the API returns 400'
+          print('default probe shape OK (liveness only)')
+          PY
+
+      - name: The documented exec-probe opt-in renders correctly
+        run: |
+          set -euo pipefail
+          # values.yaml documents a block to paste in once the image carries the probe. If that
+          # block stops working, the docs are lying, so render it here rather than trusting prose.
+          PROBE='{"exec":{"command":["java","-XX:TieredStopAtLevel=1","-XX:+UseSerialGC","-XX:-UsePerfData","-Xmx32m","-cp","/opt/bridgelink/bootstrap","BridgeLinkHealthcheck"]},"periodSeconds":10,"failureThreshold":30,"timeoutSeconds":5}'
+          helm template bl charts/bridgelink \
+            --set-json "bridgelink.startupProbe=$PROBE" \
+            --set-json "bridgelink.readinessProbe=$PROBE" > /tmp/enabled.yaml
+          python3 - <<'PY'
+          import yaml
+          docs = [d for d in yaml.safe_load_all(open('/tmp/enabled.yaml')) if d]
+          deps = [d for d in docs if d['kind'] == 'Deployment' and d['metadata']['name'].endswith('-bl')]
+          c = [x for x in deps[0]['spec']['template']['spec']['containers'] if x['name'] == 'bridgelink'][0]
+          for p in ('startupProbe', 'readinessProbe'):
+              assert p in c, f'{p} did not render when set'
+              assert 'exec' in c[p], f'{p} must be exec: /api/server/status returns 200 even when ' \
+                                     'UNAVAILABLE, so only the response body tells ready from starting'
+              cmd = ' '.join(c[p]['exec']['command'])
+              assert 'BridgeLinkHealthcheck' in cmd, f'{p} must exec the probe the images compile'
+              # k8s defaults exec probes to timeoutSeconds:1 and enforces it; a cold JVM plus a TLS
+              # handshake exceeds that on a loaded node and the startup probe would never succeed.
+              assert c[p].get('timeoutSeconds', 1) >= 5, f'{p} needs timeoutSeconds >= 5'
+          print('documented opt-in renders OK')
+          PY
+
+      - name: Schema accepts probe overrides
+        run: |
+          set -euo pipefail
+          helm template bl charts/bridgelink \
+            --set bridgelink.livenessProbe.periodSeconds=60 > /dev/null
+          echo "probe overrides accepted by values.schema.json"
+          # The null default must stay renderable, and explicitly nulling liveness must work too.
+          helm template bl charts/bridgelink --set bridgelink.livenessProbe=null \
+            | grep -q "livenessProbe:" && { echo "::error::livenessProbe=null did not disable it"; exit 1; }
+          echo "livenessProbe=null disables it"
+
+      - name: Chart README is regenerated from values.yaml
+        run: |
+          set -euo pipefail
+          # README.md is generated by helm-docs from README.md.gotmpl + the `# --` comments in
+          # values.yaml. Editing values without regenerating leaves the published table wrong, so
+          # fail the PR rather than let the two drift.
+          # Pinned, not :latest — a helm-docs release that changes table or badge formatting would
+          # otherwise fail this gate on an unrelated PR, and the fix commit would then fail for the
+          # next person once the tag moved again. Bump deliberately, regenerating in the same commit.
+          docker run --rm -v "$PWD/charts:/helm-docs" -u "$(id -u)" jnorwood/helm-docs:v1.14.2 \
+            --chart-search-root=/helm-docs --template-files=README.md.gotmpl
+          if ! git diff --quiet charts/bridgelink/README.md; then
+            echo "::error::charts/bridgelink/README.md is stale — run helm-docs and commit the result"
+            git diff -- charts/bridgelink/README.md
+            exit 1
+          fi
+          echo "chart README is current"

@@ -120,5 +120,6 @@ HEALTHCHECK --interval=15s --timeout=5s --start-period=300s --retries=3 \
   CMD ["java", "-XX:TieredStopAtLevel=1", "-XX:+UseSerialGC", "-XX:-UsePerfData", "-Xmx32m", \
        "-cp", "/opt/bridgelink/bootstrap", "BridgeLinkHealthcheck"]
 
-# Shell-free entrypoint: the bootstrap templates config, then launches the server in-process.
+# Shell-free entrypoint: the bootstrap templates config, then launches the server as a child
+# process (ProcessBuilder) and forwards signals to it, so PID 1 shuts the server down gracefully.
 ENTRYPOINT ["java", "-cp", "/opt/bridgelink/bootstrap", "BridgeLinkBootstrap"]

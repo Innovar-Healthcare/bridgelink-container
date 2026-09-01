@@ -85,10 +85,6 @@ on:
       - "test/**"
       - ".trivyignore"
       - ".github/workflows/build-images.yml"
-      # charts/** gates the `chart` job only. It was absent until IRT-2015, so the Helm chart
-      # shipped with no CI at all — which is how values.schema.json came to forbid the very probe
-      # keys deployment.yaml templated, with nothing to catch it.
-      - "charts/**"
 
 permissions:
   contents: read
@@ -511,89 +507,6 @@ jobs:
   # notifications are handled by the GitHub Slack app). One message: each image's gate result + total
   # finding count + links. Skips silently if SLACK_WEBHOOK_URL is unset, and never reds the run on a
   # Slack hiccup (a delivery failure is a warning, not a build failure).
-  # Helm chart gate (IRT-2015). Deliberately independent of the image jobs: it needs no registry
-  # login, no BINARY_URL and no secrets, so a chart-only PR gets a real check in ~30s.
-  #
-  # The `--set` step is the point of the schema half of IRT-2015, not a nicety: before it,
-  # values.schema.json declared `additionalProperties: false` on `bridgelink` while
-  # deployment.yaml templated livenessProbe/readinessProbe, so those templates were unreachable and
-  # any attempt to set a probe was rejected by the schema. `helm template` alone would NOT have
-  # caught that — the defaults now validate fine. Only overriding proves the schema accepts them.
-  chart:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: azure/setup-helm@v4
-      - name: helm lint
-        run: helm lint charts/bridgelink
-
-      - name: helm template (defaults)
-        run: helm template bl charts/bridgelink > /tmp/rendered.yaml
-
-      - name: Probes are actually rendered
-        run: |
-          set -euo pipefail
-          for probe in startupProbe readinessProbe livenessProbe; do
-            grep -q "$probe:" /tmp/rendered.yaml || { echo "::error::$probe missing from rendered output"; exit 1; }
-          done
-          # The probe must be exec-form and reference the class both images compile, or the chart is
-          # pointing at something that does not exist in the image.
-          grep -q "BridgeLinkHealthcheck" /tmp/rendered.yaml \
-            || { echo "::error::rendered probes do not reference BridgeLinkHealthcheck"; exit 1; }
-          # Liveness must stay the cheap httpGet: if someone switches it to the body-parsing exec
-          # probe, a transient database outage starts restarting pods instead of just de-registering
-          # them. That is a deliberate design split, so pin it.
-          python3 -c "import yaml" 2>/dev/null || pip install --quiet pyyaml
-          python3 - <<'PY'
-          import sys, yaml
-          docs = [d for d in yaml.safe_load_all(open('/tmp/rendered.yaml')) if d]
-          dep = next(d for d in docs if d['kind'] == 'Deployment' and d['metadata']['name'].endswith('-bl'))
-          c = next(c for c in dep['spec']['template']['spec']['containers'] if c['name'] == 'bridgelink')
-          assert 'httpGet' in c['livenessProbe'], 'livenessProbe must be httpGet, not exec'
-          # Pinned: /status BLOCKS when the database is unreachable (isDatabaseRunning ->
-          # testDatabase waits on the pool), so a liveness probe against it times out and restarts
-          # the pod on any database outage. /version reads an in-memory value and answers iff the
-          # process is serving. Measured 200-in-73ms vs no-response-in-10s on the same server.
-          assert c['livenessProbe']['httpGet']['path'] == '/api/server/version', \
-              'livenessProbe must target /api/server/version, not /status (which hangs on DB loss)'
-          hdrs = {h['name']: h['value'] for h in c['livenessProbe']['httpGet'].get('httpHeaders', [])}
-          assert 'X-Requested-With' in hdrs, 'livenessProbe httpGet needs X-Requested-With or the API returns 400'
-          assert c['livenessProbe']['httpGet']['scheme'] == 'HTTPS', 'livenessProbe must use HTTPS'
-          for p in ('startupProbe', 'readinessProbe'):
-              assert 'exec' in c[p], f'{p} must be exec (body parsing; httpGet cannot tell ready from starting)'
-              # k8s defaults exec probes to timeoutSeconds:1 and enforces it; a cold JVM exceeds that.
-              assert c[p].get('timeoutSeconds', 1) >= 5, f'{p} needs timeoutSeconds >= 5'
-          print('probe shape OK')
-          PY
-
-      - name: Schema accepts probe overrides
-        run: |
-          set -euo pipefail
-          helm template bl charts/bridgelink \
-            --set bridgelink.startupProbe.failureThreshold=120 \
-            --set bridgelink.readinessProbe.periodSeconds=30 \
-            --set bridgelink.livenessProbe.periodSeconds=60 > /dev/null
-          echo "probe overrides accepted by values.schema.json"
-          # And the documented way to switch one off must work.
-          helm template bl charts/bridgelink --set bridgelink.startupProbe=null \
-            | grep -q "startupProbe:" && { echo "::error::startupProbe=null did not disable it"; exit 1; }
-          echo "startupProbe=null disables it"
-
-      - name: Chart README is regenerated from values.yaml
-        run: |
-          set -euo pipefail
-          # README.md is generated by helm-docs from README.md.gotmpl + the `# --` comments in
-          # values.yaml. Editing values without regenerating leaves the published table wrong, so
-          # fail the PR rather than let the two drift.
-          docker run --rm -v "$PWD/charts:/helm-docs" -u "$(id -u)" jnorwood/helm-docs:latest \
-            --chart-search-root=/helm-docs --template-files=README.md.gotmpl
-          if ! git diff --quiet charts/bridgelink/README.md; then
-            echo "::error::charts/bridgelink/README.md is stale — run helm-docs and commit the result"
-            git diff -- charts/bridgelink/README.md
-            exit 1
-          fi
-          echo "chart README is current"
-
   notify-slack:
     needs: [params, dhi, test-rocky]
     if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
