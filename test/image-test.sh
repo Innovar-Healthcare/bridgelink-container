@@ -482,25 +482,34 @@ fi
 #
 # Timed, not sampled at an instant, so it is not a race: record when the bare port first answers and
 # when docker first reports healthy. The probe is only worth having if the second is strictly later.
+#
+# Sampled at 200ms with millisecond timestamps, deliberately. At 1s resolution the observed window
+# was 6s on one run and 2s on the next (a Derby boot on a fast machine is quick), and two samples is
+# not enough to distinguish "no window" from "a window shorter than the sampling interval" -- the
+# assertion would eventually fail on timing rather than on a defect. python3 is already a
+# requirement of this suite, and macOS `date` has no %N.
 info "6d. Startup window (port answers before the engine is ready)"
+now_ms() { python3 -c 'import time;print(int(time.time()*1000))'; }
 run bl-window -p 8443
-WPORT=""; PORT_AT=""; HEALTHY_AT=""; W0=$(date +%s)
-for i in $(seq 1 240); do
+WPORT=""; PORT_AT=""; HEALTHY_AT=""; W0=$(now_ms)
+for i in $(seq 1 1200); do
   [ -z "$WPORT" ] && WPORT="$(https_port bl-window 2>/dev/null)"
   if [ -n "$WPORT" ]; then
-    [ -z "$PORT_AT" ] && reporter_check "$WPORT" && PORT_AT=$(( $(date +%s) - W0 ))
+    [ -z "$PORT_AT" ] && reporter_check "$WPORT" && PORT_AT=$(( $(now_ms) - W0 ))
     [ -z "$HEALTHY_AT" ] && [ "$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' bl-window 2>/dev/null)" = healthy ] \
-      && HEALTHY_AT=$(( $(date +%s) - W0 ))
+      && HEALTHY_AT=$(( $(now_ms) - W0 ))
   fi
   [ -n "$PORT_AT" ] && [ -n "$HEALTHY_AT" ] && break
-  sleep 1
+  sleep 0.2
 done
 if [ -n "$PORT_AT" ] && [ -n "$HEALTHY_AT" ]; then
-  if [ "$PORT_AT" -lt "$HEALTHY_AT" ]; then
-    ok "port answered at ${PORT_AT}s but healthy only at ${HEALTHY_AT}s — a $(( HEALTHY_AT - PORT_AT ))s window in which the reporter's curl check is green and the server is not ready"
+  GAP=$(( HEALTHY_AT - PORT_AT ))
+  if [ "$GAP" -gt 0 ]; then
+    ok "port answered at ${PORT_AT}ms but healthy only at ${HEALTHY_AT}ms — a ${GAP}ms window in which the reporter's curl check is green and the server is not ready"
   else
-    # Not a pass: if they coincide, this run did not demonstrate the gap the probe exists to close.
-    bad "port (${PORT_AT}s) and healthy (${HEALTHY_AT}s) coincided — the startup window was not observed, so this run does not exercise the difference"
+    # Not a pass: if healthy is not strictly later, this run did not demonstrate the gap the probe
+    # exists to close, and a probe that passes before the port even answers would be a real defect.
+    bad "healthy (${HEALTHY_AT}ms) was not later than the port answering (${PORT_AT}ms) — the startup window was not observed, so this run does not exercise the difference"
   fi
 else
   bad "did not observe both signals (port=${PORT_AT:-never} healthy=${HEALTHY_AT:-never})"
