@@ -72,6 +72,19 @@ vmopt_count() {  # <container> <pattern>  -> echo occurrence count
   fi
 }
 
+# Wait until a fixture webserver actually serves, rather than sleeping a fixed amount. `docker run -d`
+# returns before nginx is listening, and on a loaded runner (or one that just pulled the image) two
+# seconds is not enough — that flaked 5d(a) in CI while the later lanes, by then warm, passed. Probed
+# from another container on the same network so it works regardless of published ports.
+wait_for_fixture() {
+  local url="$1" timeout="${2:-60}" i=0
+  while [ "$i" -lt "$timeout" ]; do
+    docker run --rm --network "$NET" curlimages/curl:latest -ksSf -m 3 -o /dev/null "$url" >/dev/null 2>&1 && return 0
+    sleep 1; i=$((i+1))
+  done
+  return 1
+}
+
 # Poll a container's logs for a pattern (default: successful start). Returns non-zero on timeout.
 wait_for_log() {
   local name="$1" pattern="${2:-server successfully started}" timeout="${3:-90}" i=0
@@ -98,7 +111,18 @@ wait_for_health() {
   return 1
 }
 
-# The reporter's exact healthcheck from issue #38: does the bare port answer?
+# Is 8443 answering TLS+HTTP at all, regardless of what it serves? `%{http_code}` is 000 when the
+# connection or handshake fails and an HTTP status otherwise, so any non-000 means the port answered.
+# Content-independent on purpose: the WebAdmin-only ("slim") image strips public_html, so the web
+# root has nothing to serve and a status-code-sensitive check never succeeds there.
+port_answers() {
+  local code
+  code="$(curl -k -s -o /dev/null -m 5 -w '%{http_code}' "https://localhost:$1/" 2>/dev/null)"
+  [ -n "$code" ] && [ "$code" != "000" ]
+}
+
+# The reporter's exact healthcheck from issue #38, kept for the side-by-side. Note this FAILS
+# outright on the slim image (no public_html to serve), which is its own argument for the probe.
 reporter_check() { curl -kf -s -o /dev/null -m 5 "https://localhost:$1" 2>/dev/null; }
 
 api_code() {
@@ -245,7 +269,8 @@ PY
 
 docker run -d --name fileserver --network "$NET" \
   -v "$WORK/httproot:/usr/share/nginx/html:ro" nginx:alpine >/dev/null && CIDS+=(fileserver)
-sleep 2
+wait_for_fixture "http://fileserver/myextension.zip" 60 \
+  || echo "  WARNING: http fixture never served; downloads in 5a/5b will fail for that reason"
 
 info "5a. EXTENSIONS_DOWNLOAD"
 run bl-dl --network "$NET" -e EXTENSIONS_DOWNLOAD="http://fileserver/myextension.zip"
@@ -302,7 +327,8 @@ NG
     -v "$WORK/tls:/etc/nginx/certs:ro" \
     -v "$WORK/tls/default.conf:/etc/nginx/conf.d/default.conf:ro" \
     nginx:alpine >/dev/null && CIDS+=(fileserver-https)
-  sleep 2
+  wait_for_fixture "https://fileserver-https/myextension.zip" 60 \
+    || echo "  WARNING: https fixture never served; the ALLOW_INSECURE lanes below will fail for that reason"
   # (a) ALLOW_INSECURE=true -> self-signed cert accepted, download succeeds
   run bl-insec --network "$NET" -e ALLOW_INSECURE=true \
     -e EXTENSIONS_DOWNLOAD="https://fileserver-https/myextension.zip"
@@ -598,11 +624,12 @@ fi
 info "6d. Startup window (port answers before the engine is ready)"
 now_ms() { python3 -c 'import time;print(int(time.time()*1000))'; }
 run bl-window -p 8443
-WPORT=""; PORT_AT=""; HEALTHY_AT=""; W0=$(now_ms)
+WPORT=""; PORT_AT=""; CURL_AT=""; HEALTHY_AT=""; W0=$(now_ms)
 for i in $(seq 1 1200); do
   [ -z "$WPORT" ] && WPORT="$(https_port bl-window 2>/dev/null)"
   if [ -n "$WPORT" ]; then
-    [ -z "$PORT_AT" ] && reporter_check "$WPORT" && PORT_AT=$(( $(now_ms) - W0 ))
+    [ -z "$PORT_AT" ] && port_answers "$WPORT" && PORT_AT=$(( $(now_ms) - W0 ))
+    [ -z "$CURL_AT" ] && reporter_check "$WPORT" && CURL_AT=$(( $(now_ms) - W0 ))
     [ -z "$HEALTHY_AT" ] && [ "$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' bl-window 2>/dev/null)" = healthy ] \
       && HEALTHY_AT=$(( $(now_ms) - W0 ))
   fi
@@ -612,7 +639,16 @@ done
 if [ -n "$PORT_AT" ] && [ -n "$HEALTHY_AT" ]; then
   GAP=$(( HEALTHY_AT - PORT_AT ))
   if [ "$GAP" -gt 0 ]; then
-    ok "port answered at ${PORT_AT}ms but healthy only at ${HEALTHY_AT}ms — a ${GAP}ms window in which the reporter's curl check is green and the server is not ready"
+    ok "port answered at ${PORT_AT}ms but healthy only at ${HEALTHY_AT}ms — a ${GAP}ms window in which a port check is green and the server is not ready"
+    # Whether the reporter's exact check (`curl -kf` on the web root) also went green in that window.
+    # On the slim image it never goes green at all, because public_html is stripped — so their
+    # healthcheck could not have worked there under any circumstances.
+    if [ -n "$CURL_AT" ]; then
+      echo "      (the reporter's \`curl -kf\` went green at ${CURL_AT}ms, i.e. $(( HEALTHY_AT - CURL_AT ))ms before ready)"
+    else
+      echo "      (the reporter's \`curl -kf\` never succeeded on this image — no public_html to serve,"
+      echo "       so their healthcheck would never report healthy here at all)"
+    fi
   else
     # Not a pass: if healthy is not strictly later, this run did not demonstrate the gap the probe
     # exists to close, and a probe that passes before the port even answers would be a real defect.

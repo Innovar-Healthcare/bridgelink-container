@@ -769,7 +769,9 @@ The status codes the first phase reads:
 | `3` | INITIAL_DEPLOY — engine up, startup channels still deploying |
 
 A check against the port or the web root (for example `curl -kf https://localhost:8443`) is **not**
-equivalent, and not merely coarser. BridgeLink starts its web server *before* the engine and before
+equivalent, and not merely coarser. On the WebAdmin-only image it does not work at all: `public_html`
+is stripped, so the web root returns **404** and `curl -kf` never succeeds no matter how ready the
+server is. BridgeLink starts its web server *before* the engine and before
 the initial channel deploy, so 8443 completes a TLS handshake and serves the web UI while the engine
 is still starting. A dependent container gated on a port check can therefore start during exactly
 the window in which the API will reject or mis-serve its calls.
