@@ -36,10 +36,14 @@
  * server to also run out of threads.
  *
  * Polling /status only until the server first reports ready confines those requests to a window in
- * which the database is necessarily reachable (the server does not open 8443 at all until it has
- * connected -- Mirth.java exits before startWebServer() if the connection retries are exhausted),
- * so the leak never triggers. Measured with the database up: no per-request retention, only ordinary
- * Jetty pool elasticity that unwinds on idle.
+ * which the database was reachable when 8443 opened (Mirth.java exits before startWebServer() if the
+ * connection retries are exhausted). Measured with the database up: no per-request retention, only
+ * ordinary Jetty pool elasticity that unwinds on idle.
+ *
+ * This is a confinement, not a cure. A database that dies BETWEEN the port opening and status 0 --
+ * mid-migration, or mid initial deploy -- leaves this probe polling a blocked endpoint at the
+ * HEALTHCHECK interval, and plain docker never restarts an unhealthy container. Narrow window,
+ * accepted residual; the cure is the server-side fix.
  *
  * What this deliberately gives up: after first-ready the container stops reporting engine state, so
  * a later database outage leaves docker health green. That is the right trade for how docker health
@@ -130,7 +134,12 @@ public final class BridgeLinkHealthcheck {
     static final int STATUS_OK = 0;
 
     public static void main(String[] args) {
-        boolean liveOnly = !ALWAYS_STATUS && wasReady();
+        // A pinned BL_HEALTH_URL stays in status-parsing mode. Phase-switching a fixed URL is
+        // incoherent: pinned to a /version-style path the pre-ready phase would send
+        // Accept: application/json to a TEXT_PLAIN endpoint and 406 forever (never reaching ready),
+        // and pinned to a /status path the post-ready phase would judge only the HTTP code, so
+        // UNAVAILABLE would read as healthy. If you pin the URL, you own which endpoint it is.
+        boolean liveOnly = !isSet(System.getenv("BL_HEALTH_URL")) && !ALWAYS_STATUS && wasReady();
         String url = targetUrl(liveOnly ? VERSION_PATH : STATUS_PATH);
         try {
             Response resp = get(url, liveOnly ? VERSION_ACCEPT : STATUS_ACCEPT);
@@ -206,9 +215,10 @@ public final class BridgeLinkHealthcheck {
 
     /**
      * BL_HEALTH_URL wins outright (lets an operator point the probe at http, another host, or a
-     * non-default context path) — note it pins ONE path, so it also pins the phase. Otherwise track
-     * https.port out of mirth.properties, since MP_HTTPS_PORT can move it and a hardcoded 8443
-     * would then probe a closed port forever.
+     * non-default context path). Setting it also disables phase-switching — see main() — so the URL
+     * must be a status-shaped endpoint whose body carries the code, and the thread-leak caveat then
+     * belongs to whoever pinned it. Otherwise track https.port out of mirth.properties, since
+     * MP_HTTPS_PORT can move it and a hardcoded 8443 would probe a closed port forever.
      */
     static String targetUrl(String path) {
         String override = System.getenv("BL_HEALTH_URL");
@@ -326,8 +336,10 @@ public final class BridgeLinkHealthcheck {
         if (host == null) return false;
         String h = host.toLowerCase();
         if (h.startsWith("[") && h.endsWith("]")) h = h.substring(1, h.length() - 1);  // [::1]
-        return h.equals("localhost") || h.equals("127.0.0.1") || h.equals("::1")
-                || h.startsWith("127.");
+        // Literal dotted quad only. `startsWith("127.")` would accept the DNS name
+        // "127.evil.example.com", which resolves wherever its owner likes — so verification would be
+        // silently disabled on a non-loopback connection.
+        return h.equals("localhost") || h.equals("::1") || h.matches("127(\\.\\d{1,3}){3}");
     }
 
     // ---- parsing --------------------------------------------------------------------------------

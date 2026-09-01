@@ -743,8 +743,14 @@ The first phase is the readiness gate. The second is a liveness check, and exist
 `/api/server/status` **leaks one server thread per request while the database is unreachable** — it
 blocks in the connection-pool checkout and a client-side timeout does not release it. Polling it
 every 15s would strand roughly 240 threads an hour during an outage and eventually exhaust the JVM,
-at the worst possible moment. Restricting those calls to the pre-ready window avoids that entirely,
-because the server does not open port 8443 at all until it has reached the database.
+at the worst possible moment. Restricting those calls to the pre-ready window removes that for the
+case that matters — an outage after startup — because the server does not open port 8443 at all until
+it has reached the database.
+
+One residual case remains, deliberately: a database that dies *between* the port opening and the
+server reporting ready (mid-migration, or mid initial deploy) leaves the probe polling a blocked
+endpoint, and plain `docker` never restarts an unhealthy container. That window is narrow and a
+server in it is usually not recoverable anyway, but it is a confinement rather than a cure.
 
 The consequence, stated plainly: **after the container has once been ready, a database outage no
 longer marks it unhealthy.** That is the right trade for how this is consumed —

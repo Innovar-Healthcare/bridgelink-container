@@ -400,11 +400,52 @@ case "$HC" in
   *) bad "unexpected HEALTHCHECK: $HC" ;;
 esac
 
-# Thread count of the server JVM (PID 1), read from /proc so it needs no shell in the image and no
-# jcmd. NB the process is install4j...MirthLauncher_blserver, not mirth-server-launcher — a grep for
-# the latter silently matched nothing and reported 0 threads for a live JVM during development.
-jvm_threads() { docker exec "$1" sh -c 'ls /proc/1/task | wc -l' 2>/dev/null | tr -d '[:space:]'; }
-stuck_in_status() { docker exec "$1" sh -c 'jcmd 1 Thread.print 2>/dev/null | grep -c "Get status"' 2>/dev/null | tr -d '[:space:]'; }
+# Thread metrics for the server JVM (PID 1).
+#
+# `docker exec ... sh -c` CANNOT be used here: the hardened runtime has no shell, which test 1 above
+# asserts. An earlier version of this section used it and, on the DHI image, docker's own error text
+# ("OCI runtime exec failed: ... \"sh\": executable file not found") was captured as the metric,
+# reported the marker as absent, and then aborted the whole script under `set -u` when that text
+# reached an arithmetic expansion. So: invoke jcmd directly (no shell needed, it is on PATH in both
+# images) and do the counting on the HOST.
+#
+# digits() is the guard that matters. Any failure -- no jcmd, exec refused, container gone -- must
+# yield an EMPTY string, never a number and never prose, so callers can tell "no measurement" from
+# "measured zero". A missing measurement that defaults to 0 reads as a pass, which is how a broken
+# metric hid a real defect during development.
+digits() { printf '%s' "${1:-}" | tr -cd '0-9'; }
+thread_dump() { docker exec "$1" jcmd 1 Thread.print 2>/dev/null; }
+jvm_threads()     { digits "$(thread_dump "$1" | grep -c '^"' 2>/dev/null)"; }
+stuck_in_status() { digits "$(thread_dump "$1" | grep -c 'Get status' 2>/dev/null)"; }
+# Which endpoint did the probe last check? Read from docker's own health log, so it works on any
+# image (no shell, no exec) and proves the phase actually SWITCHED rather than merely that a marker
+# file exists. On the hardened image this doubles as proof that /tmp is writable for UID 65532,
+# since the switch cannot happen unless the marker was written.
+last_health_output() {
+  docker inspect --format '{{range .State.Health.Log}}{{.Output}}{{end}}' "$1" 2>/dev/null | tail -1
+}
+# Poll until the probe is observed in $2 (default: version). Necessary, not defensive: the moment a
+# container reports healthy, the newest health-log entry is the /status success that CAUSED it, and
+# the switch to /version only shows up on the NEXT probe one interval later. Sampling once right
+# after `healthy` reads "status" every time. Note docker also preserves Health.Log across a restart,
+# so a single read after `docker restart` can return a stale pre-restart entry.
+wait_for_phase() {
+  local name="$1" want="${2:-version}" timeout="${3:-90}" i=0
+  while [ "$i" -lt "$timeout" ]; do
+    [ "$(health_phase "$name")" = "$want" ] && return 0
+    sleep 1; i=$((i+1))
+  done
+  return 1
+}
+
+health_phase() {   # -> "version" | "status" | "" (unknown)
+  local out; out="$(docker inspect --format '{{range .State.Health.Log}}{{.Output}}{{end}}' "$1" 2>/dev/null)"
+  case "$(printf '%s' "$out" | grep -o '/api/server/[a-z]*' | tail -1)" in
+    */version) echo version ;;
+    */status)  echo status ;;
+    *)         echo "" ;;
+  esac
+}
 
 if docker inspect bl-pg --format '{{.State.Running}}' 2>/dev/null | grep -q true; then
   PGPORT="$(https_port bl-pg)"
@@ -412,30 +453,53 @@ if docker inspect bl-pg --format '{{.State.Running}}' 2>/dev/null | grep -q true
     ok "container reports healthy once the engine is ready"
 
     # Phase switch: the marker is written on the first successful /status check.
-    docker exec bl-pg sh -c 'test -f /tmp/.bridgelink-was-ready' 2>/dev/null \
-      && ok "ready marker written — probe has switched to the /version phase" \
-      || bad "ready marker absent; probe would keep polling /status and leaking during an outage"
+    if wait_for_phase bl-pg version 90; then
+      # Proves the marker was written and read back — on DHI that also proves /tmp is writable for
+      # the hardened non-root UID, which is otherwise an untested assumption.
+      ok "probe switched to the /version phase (marker written and honoured)"
+    else
+      bad "probe never switched to the /version phase (still '$(health_phase bl-pg)') — the marker was not written or not read, so an outage would leak a thread per probe"
+      last_health_output bl-pg | sed 's/^/    last health output: /'
+    fi
 
-    T0="$(jvm_threads bl-pg)"
-    S0="$(stuck_in_status bl-pg)"
+    # jcmd is present in the Rocky runtime (java-17-openjdk-devel) but is not guaranteed in the
+    # hardened one, so the thread measurements are gated rather than silently returning nothing.
+    T0=""; S0=""
+    if [ "$CHECK_NO_SHELL" = "0" ]; then
+      T0="$(jvm_threads bl-pg)"; S0="$(stuck_in_status bl-pg)"
+    fi
     docker stop pg >/dev/null 2>&1
     # ~8 healthcheck intervals at 15s. If the probe were still polling /status this window alone
     # would strand roughly that many threads in the Get status handler, permanently.
     sleep 120
-    T1="$(jvm_threads bl-pg)"
-    S1="$(stuck_in_status bl-pg)"
-    GROWTH=$(( ${T1:-0} - ${T0:-0} ))
-
-    if [ "${S1:-0}" -le "$(( ${S0:-0} + 1 ))" ]; then
-      ok "no threads stranded in the status handler after 2 min of DB outage (was ${S0:-?}, now ${S1:-?})"
-    else
-      bad "threads stranded in the status handler: ${S0:-?} -> ${S1:-?} — the probe is polling /status past first-ready (IRT-2018 leak)"
+    T1=""; S1=""
+    if [ "$CHECK_NO_SHELL" = "0" ]; then
+      T1="$(jvm_threads bl-pg)"; S1="$(stuck_in_status bl-pg)"
     fi
-    # Jetty's pool flexes by a handful under load; a per-request leak is an order of magnitude more.
-    if [ "$GROWTH" -le 12 ]; then
-      ok "JVM thread count stable across the outage (${T0:-?} -> ${T1:-?})"
+
+    # Report explicitly when the metric is unavailable rather than defaulting to 0 and "passing".
+    # An empty measurement that defaults to 0 turns the leak guard into a no-op that reads green,
+    # which is exactly how a broken metric hid a real defect while this was being written.
+    if [ -n "$T0" ] && [ -n "$T1" ] && [ -n "$S0" ] && [ -n "$S1" ]; then
+      if [ "$S1" -le "$(( S0 + 1 ))" ]; then
+        ok "no threads stranded in the status handler after 2 min of DB outage (was $S0, now $S1)"
+      else
+        bad "threads stranded in the status handler: $S0 -> $S1 — the probe is polling /status past first-ready (thread-leak regression)"
+      fi
+      # Jetty's pool flexes by a handful under load; a per-request leak is an order of magnitude more.
+      GROWTH=$(( T1 - T0 ))
+      if [ "$GROWTH" -le 12 ]; then
+        ok "JVM thread count stable across the outage ($T0 -> $T1)"
+      else
+        bad "JVM threads grew by $GROWTH across a 2 min outage ($T0 -> $T1) — expected flat"
+      fi
+    elif [ "$CHECK_NO_SHELL" = "1" ]; then
+      echo "  SKIP: thread counting needs jcmd, not guaranteed in the hardened runtime. The"
+      echo "        thread-leak assertions did NOT run on this image — the Rocky lane covers them,"
+      echo "        and the phase assertion above covers the mechanism that prevents the leak."
     else
-      bad "JVM threads grew by $GROWTH across a 2 min outage (${T0:-?} -> ${T1:-?}) — expected flat"
+      echo "  SKIP: thread metrics unavailable (T0='$T0' T1='$T1' S0='$S0' S1='$S1'). The leak"
+      echo "        assertions did NOT run — treat this run as not having covered that regression."
     fi
 
     # Documented trade-off, asserted rather than noted. This started life as an informational NOTE
@@ -474,6 +538,46 @@ else
   bad "bl-pg is not running — cannot exercise the healthcheck (see test 6)"
 fi
 
+# ---- 6c2. A restart must re-prove readiness ---------------------------------------------------
+# Regression guard for the bug this section exists because of. The ready marker lives in the
+# container's writable layer, which SURVIVES `docker restart` -- so without clearing it at process
+# start, the first probe after a restart takes the post-ready branch, checks /api/server/version and
+# reports healthy the moment Jetty is listening: before the engine starts and before the startup
+# deploy. Anything gated on `depends_on: service_healthy` with `restart: true` -- the reporter's exact
+# configuration in issue #38 -- is then released into the not-ready window on every restart after the
+# first. Both launchers now delete the marker on boot; this proves it.
+info "6c2. Restart re-proves readiness"
+run bl-restart -p 8443
+if wait_for_health bl-restart healthy 180 && wait_for_phase bl-restart version 90; then
+  # Confirm the marker exists before the restart, so its absence afterwards means something.
+  docker cp bl-restart:/tmp/.bridgelink-was-ready - >/dev/null 2>&1 \
+    && ok "marker present before restart (precondition for this test)" \
+    || bad "marker absent before restart — cannot test that a restart clears it"
+  docker restart bl-restart >/dev/null 2>&1
+  # The marker file is the unambiguous signal. Health.Log is NOT: docker preserves it across a
+  # restart, so reading a phase straight after `docker restart` can return a pre-restart entry.
+  CLEARED=0; i=0
+  while [ "$i" -lt 60 ]; do
+    docker cp bl-restart:/tmp/.bridgelink-was-ready - >/dev/null 2>&1 || { CLEARED=1; break; }
+    sleep 1; i=$((i+1))
+  done
+  if [ "$CLEARED" = "1" ]; then
+    ok "marker cleared on restart — readiness is re-proved from scratch, so dependents are not released into the not-ready window"
+  else
+    bad "marker survived the restart — the first probe would report liveness instead of readiness (issue #38 window reopened on every restart)"
+  fi
+  # Both launchers report this now, so it is an assertion rather than an informational note. It is
+  # also the only evidence distinguishing "cleared on boot" from "never written in the first place".
+  docker logs bl-restart 2>&1 | grep -q 'Cleared stale healthcheck marker' \
+    && ok "launcher logged clearing the stale marker on restart" \
+    || bad "launcher did not report clearing the marker — cannot tell a cleared marker from one that was never written"
+  wait_for_health bl-restart healthy 180 \
+    && ok "healthy again after restart, having re-proved engine readiness" \
+    || bad "did not become healthy again after restart"
+else
+  bad "bl-restart did not reach the /version phase before the restart test"
+fi
+
 # ---- 6d. The startup window: why a port check is the wrong check ------------------------------
 # The point of issue #38, measured rather than argued. The engine calls startWebServer() BEFORE the
 # engine starts and before the startup channel deploy, so `curl -kf https://localhost:8443` — the
@@ -483,11 +587,14 @@ fi
 # Timed, not sampled at an instant, so it is not a race: record when the bare port first answers and
 # when docker first reports healthy. The probe is only worth having if the second is strictly later.
 #
-# Sampled at 200ms with millisecond timestamps, deliberately. At 1s resolution the observed window
-# was 6s on one run and 2s on the next (a Derby boot on a fast machine is quick), and two samples is
-# not enough to distinguish "no window" from "a window shorter than the sampling interval" -- the
-# assertion would eventually fail on timing rather than on a defect. python3 is already a
-# requirement of this suite, and macOS `date` has no %N.
+# Sampled at 200ms with millisecond timestamps. At 1s resolution the observed window was 6s on one
+# run and 2s on the next, and two samples cannot distinguish "no window" from "a window shorter than
+# the sampling interval". python3 is already a requirement of this suite, and macOS `date` has no %N.
+#
+# Read the reported gap as an upper bound on the port side and a coarse figure on the health side:
+# HEALTHY_AT is quantized by docker's healthcheck interval, so part of what it measures is probe
+# scheduling rather than the true readiness moment. The strict comparison is still safe -- healthy
+# requires a successful probe, which requires the port -- so healthy-before-port cannot happen.
 info "6d. Startup window (port answers before the engine is ready)"
 now_ms() { python3 -c 'import time;print(int(time.time()*1000))'; }
 run bl-window -p 8443

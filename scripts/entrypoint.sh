@@ -1,5 +1,19 @@
 #!/bin/bash
 
+# Clear the healthcheck's "has been ready" marker so a restarted container re-proves readiness from
+# scratch. The marker lives in the container's writable layer, which survives `docker restart` and
+# every restart-policy restart, so without this the first probe after a restart reports healthy as
+# soon as Jetty is listening -- before the engine starts and before the startup deploy -- and
+# releases anything gated on `depends_on: service_healthy` into the not-ready window.
+# Logged only when a marker was actually there, so the line means "this is a restart" rather than
+# being printed on every boot. Matches what the DHI bootstrap reports, so the acceptance suite can
+# assert the same thing on both images instead of tolerating a launcher difference.
+BL_HEALTH_MARKER_PATH="${BL_HEALTH_MARKER:-/tmp/.bridgelink-was-ready}"
+if [ -e "$BL_HEALTH_MARKER_PATH" ]; then
+  rm -f "$BL_HEALTH_MARKER_PATH" 2>/dev/null || true
+  echo "Cleared stale healthcheck marker $BL_HEALTH_MARKER_PATH (restart)"
+fi
+
 # Files to be modified
 PROPERTIES_FILE="/opt/bridgelink/conf/mirth.properties"
 VMOPTIONS_FILE="/opt/bridgelink/blserver.vmoptions"
@@ -208,7 +222,7 @@ if [ -n "$KEYSTORE_DOWNLOAD" ]; then
     CURL_OPTS="-sSLf"
     [ "${ALLOW_INSECURE}" = "true" ] && CURL_OPTS="-ksSLf"
     echo "Downloading keystore from: $KEYSTORE_DOWNLOAD"
-    curl --silent --show-error ${CURL_OPTS} "$KEYSTORE_DOWNLOAD" -o "$KEYSTORE_FILE"
+    curl ${CURL_OPTS} "$KEYSTORE_DOWNLOAD" -o "$KEYSTORE_FILE"
 
     # Check if the download was successful
     if [ $? -eq 0 ]; then

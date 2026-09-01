@@ -36,10 +36,9 @@ Database connection:
 {{ if or .Values.bridgelink.startupProbe .Values.bridgelink.readinessProbe }}
 NOTE — you have enabled the exec probes. Check your image carries the probe binary:
 
-  startupProbe/readinessProbe exec /opt/bridgelink/bootstrap/BridgeLinkHealthcheck, present only in
-  images built from bridgelink-container at or after IRT-2015. Against an older image the probe
-  cannot run, the startup probe exhausts its failureThreshold, and the kubelet restarts the
-  container in a loop.
+  startupProbe/readinessProbe exec /opt/bridgelink/bootstrap/BridgeLinkHealthcheck, which is
+  present only in newer BridgeLink images. Against an older image the probe cannot run, the startup
+  probe exhausts its failureThreshold, and the kubelet restarts the container in a loop.
 
   This release is using image:
     {{ .Values.bridgelink.image.repository }}:{{ .Values.bridgelink.image.tag | default .Chart.AppVersion }}
