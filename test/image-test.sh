@@ -74,12 +74,15 @@ vmopt_count() {  # <container> <pattern>  -> echo occurrence count
 
 # Wait until a fixture webserver actually serves, rather than sleeping a fixed amount. `docker run -d`
 # returns before nginx is listening, and on a loaded runner (or one that just pulled the image) two
-# seconds is not enough — that flaked 5d(a) in CI while the later lanes, by then warm, passed. Probed
-# from another container on the same network so it works regardless of published ports.
+# seconds is not enough — that flaked 5d(a) in CI while the later lanes, by then warm, passed.
+#
+# Probed with the curl already inside nginx:alpine rather than a helper container, so this adds no
+# image to pull and no requirement beyond what the fixtures themselves need. Args: container name,
+# then the URL as seen from inside it.
 wait_for_fixture() {
-  local url="$1" timeout="${2:-60}" i=0
+  local name="$1" url="$2" timeout="${3:-60}" i=0
   while [ "$i" -lt "$timeout" ]; do
-    docker run --rm --network "$NET" curlimages/curl:latest -ksSf -m 3 -o /dev/null "$url" >/dev/null 2>&1 && return 0
+    docker exec "$name" curl -ksSf -m 3 -o /dev/null "$url" >/dev/null 2>&1 && return 0
     sleep 1; i=$((i+1))
   done
   return 1
@@ -269,7 +272,7 @@ PY
 
 docker run -d --name fileserver --network "$NET" \
   -v "$WORK/httproot:/usr/share/nginx/html:ro" nginx:alpine >/dev/null && CIDS+=(fileserver)
-wait_for_fixture "http://fileserver/myextension.zip" 60 \
+wait_for_fixture fileserver "http://127.0.0.1/myextension.zip" 60 \
   || echo "  WARNING: http fixture never served; downloads in 5a/5b will fail for that reason"
 
 info "5a. EXTENSIONS_DOWNLOAD"
@@ -327,7 +330,7 @@ NG
     -v "$WORK/tls:/etc/nginx/certs:ro" \
     -v "$WORK/tls/default.conf:/etc/nginx/conf.d/default.conf:ro" \
     nginx:alpine >/dev/null && CIDS+=(fileserver-https)
-  wait_for_fixture "https://fileserver-https/myextension.zip" 60 \
+  wait_for_fixture fileserver-https "https://127.0.0.1/myextension.zip" 60 \
     || echo "  WARNING: https fixture never served; the ALLOW_INSECURE lanes below will fail for that reason"
   # (a) ALLOW_INSECURE=true -> self-signed cert accepted, download succeeds
   run bl-insec --network "$NET" -e ALLOW_INSECURE=true \
