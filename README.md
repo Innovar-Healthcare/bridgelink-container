@@ -19,6 +19,7 @@
   * [Using Volumes](#using-volumes)
     * [The appdata folder](#the-appdata-folder)
     * [Additional extensions](#additional-extensions)
+  * [Health checks and readiness](#health-checks)
 * [License](#license)
 
 ------------
@@ -213,8 +214,8 @@ Both images are scanned for OS and library vulnerabilities with [Trivy](https://
   patch yet) don't fail the build but are still reported.
 - **Library / application-JAR CVEs are _not_ gated here.** They come from the BridgeLink release
   tarball baked in via `BINARY_URL` (see [What this repo is](#what-this-repo-is)); this repo can't fix
-  them — only a new Core release can. They are reported in the SARIF above and tracked against Core in
-  [IRT-1396](https://innovarhealthcare.atlassian.net/browse/IRT-1396).
+  them — only a new Core release can. They are reported in the SARIF above and tracked against Core
+  separately.
 
 ### Scan locally
 
@@ -234,8 +235,7 @@ trivy image --severity HIGH,CRITICAL --ignore-unfixed --pkg-types os --exit-code
    erratum), add its CVE ID to [`.trivyignore`](.trivyignore) with a justification and a review date.
    Allowlisted entries are suppressed from the gate, so keep the list short and re-review dated entries.
 
-For a library/app-JAR CVE, track it in the Core ticket
-([IRT-1396](https://innovarhealthcare.atlassian.net/browse/IRT-1396)) — it is outside the CI gate
+For a library/app-JAR CVE, raise it against Core rather than here — it is outside the CI gate
 scope (the gate scans OS packages only) and stays visible on the Security tab regardless. Once Core
 has assessed one as not-exploitable / unfixable, you may also record it in [`.trivyignore`](.trivyignore)
 with that justification so local `trivy image` / `--pkg-types library` scans are clean; the CI SARIF
@@ -713,6 +713,137 @@ Example:
     environment:
       ...
 ```
+
+------------
+
+<a name="health-checks"></a>
+## Health checks and readiness [↑](#top)
+
+Both images declare a `HEALTHCHECK`, so `docker ps` shows a health column and Compose's
+`depends_on: {condition: service_healthy}` works without you writing a probe.
+
+```yaml
+  my-config-loader:
+    depends_on:
+      bl:
+        condition: service_healthy
+        restart: true
+```
+
+### What it checks, and why not the port
+
+The probe runs in two phases:
+
+| Phase | Endpoint | Passes when |
+|---|---|---|
+| Until the server is first ready | `/api/server/status` | body says status **0** |
+| Once it has been ready | `/api/server/version` | HTTP **200** |
+
+The first phase is the readiness gate. The second is a liveness check, and exists because
+`/api/server/status` **leaks one server thread per request while the database is unreachable** — it
+blocks in the connection-pool checkout and a client-side timeout does not release it. Polling it
+every 15s would strand roughly 240 threads an hour during an outage and eventually exhaust the JVM,
+at the worst possible moment. Restricting those calls to the pre-ready window removes that for the
+case that matters — an outage after startup — because the server does not open port 8443 at all until
+it has reached the database.
+
+One residual case remains, deliberately: a database that dies *between* the port opening and the
+server reporting ready (mid-migration, or mid initial deploy) leaves the probe polling a blocked
+endpoint, and plain `docker` never restarts an unhealthy container. That window is narrow and a
+server in it is usually not recoverable anyway, but it is a confinement rather than a cure.
+
+The consequence, stated plainly: **after the container has once been ready, a database outage no
+longer marks it unhealthy.** That is the right trade for how this is consumed —
+`depends_on: condition: service_healthy` is a startup gate — and it matches why the Helm chart's
+liveness probe also avoids `/status`. Set `BL_HEALTH_ALWAYS_STATUS=true` to check engine state on
+every probe instead, accepting the leak; do that only against a server carrying the fix for the
+underlying issue.
+
+The status codes the first phase reads:
+
+| Code | Meaning |
+|---|---|
+| `0` | OK — database reachable, engine running, startup deploy finished |
+| `1` | UNAVAILABLE — database or engine not running |
+| `2` | ENGINE_STARTING |
+| `3` | INITIAL_DEPLOY — engine up, startup channels still deploying |
+
+A check against the port or the web root (for example `curl -kf https://localhost:8443`) is **not**
+equivalent, and not merely coarser. On the WebAdmin-only image it does not work at all: `public_html`
+is stripped, so the web root returns **404** and `curl -kf` never succeeds no matter how ready the
+server is. BridgeLink starts its web server *before* the engine and before
+the initial channel deploy, so 8443 completes a TLS handshake and serves the web UI while the engine
+is still starting. A dependent container gated on a port check can therefore start during exactly
+the window in which the API will reject or mis-serve its calls.
+
+Three things to know if you write your own check against this endpoint:
+
+1. **It always returns HTTP 200**, with the status in the body, even when the server is
+   UNAVAILABLE. `curl -f`, and any check that keys on the HTTP status — including a Kubernetes
+   `httpGet` probe — passes while the engine is down. You must read the body.
+2. **The body is not a bare integer.** It is `<int>0</int>`, or `{"int":0}` if you send
+   `Accept: application/json`.
+3. **`X-Requested-With` is required** (`server.api.require-requested-with`, default `true`).
+   Without it the endpoint returns **HTTP 400**, even though it needs no authentication.
+
+### Tuning and opting out
+
+| Knob | Default | Notes |
+|---|---|---|
+| `BL_HEALTH_URL` | derived from `https.port` | Point the probe elsewhere (plain HTTP, another port, a context path). Note it pins one path, so it also pins the phase. Otherwise `https.port` is read from `mirth.properties`, so `MP_HTTPS_PORT` is followed automatically. TLS verification is skipped only for a loopback host; for anything else set `BL_HEALTH_INSECURE=true` if the certificate is self-signed. |
+| `BL_HEALTH_ALWAYS_STATUS` | unset | `true` polls `/api/server/status` on every probe, restoring continuous engine-state reporting and the thread leak described above. |
+| `BL_HEALTH_MARKER` | `/tmp/.bridgelink-was-ready` | Where the first-ready marker is written. Container-local by design: a restart re-proves readiness from scratch. |
+| `--start-period` | `300s` | Covers a cold boot: database connect-with-retry, schema migration, extension migration and the startup deploy all precede status 0. Raise it for a large migration. |
+| `--interval` / `--retries` | `15s` / `3` | Once the first check succeeds, three consecutive failures (~45s) mark the container unhealthy. |
+
+To disable it for a service, add `healthcheck: {disable: true}` in Compose, or run with
+`docker run --no-healthcheck`.
+
+**If you already run the Rocky image:** it previously declared no healthcheck, so
+`condition: service_healthy` needed a `healthcheck:` block of your own and now gates on this one
+instead. Plain `docker` never restarts an unhealthy container, but **Docker Swarm does** — if your
+first boot can exceed the start period, raise it. **Amazon ECS is unaffected**: it honours only the
+`healthCheck` in the task definition and ignores the image's.
+
+### Kubernetes
+
+Kubernetes ignores a Docker `HEALTHCHECK` entirely — the kubelet runs its own probes, from outside
+the container. The Helm chart configures all three (see
+[`charts/bridgelink/values.yaml`](charts/bridgelink/values.yaml)), but **only `livenessProbe` is
+enabled by default**:
+
+* **liveness** (on by default) is a cheap `httpGet` against **`/api/server/version`**, not
+  `/api/server/status`. Liveness restarts the pod, and a restart does not fix a database outage —
+  readiness already removes the pod from the Service without killing it. It needs nothing in the
+  image, so it works against any published tag.
+* **startup** and **readiness** (`null` by default, opt-in) `exec` the same probe the `HEALTHCHECK`
+  uses, because they must distinguish *ready* from *still starting*, and only the response body says
+  which. They are off by default because that probe exists only in images built from this repo at or
+  after the change that added it, and this chart is installed from a checkout rather than a published
+  chart repo — so a default assuming a newer image would restart-loop for anyone on `main`.
+  `values.yaml` carries the exact block to paste in, and the chart prints a reminder to verify your
+  image when you enable them.
+
+That last path choice is not cosmetic. When the database becomes unreachable, `/api/server/status`
+does not return `1` — it **blocks**, because computing the status opens a database connection.
+Measured on one server with its database stopped:
+
+| Endpoint | Result with the database down |
+|---|---|
+| `/api/server/version` | `200` in 73 ms |
+| `/api/server/status` | no response in 10 s |
+
+So a liveness probe pointed at `/api/server/status` times out and restarts the pod after
+`failureThreshold × periodSeconds` of *any* database outage. `/api/server/version` returns an
+in-memory value and needs no authentication, so it answers if and only if the JVM and Jetty are
+actually serving — which is what liveness should mean. Readiness still uses the status body, which
+is correct: there, a timeout *should* mean not-ready.
+
+Three gotchas if you write these yourself: exec probes default to `timeoutSeconds: 1`, which a cold
+JVM plus a TLS handshake will exceed; an `httpGet` probe needs the `X-Requested-With` header or it
+gets a 400; and any body-parsing check needs its own timeout, or a database outage hangs it
+indefinitely. The kubelet does not verify the certificate on an HTTPS probe, so the self-signed
+keystore needs no special handling.
 
 ------------
 

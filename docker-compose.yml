@@ -1,3 +1,20 @@
+# HEALTHCHECK (IRT-2015): images built from this repo at this commit or later declare one, so no
+# `healthcheck:` block is needed — it probes GET /api/server/status and reports healthy only once the
+# engine is running and the startup channel deploy has finished, not merely once port 8443 answers.
+#
+# NOTE the tag pinned below predates that change. Until an image carrying the probe is published,
+# `condition: service_healthy` against it fails with "has no healthcheck configured" — bump the tag
+# to a release built from this commit, or keep your own `healthcheck:` block, before relying on it.
+#
+# A container that must not start until BridgeLink is genuinely ready then gates on it:
+#
+#   my-config-loader:
+#     depends_on:
+#       bl:
+#         condition: service_healthy
+#         restart: true
+#
+# To opt out of the image's healthcheck for a service, add `healthcheck: {disable: true}`.
 services:
   bl:
     image: innovarhealthcare/bridgelink:26.3.1

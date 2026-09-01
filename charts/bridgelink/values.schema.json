@@ -217,6 +217,33 @@
           },
           "required": [],
           "title": "tolerations"
+        },
+        "startupProbe": {
+          "description": "Startup probe for the BridgeLink container. Gates readiness/liveness until the first boot completes. Set to null to disable.",
+          "required": [],
+          "title": "startupProbe",
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "readinessProbe": {
+          "description": "Readiness probe for the BridgeLink container. Parses /api/server/status, since that endpoint returns HTTP 200 even when the engine is unavailable. Set to null to disable.",
+          "required": [],
+          "title": "readinessProbe",
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "livenessProbe": {
+          "description": "Liveness probe for the BridgeLink container. A cheap HTTP 200 check only, so a transient database outage does not restart the pod. Set to null to disable.",
+          "required": [],
+          "title": "livenessProbe",
+          "type": [
+            "object",
+            "null"
+          ]
         }
       },
       "required": [

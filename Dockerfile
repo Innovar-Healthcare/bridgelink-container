@@ -49,6 +49,13 @@ RUN ls -l /opt/scripts/
 RUN --mount=type=secret,id=aws_credentials,target=/root/.aws/credentials \
     /opt/scripts/install.sh
 
+# Compile the healthcheck probe that backs the HEALTHCHECK below (IRT-2015). Deliberately the SAME
+# class the hardened image uses, at the same path, so both images share one implementation and one
+# HEALTHCHECK line. Using curl here instead would be less code and two behaviours that drift apart.
+# The runtime stage's `COPY --from=builder /opt/bridgelink` carries the compiled class over.
+COPY bootstrap/BridgeLinkHealthcheck.java /opt/bridgelink/bootstrap/BridgeLinkHealthcheck.java
+RUN javac -d /opt/bridgelink/bootstrap /opt/bridgelink/bootstrap/BridgeLinkHealthcheck.java
+
 # Create required directories for persistent data and set ownership
 RUN mkdir -p /opt/bridgelink/appdata && chown bridgelink:bridgelink /opt/bridgelink/appdata && \
     mkdir -p /opt/bridgelink/custom-extensions && chown bridgelink:bridgelink /opt/bridgelink/custom-extensions
@@ -111,6 +118,32 @@ VOLUME /opt/bridgelink/custom-extensions
 
 # Switch to the bridgelink user and define the container’s entrypoint and command
 USER bridgelink
+
+# Readiness probe (IRT-2015, issue #38). Identical to the hardened image's: same class, same flags,
+# same thresholds. JSON exec form, so no shell is involved even though this image has one.
+#
+# It checks GET /api/server/status for status 0, NOT that port 8443 answers: the engine brings its
+# web server up before the engine and before the initial channel deploy, so a port check reports
+# healthy during precisely the window a dependent container must not start in. The endpoint also
+# returns HTTP 200 even when UNAVAILABLE, so the body has to be parsed.
+#
+# TWO PHASES: /status until the server first reports ready, then /api/server/version. /status leaks
+# one Jetty worker thread per request, permanently, whenever the database is unreachable (it blocks
+# in the pool checkout; a client-side timeout does not release it -- IRT-2018). Polling it every 15s
+# would leak ~240 threads/hour during an outage. Confining those calls to the pre-ready window,
+# where the database is necessarily up, avoids that. Consequence to know: after first-ready a
+# database outage leaves health green -- `depends_on: service_healthy` is a startup gate, which is
+# what it is used for. BL_HEALTH_ALWAYS_STATUS=true restores continuous checking and the leak.
+#
+# NOTE for existing users of this long-shipping image: it previously declared no healthcheck, so
+# compose `depends_on: {condition: service_healthy}` required your own `healthcheck:` block and now
+# gates on this one instead. Plain docker never restarts an unhealthy container, but Docker Swarm
+# does; ECS is unaffected (it honours only the task definition's healthCheck). The 300s start period
+# covers a cold boot's database migration and startup deploy. To opt out: `healthcheck: {disable:
+# true}` in compose, or `docker run --no-healthcheck`.
+HEALTHCHECK --interval=15s --timeout=5s --start-period=300s --retries=3 \
+  CMD ["java", "-XX:TieredStopAtLevel=1", "-XX:+UseSerialGC", "-XX:-UsePerfData", "-Xmx32m", \
+       "-cp", "/opt/bridgelink/bootstrap", "BridgeLinkHealthcheck"]
 
 # Entrypoint
 ENTRYPOINT ["/opt/scripts/entrypoint.sh"]

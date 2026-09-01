@@ -80,7 +80,9 @@ on:
       - "bootstrap/**"
       - "scripts/install.sh"
       - "scripts/entrypoint.sh"
-      - "test/image-test.sh"
+      # test/** rather than test/image-test.sh: the suite grew a second file in IRT-2015, and a
+      # filter naming one file silently stops gating the rest.
+      - "test/**"
       - ".trivyignore"
       - ".github/workflows/build-images.yml"
 

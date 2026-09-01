@@ -1,6 +1,6 @@
 # bridgelink
 
-![Version: 0.2.0](https://img.shields.io/badge/Version-0.2.0-informational?style=flat-square)
+![Version: 0.3.0](https://img.shields.io/badge/Version-0.3.0-informational?style=flat-square)
 ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square)
 ![AppVersion: 26.3.1](https://img.shields.io/badge/AppVersion-26.3.1-informational?style=flat-square)
 
@@ -162,16 +162,18 @@ not apply.
 | bridgelink.affinity | object | `{}` | Pod affinity for BridgeLink |
 | bridgelink.environment.MP_CONFIGURATIONMAP_LOCATION | string | `"database"` | Configuration map location |
 | bridgelink.environment.MP_DATABASE | string | `"postgres"` | Database type (postgres, mysql, oracle, sqlserver) |
-| bridgelink.environment.MP_DATABASE_PASSWORD | string | `"bridgelinktest"` | Database password |
-| bridgelink.environment.MP_DATABASE_URL | string | `"jdbc:postgresql://bridgelink-postgres:5432/bridgelinkdb"` | Database connection URL |
-| bridgelink.environment.MP_DATABASE_USERNAME | string | `"bridgelinktest"` | Database username |
+| bridgelink.environment.MP_DATABASE_PASSWORD | string | `"{{ .Values.postgres.credentials.password }}"` | Database password |
+| bridgelink.environment.MP_DATABASE_URL | string | `"jdbc:postgresql://{{ include \"bridgelink.fullname\" . }}-postgres:5432/{{ .Values.postgres.credentials.database }}"` | Database connection URL |
+| bridgelink.environment.MP_DATABASE_USERNAME | string | `"{{ .Values.postgres.credentials.username }}"` | Database username |
 | bridgelink.environment.MP_KEYSTORE_KEYPASS | string | `"bridgelinkKeystore"` | Keystore key password |
 | bridgelink.environment.MP_KEYSTORE_STOREPASS | string | `"bridgelinkKeypass"` | Keystore store password |
 | bridgelink.environment.SERVER_ID | string | `"7d760af2-680a-4a19-b9a2-c4685df61ebc"` | Unique server identifier |
 | bridgelink.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy |
 | bridgelink.image.repository | string | `"innovarhealthcare/bridgelink"` | BridgeLink container image repository |
 | bridgelink.image.tag | string | `"26.3.1"` | BridgeLink container image tag. Defaults to the Rocky image. For the hardened (DHI) image set `tag: 26.3.1-dhi` and `runAsUser: 65532` / `runAsGroup: 65532` (see below). |
+| bridgelink.livenessProbe | object | `{"failureThreshold":3,"httpGet":{"httpHeaders":[{"name":"X-Requested-With","value":"kube-probe"}],"path":"/api/server/version","port":"https","scheme":"HTTPS"},"periodSeconds":20,"timeoutSeconds":5}` | Liveness probe. Enabled by default: it is a plain HTTPS GET and works against any image. Restarts the pod only when the API stops answering at all.  Deliberately /api/server/version, NOT /api/server/status. When the database goes away, getStatus() calls isDatabaseRunning() -> testDatabase(), which blocks on the connection pool, so /status does not return UNAVAILABLE — it HANGS (measured: no response in 10s, while /version answered 200 in 73ms on the same server; tracked as a Core defect). A liveness probe pointed at /status would therefore time out and restart the pod after failureThreshold x periodSeconds of any database outage, which is exactly what liveness must not do: a restart does not fix a database. /version reads an in-memory value and needs no authentication (@DontCheckAuthorized), so it answers iff the JVM and Jetty are actually serving.  kubelet does not verify the certificate on an HTTPS probe, so the self-signed keystore needs no configuration. The X-Requested-With header is required (server.api.require-requested-with, default true) — without it the endpoint returns HTTP 400 even though it needs no authentication. |
 | bridgelink.nodeSelector | object | `{}` | Node selector for BridgeLink pods |
+| bridgelink.readinessProbe | string | `nil` | Readiness probe. Disabled by default for the same reason as startupProbe; see above. Note that until you enable it, a pod is considered Ready as soon as its container is running, which means Service traffic can reach BridgeLink while the engine is still deploying channels. |
 | bridgelink.replicaCount | int | `1` | Number of BridgeLink replicas to deploy |
 | bridgelink.resources.limits.cpu | string | `"2000m"` | CPU limit for BridgeLink pods |
 | bridgelink.resources.limits.memory | string | `"2Gi"` | Memory limit for BridgeLink pods |
@@ -182,6 +184,7 @@ not apply.
 | bridgelink.service.ports.http | int | `8080` | HTTP port for web interface |
 | bridgelink.service.ports.https | int | `8443` | HTTPS port for secure web interface |
 | bridgelink.service.type | string | `"LoadBalancer"` | Service type for BridgeLink (LoadBalancer, ClusterIP, NodePort) |
+| bridgelink.startupProbe | string | `nil` | Startup probe. Disabled by default because it needs an image carrying the probe binary — see the block above for the values to paste in once it does. |
 | bridgelink.tolerations | list | `[]` | Pod tolerations for BridgeLink |
 | fullnameOverride | string | `""` | Provide a name to substitute for the full names of resources |
 | nameOverride | string | `""` | Override the name of the chart |

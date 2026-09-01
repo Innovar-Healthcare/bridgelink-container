@@ -58,7 +58,30 @@ public final class BridgeLinkBootstrap {
 
     static final boolean ALLOW_INSECURE = "true".equalsIgnoreCase(System.getenv("ALLOW_INSECURE"));
 
+    /*
+     * ALLOW_INSECURE must disable the HOSTNAME check as well as certificate trust, or this image
+     * is stricter than the Rocky one and the "both images behave identically" promise above is
+     * false. entrypoint.sh passes curl -k, which skips both; insecureSslContext() below only
+     * covers trust, because HttpClient enforces hostname verification independently of the
+     * SSLContext and HttpClient.Builder.sslParameters() cannot override it — this system property
+     * is the only supported way off it. So ALLOW_INSECURE=true against a self-signed host whose
+     * CN does not match the URL used to work on Rocky and fail here (IRT-2015).
+     *
+     * This lives in a static initializer rather than at the top of main() on purpose: the property
+     * is read from a static initializer inside jdk.internal.net.http.common.Utils, so it must be
+     * set before ANY java.net.http class loads. A static block on the main class always runs
+     * first; a line in main() would silently stop working the moment someone reordered the calls
+     * there, and the only symptom would be a download failing for a customer using a mismatched
+     * certificate. Do not move it.
+     */
+    static {
+        if (ALLOW_INSECURE) {
+            System.setProperty("jdk.internal.httpclient.disableHostnameVerification", "true");
+        }
+    }
+
     public static void main(String[] args) throws Exception {
+        clearHealthMarker();
         // Mirrors scripts/entrypoint.sh order exactly.
         writeServerId();
         downloadOverwrite("CUSTOM_VMOPTIONS", VMOPTIONS_FILE);
@@ -71,6 +94,34 @@ public final class BridgeLinkBootstrap {
         appendSecretVmoptions();
         extractCustomExtensionZips();
         launchServer();
+    }
+
+    /**
+     * Clear the healthcheck's "has been ready" marker, so a restarted container re-proves readiness
+     * from scratch.
+     *
+     * Not optional. The marker lives in the container's writable layer, which SURVIVES
+     * `docker restart`, `docker stop`/`start` and every restart-policy restart -- only remove-and-
+     * recreate (and Kubernetes, which always makes a fresh container) resets it. Without this, the
+     * first probe after a restart takes the post-ready branch, checks /api/server/version, and
+     * reports healthy the moment Jetty is listening -- before the engine starts and before the
+     * startup channel deploy. A dependent container gated on `depends_on: service_healthy` would
+     * then be released into exactly the not-ready window this probe exists to close, on every
+     * restart after the first. It also clears a marker baked in by `docker commit`.
+     */
+    static void clearHealthMarker() {
+        String marker = env("BL_HEALTH_MARKER", "/tmp/.bridgelink-was-ready");
+        try {
+            if (Files.deleteIfExists(Paths.get(marker))) {
+                System.out.println("Cleared stale healthcheck marker " + marker + " (restart)");
+            }
+        } catch (Exception e) {
+            // Leave it: a probe that reports liveness instead of readiness is a lesser problem than
+            // refusing to boot, but say so, because the startup gate is weaker than it looks.
+            System.out.println("WARNING: could not clear healthcheck marker " + marker + " (" + e
+                    + "). If this container has been ready before, the healthcheck will report"
+                    + " liveness immediately rather than waiting for the engine.");
+        }
     }
 
     // ---- 1. SERVER_ID -----------------------------------------------------------------------
