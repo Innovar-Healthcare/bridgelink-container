@@ -1,0 +1,4 @@
+# Derby jars are copied from a BridgeLink-internal checkout at build time (see build.sh)
+derby-*.jar
+derbyshared-*.jar
+derbytools-*.jar
