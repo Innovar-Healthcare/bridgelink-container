@@ -4,9 +4,9 @@
 # `latest-dhi`. It also builds + acceptance-tests + vuln-scans the Rocky image on PRs (IRT-1391 /
 # IRT-1390), but never publishes it — the Rocky image keeps being published by its existing process.
 #
-# Publish destination is per version (IRT-1866). From 26.9 the images are customer-only and go to the
-# private ECR registry; 26.6.0 and earlier stay on public Docker Hub and keep their weekly base-patch
-# re-push. A version is never published to both — see the `private` flag below.
+# Publish destination is per version, selected by each entry's `private` flag (see below): a version
+# goes either to the private ECR registry or to public Docker Hub, never to both. Every maintained
+# version keeps its weekly base-patch re-push regardless of destination.
 #
 # Live in production (weekly schedule + manual workflow_dispatch runs have been publishing
 # successfully since IRT-1356 landed). Required repo secrets/variables:
@@ -19,18 +19,17 @@
 #                                            (notify-slack job); if unset, that job skips silently
 #   Variables:
 #     MAINTAINED_VERSIONS  JSON array of every DHI release line kept alive by the weekly rebuild,
-#                          e.g. [{"version":"26.6.0","binary_url":"https://...","latest":false},
-#                                {"version":"26.9.0","binary_url":"s3://...","latest":true,
+#                          e.g. [{"version":"<ver>","binary_url":"https://...","latest":false},
+#                                {"version":"<ver>","binary_url":"s3://...","latest":true,
 #                                 "private":true}]
 #                          Exactly one entry should have "latest": true — that's the one that gets
 #                          the rolling latest-dhi / latest-dhi-slim tags.
 #                          "private": true publishes that version to the private ECR registry
-#                          INSTEAD of public Docker Hub (26.9+). Optional; omitted means public,
-#                          so pre-26.9 entries need no edit.
-#     AWS_PUBLISH_ROLE_ARN OIDC role assumed for the ECR push (bridgelink-publish, created by
-#                          infra/ecr-stack.yaml). Assumable from the integration branch ONLY, so a
-#                          private publish cannot be dispatched from a feature branch. Only needed
-#                          once a "private" entry exists.
+#                          INSTEAD of public Docker Hub. Optional; omitted means public, so an
+#                          existing public entry needs no edit.
+#     AWS_PUBLISH_ROLE_ARN OIDC role assumed for the ECR push (bridgelink-publish). Assumable from
+#                          the integration branch ONLY, so a private publish cannot be dispatched
+#                          from a feature branch. Only needed once a "private" entry exists.
 #     DEFAULT_VERSION      / DEFAULT_BINARY_URL   single version used only to gate PRs (dhi /
 #                          test-rocky on pull_request) — pin these to the current newest release.
 #
@@ -60,7 +59,7 @@ on:
         type: boolean
         default: true
       private:
-        description: "One-off only: publish to the private ECR registry instead of public Docker Hub (26.9+)"
+        description: "One-off only: publish to the private ECR registry instead of public Docker Hub"
         type: boolean
         default: false
   # Rebuild-on-base-update: DHI repatches frequently, so rebuild weekly to keep the near-zero-CVE
@@ -155,7 +154,8 @@ jobs:
             # string as true, while Compute tags does [ "$v" = "true" ]. So "True" would take
             # the ECR branch for the login steps and the DOCKER HUB branch for the tags, and
             # the push would succeed because the job is already Docker Hub authenticated for
-            # base-image pulls. That publishes a customer-only release publicly, on a green run.
+            # base-image pulls. That pushes a version flagged private to the public registry,
+            # on a green run.
             # Coercing with `.private == true` would be worse: someone who typed "yes" meaning
             # private would silently get a public push instead of an error.
             if ! jq -e 'all(.[]; (has("private") | not) or (.private | type == "boolean"))' \
@@ -297,11 +297,10 @@ jobs:
       # version — a Trivy-gate failure above already stopped this job run before reaching here,
       # without touching any other version's job run.
       #
-      # Destination is per matrix entry (IRT-1866). `private: true` publishes ONLY to the private ECR
-      # registry (26.9+, customer-only); otherwise ONLY to public Docker Hub, which is exactly the
-      # behaviour the 26.3.1 / 26.6.0 lines had before private publishing existed. The two are
-      # mutually exclusive on purpose: without that, the weekly rebuild would leak a private release
-      # to Docker Hub.
+      # Destination is per matrix entry. `private: true` publishes ONLY to the private ECR registry;
+      # otherwise ONLY to public Docker Hub, which is exactly the behaviour every line had before
+      # private publishing existed. The two are mutually exclusive on purpose: without that, the
+      # weekly rebuild would push a private release to Docker Hub.
       # No Docker Hub login here: the unconditional "authenticated pulls" step above already
       # authenticated this job with the same credentials, which carry push rights. A second
       # conditional login would read as the public/private safety valve without being one —
@@ -310,13 +309,12 @@ jobs:
       #
       # OIDC -> temporary AWS creds for the ECR push. Same role the s3:// binary fetch already uses
       # (vars.AWS_ROLE_ARN), so no new long-lived credentials — it carries the bridgelink-ecr-push
-      # policy from infra/ecr-stack.yaml. Region is us-east-2 (the registry); the in-build s3:// fetch
-      # keeps its own region from the AWS_CREDENTIALS secret and is unaffected.
-      # bridgelink-publish (infra/ecr-stack.yaml) is trusted for refs/heads/main ONLY, because
-      # these tags are mutable: push access is the ability to replace an already-released
-      # customer image. The weekly schedule runs on main, so it is unaffected; a private publish
-      # dispatched from a feature branch will fail to assume the role, which is intended. Use
-      # push: false for a feature-branch dry run.
+      # policy. Region is us-east-2 (the registry); the in-build s3:// fetch keeps its own region
+      # from the AWS_CREDENTIALS secret and is unaffected.
+      # bridgelink-publish is trusted for refs/heads/main ONLY, because these tags are mutable:
+      # push access is the ability to replace an already-released image. The weekly schedule runs
+      # on main, so it is unaffected; a private publish dispatched from a feature branch will fail
+      # to assume the role, which is intended. Use push: false for a feature-branch dry run.
       - name: Configure AWS credentials (OIDC)
         if: github.event_name != 'pull_request' && matrix.private
         uses: aws-actions/configure-aws-credentials@v4
@@ -412,8 +410,7 @@ jobs:
       # Tags in these repositories are MUTABLE by design — the weekly rebuild re-pushes
       # <version>-dhi after Docker repatches the hardened base, which is the whole point of the DHI
       # variant. The immutable release identity is therefore the manifest DIGEST, so surface it here:
-      # this is what goes in the release notes and what a customer pins when they need a reference
-      # that cannot move under them.
+      # this is what goes in the release notes, and what to pin when a reference must not move.
       - name: Record published digests
         if: github.event_name != 'pull_request' && needs.params.outputs.push == 'true'
         # Values via env rather than spliced into the script, per this workflow's convention.

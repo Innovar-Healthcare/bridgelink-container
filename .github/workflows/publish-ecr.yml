@@ -1,34 +1,33 @@
-# Publish the standard (Rocky) BridgeLink image to the private ECR registry  —  IRT-1866
+# Publish the standard (Rocky) BridgeLink image to the private ECR registry
 #
-# From 26.9 the container images are customer-only (parent IRT-1851), served from a private AWS ECR
-# registry with per-customer IAM credentials. This is the standard/Rocky variant's release path; the
-# hardened dhi / dhi-slim variants are published by build-images.yml, which also carries the weekly
-# rebuild-on-base-update schedule.
+# This is the standard/Rocky variant's release path. The hardened dhi / dhi-slim variants are
+# published by build-images.yml, which also carries the weekly rebuild-on-base-update schedule.
 #
-# Replaces the former publish-ghcr.yml. GHCR was retired rather than kept alongside ECR: the parent
-# ruled it out on quota grounds (Free-plan 500 MB storage / 1 GB month transfer cannot carry a 1.33 GB
-# multi-arch image), and a second private channel would mean two access surfaces to revoke when a
-# customer is offboarded. The public Docker Hub path (publish-dockerhub.yml) is unchanged and still
-# serves 26.6.0 and earlier.
+# Replaces the former publish-ghcr.yml. GHCR was retired rather than kept alongside ECR on quota
+# grounds: a Free-plan 500 MB storage / 1 GB month transfer allowance cannot carry a 1.33 GB
+# multi-arch image. The public Docker Hub path (publish-dockerhub.yml) is unchanged.
 #
 # Unlike its GHCR predecessor this gates the release: the acceptance suite and the Trivy
 # fixable-HIGH/CRITICAL OS gate both run against a locally built image before anything is pushed.
-# Publishing an unverified image was tolerable for an internal channel; it is not for a paid one.
 #
-# Manual-only (workflow_dispatch). Fetches the release tarball from the private s3:// location via
+# Manual-only (workflow_dispatch). Fetches the release tarball from a private s3:// location via
 # OIDC — no long-lived AWS credentials.
 #
 # Required repo config:
-#   Variable: AWS_PUBLISH_ROLE_ARN   the bridgelink-publish role created by
-#                            infra/ecr-stack.yaml. It carries both the ECR push policy and the
-#                            s3:// release read, and is assumable from the integration branch
+#   Variables:
+#     AWS_PUBLISH_ROLE_ARN   the bridgelink-publish role. It carries both the ECR push policy and
+#                            the s3:// release read, and is assumable from the integration branch
 #                            ONLY — these tags are mutable, so push access is the ability to
-#                            replace an already-released customer image.
-#   Secrets:  DOCKERHUB_USERNAME / DOCKERHUB_TOKEN   authenticated base-image pulls only, never a
-#                            push target here — avoids the anonymous pull-rate limit on shared runners.
+#                            replace an already-released image.
+#     RELEASE_BUCKET         bucket holding the release tarballs, without the s3:// scheme. The
+#                            Compute BINARY_URL step fails fast if it is unset rather than
+#                            building a wrong URL.
+#   Secrets:
+#     DOCKERHUB_USERNAME / DOCKERHUB_TOKEN   authenticated base-image pulls only, never a push
+#                            target here — avoids the anonymous pull-rate limit on shared runners.
 #
-# Images are pullable only with credentials: the repositories carry no repository policy, so access is
-# IAM-only. Customer access (per-customer IAM users, portal visibility, offboarding) is IRT-1865.
+# Images are pullable only with credentials: the repositories carry no repository policy, so access
+# is IAM-only.
 
 name: publish-ecr
 
@@ -36,7 +35,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "BridgeLink version to publish (e.g. 26.9.0)"
+        description: "BridgeLink version to publish (e.g. 26.6.0)"
         required: true
       latest:
         description: "Also move the rolling `latest` tag to this version"
@@ -84,14 +83,19 @@ jobs:
           aws-region: ${{ env.ECR_REGION }}
           role-duration-seconds: ${{ env.SESSION_SECONDS }}
 
+      # RELEASE_BUCKET is a repo variable rather than a literal. Guarded rather than defaulted:
+      # an unset variable would otherwise build `s3:///bridgelink/...`, which fails deep inside
+      # the Docker build with an error that does not name the cause.
       - name: Compute BINARY_URL
         id: url
         env:
           VERSION: ${{ github.event.inputs.version }}
+          RELEASE_BUCKET: ${{ vars.RELEASE_BUCKET }}
         run: |
           set -euo pipefail
+          : "${RELEASE_BUCKET:?RELEASE_BUCKET repo variable is unset — set it in Settings > Secrets and variables > Actions}"
           VERSION_US="${VERSION//./_}"
-          echo "binary_url=s3://innovar-codebuild/bridgelink/${VERSION}/official-release/BridgeLink_unix_${VERSION_US}.tar.gz" >> "$GITHUB_OUTPUT"
+          echo "binary_url=s3://${RELEASE_BUCKET}/bridgelink/${VERSION}/official-release/BridgeLink_unix_${VERSION_US}.tar.gz" >> "$GITHUB_OUTPUT"
 
       # The Dockerfile fetches the binary during the build via a mounted aws_credentials secret.
       # region is the BUCKET's region, not the session's — see the env block above.
@@ -241,8 +245,9 @@ jobs:
             aws_credentials=${{ runner.temp }}/aws_credentials
           tags: ${{ steps.tags.outputs.list }}
 
-      # Tags in this repository are MUTABLE by design (see infra/README.md), so the manifest digest is
-      # the immutable release identity. Record it for the release notes.
+      # Tags in this repository are MUTABLE by design — a rebuild re-pushes the same tag so a
+      # supported version keeps picking up base-image fixes. The manifest digest is therefore the
+      # immutable release identity. Record it for the release notes.
       - name: Record published digest
         if: github.event.inputs.push == 'true'
         env:
