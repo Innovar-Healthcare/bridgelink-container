@@ -13,6 +13,10 @@
 #   https://hub.docker.com/hardened-images/catalog/dhi/amazoncorretto
 # ============================================================
 
+# These private-registry bases are digest-pinned + updated by Renovate (IRT-1392) as
+# `ARG …=dhi.io/amazoncorretto:<tag>@sha256:<digest>`. Renovate's first pinDigests run adds the
+# digests once the dhi.io pull credential is configured as an app-level hostRule (see renovate.json);
+# left as tags here because dhi.io requires an authenticated pull that isn't available at edit time.
 ARG CORRETTO_DEV_IMAGE=dhi.io/amazoncorretto:17-debian13-dev
 ARG CORRETTO_RUNTIME_IMAGE=dhi.io/amazoncorretto:17-debian13
 

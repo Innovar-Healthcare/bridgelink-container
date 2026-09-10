@@ -1,0 +1,45 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": [
+    "Dependency automation for bridgelink-container (IRT-1392).",
+    "SETUP: requires the Mend Renovate GitHub App enabled on the Innovar-Healthcare org (or a",
+    "self-hosted Renovate). The dhi.io base is a PRIVATE registry — configure its pull credential",
+    "as an APP-LEVEL hostRule (Mend dashboard: host=dhi.io, or self-hosted config.js hostRules with",
+    "env), NOT here: a repo-config hostRule that references a `{{ secrets.* }}` that isn't set makes",
+    "Renovate abort the ENTIRE run for this repo (init-phase 'Unknown secrets name'). Without the",
+    "dhi.io credential Renovate still manages Actions + the Rocky base; only the Corretto DHI base",
+    "digest won't resolve.",
+    "Manages ONLY the dockerfile + github-actions managers (see enabledManagers): the docker-compose*",
+    "sample files are intentionally left unmanaged so Renovate does not digest-pin our own repushed",
+    "innovarhealthcare/bridgelink tags there and point users at superseded images. Pins everything it",
+    "does manage to digests so updates arrive as deliberate PRs that CI (test-dhi/test-rocky) + Trivy gate."
+  ],
+  "extends": [
+    "config:recommended",
+    ":dependencyDashboard"
+  ],
+  "labels": ["dependencies"],
+  "timezone": "America/Chicago",
+  "schedule": ["before 6am on monday"],
+  "pinDigests": true,
+  "enabledManagers": ["dockerfile", "github-actions"],
+  "packageRules": [
+    {
+      "description": "Group GitHub Actions bumps into one PR.",
+      "matchManagers": ["github-actions"],
+      "groupName": "github-actions"
+    },
+    {
+      "description": "Rocky base image (Dockerfile) — its own PR so a base bump is reviewed in isolation.",
+      "matchManagers": ["dockerfile"],
+      "matchDepNames": ["rockylinux"],
+      "groupName": "rockylinux base image"
+    },
+    {
+      "description": "Corretto Docker Hardened Image base (Dockerfile.dhi, dev + runtime variants).",
+      "matchManagers": ["dockerfile"],
+      "matchDepNames": ["dhi.io/amazoncorretto"],
+      "groupName": "corretto DHI base image"
+    }
+  ]
+}
