@@ -20,10 +20,3 @@
 #
 # Format: justification + review date on the comment line(s) ABOVE the bare CVE ID (portable across
 # Trivy versions). Keep the list short; re-review dated entries.
-
-# CVE-2022-46337 (Apache Derby, embedded-only) — accepted per IRT-1396 triage. Not exploitable:
-# BridgeLink uses Derby strictly embedded (EmbeddedDriver, local jdbc:derby: appdata paths) with no
-# network server and no Derby authentication configured, so the LDAP-authenticator vector does not
-# exist. No Java-17 binary fix is published (10.16.1.2 was never released to Maven Central; 10.17
-# requires Java 21). Revisit when the platform moves to Java 21.
-CVE-2022-46337
