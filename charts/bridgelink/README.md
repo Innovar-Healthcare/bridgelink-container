@@ -2,7 +2,7 @@
 
 ![Version: 0.3.0](https://img.shields.io/badge/Version-0.3.0-informational?style=flat-square)
 ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square)
-![AppVersion: 26.3.1](https://img.shields.io/badge/AppVersion-26.3.1-informational?style=flat-square)
+![AppVersion: 26.6.1](https://img.shields.io/badge/AppVersion-26.6.1-informational?style=flat-square)
 
 A Helm chart for BridgeLink deployment
 
@@ -170,7 +170,7 @@ not apply.
 | bridgelink.environment.SERVER_ID | string | `"7d760af2-680a-4a19-b9a2-c4685df61ebc"` | Unique server identifier |
 | bridgelink.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy |
 | bridgelink.image.repository | string | `"innovarhealthcare/bridgelink"` | BridgeLink container image repository |
-| bridgelink.image.tag | string | `"26.3.1"` | BridgeLink container image tag. Defaults to the Rocky image. For the hardened (DHI) image set `tag: 26.3.1-dhi` and `runAsUser: 65532` / `runAsGroup: 65532` (see below). |
+| bridgelink.image.tag | string | `"26.6.1"` | BridgeLink container image tag. Defaults to the Rocky image. For the hardened (DHI) image set `tag: 26.6.1-dhi` and `runAsUser: 65532` / `runAsGroup: 65532` (see below). |
 | bridgelink.livenessProbe | object | `{"failureThreshold":3,"httpGet":{"httpHeaders":[{"name":"X-Requested-With","value":"kube-probe"}],"path":"/api/server/version","port":"https","scheme":"HTTPS"},"periodSeconds":20,"timeoutSeconds":5}` | Liveness probe. Enabled by default: it is a plain HTTPS GET and works against any image. Restarts the pod only when the API stops answering at all.  Deliberately /api/server/version, NOT /api/server/status. When the database goes away, getStatus() calls isDatabaseRunning() -> testDatabase(), which blocks on the connection pool, so /status does not return UNAVAILABLE — it HANGS (measured: no response in 10s, while /version answered 200 in 73ms on the same server; tracked as a Core defect). A liveness probe pointed at /status would therefore time out and restart the pod after failureThreshold x periodSeconds of any database outage, which is exactly what liveness must not do: a restart does not fix a database. /version reads an in-memory value and needs no authentication (@DontCheckAuthorized), so it answers iff the JVM and Jetty are actually serving.  kubelet does not verify the certificate on an HTTPS probe, so the self-signed keystore needs no configuration. The X-Requested-With header is required (server.api.require-requested-with, default true) — without it the endpoint returns HTTP 400 even though it needs no authentication. |
 | bridgelink.nodeSelector | object | `{}` | Node selector for BridgeLink pods |
 | bridgelink.readinessProbe | string | `nil` | Readiness probe. Disabled by default for the same reason as startupProbe; see above. Note that until you enable it, a pod is considered Ready as soon as its container is running, which means Service traffic can reach BridgeLink while the engine is still deploying channels. |

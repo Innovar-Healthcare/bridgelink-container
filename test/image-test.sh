@@ -14,8 +14,8 @@
 #
 # Usage:
 #   # DHI (defaults):
-#   BINARY_URL="https://.../BridgeLink_unix_26_3_1.tar.gz" test/image-test.sh
-#   IMAGE=innovarhealthcare/bridgelink:26.3.1-dhi SKIP_BUILD=1 test/image-test.sh
+#   BINARY_URL="https://.../BridgeLink_unix_26_6_1.tar.gz" test/image-test.sh
+#   IMAGE=innovarhealthcare/bridgelink:26.6.1-dhi SKIP_BUILD=1 test/image-test.sh
 #   # Rocky:
 #   BINARY_URL="https://.../..." IMAGE=innovarhealthcare/bridgelink:rocky-test \
 #     DOCKERFILE=Dockerfile EXPECTED_UID=1000 CHECK_NO_SHELL=0 test/image-test.sh
@@ -491,7 +491,7 @@ if docker inspect bl-pg --format '{{.State.Running}}' 2>/dev/null | grep -q true
       last_health_output bl-pg | sed 's/^/    last health output: /'
     fi
 
-    # jcmd is present in the Rocky runtime (java-17-openjdk-devel) but is not guaranteed in the
+    # jcmd is present in the Rocky runtime (java-21-openjdk-devel) but is not guaranteed in the
     # hardened one, so the thread measurements are gated rather than silently returning nothing.
     T0=""; S0=""
     if [ "$CHECK_NO_SHELL" = "0" ]; then

@@ -12,8 +12,8 @@ bridgelink:
     # -- BridgeLink container image repository
     repository: innovarhealthcare/bridgelink
     # -- BridgeLink container image tag. Defaults to the Rocky image. For the hardened (DHI) image
-    # set `tag: 26.3.1-dhi` and `runAsUser: 65532` / `runAsGroup: 65532` (see below).
-    tag: 26.3.1
+    # set `tag: 26.6.1-dhi` and `runAsUser: 65532` / `runAsGroup: 65532` (see below).
+    tag: 26.6.1
     # -- Image pull policy
     pullPolicy: IfNotPresent
 
