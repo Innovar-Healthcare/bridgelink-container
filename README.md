@@ -26,9 +26,16 @@
 <a name="supported-tags"></a>
 # Supported tags and respective Dockerfile links [↑](#top)
 
+BridgeLink 26.6.1 and later run on **Java 21** (the embedded Derby database they ship needs it).
+Every earlier release runs on **Java 17** and stays there: a rebuild of an older tag keeps the
+JDK it was released with.
+
 ##### Rockylinux9 OpenJDK 21
 
 * [26.6.1, latest](https://github.com/Innovar-Healthcare/bridgelink-container/blob/bl_26.6.1/)
+
+##### Rockylinux9 OpenJDK 17
+
 * [26.6.0](https://github.com/Innovar-Healthcare/bridgelink-container/blob/bl_26.6.0/)
 * [26.3.1](https://github.com/Innovar-Healthcare/bridgelink-container/blob/bl_26.3.1/)
 * [26.3.0](https://github.com/Innovar-Healthcare/bridgelink-container/blob/bl_26.3.0/)
@@ -37,10 +44,13 @@
 * [4.5.4](https://github.com/Innovar-Healthcare/bridgelink-container/blob/bl_4.5.4/Dockerfile)
 * [4.5.3](https://github.com/Innovar-Healthcare/bridgelink-container/blob/bl_4.5.3/Dockerfile)
 
-##### Amazon Corretto Debian 13 — Docker Hardened Image (DHI)
+##### Amazon Corretto 21 Debian 13 — Docker Hardened Image (DHI)
 
 * [26.6.1-dhi, latest-dhi](https://github.com/Innovar-Healthcare/bridgelink-container/blob/main/Dockerfile.dhi)
 * [26.6.1-dhi-slim, latest-dhi-slim](https://github.com/Innovar-Healthcare/bridgelink-container/blob/main/Dockerfile.dhi) — WebAdmin-only (no bundled Swing Administrator)
+
+##### Amazon Corretto 17 Debian 13 — Docker Hardened Image (DHI)
+
 * [26.6.0-dhi](https://github.com/Innovar-Healthcare/bridgelink-container/blob/main/Dockerfile.dhi)
 * [26.6.0-dhi-slim](https://github.com/Innovar-Healthcare/bridgelink-container/blob/main/Dockerfile.dhi) — WebAdmin-only (no bundled Swing Administrator)
 * [26.3.1-dhi](https://github.com/Innovar-Healthcare/bridgelink-container/blob/main/Dockerfile.dhi)
@@ -101,7 +111,7 @@ Key differences from the Rocky image:
 
 | | Rocky image (`Dockerfile`) | Hardened image (`Dockerfile.dhi`) |
 |---|---|---|
-| Base | Rocky Linux 9 + OpenJDK 21 | Amazon Corretto 21 / Debian 13 DHI |
+| Base | Rocky Linux 9 + OpenJDK 21 (17 for releases before 26.6.1) | Amazon Corretto 21 / Debian 13 DHI (Corretto 17 for releases before 26.6.1) |
 | Non-root UID | 1000 | **65532** |
 | Shell / package manager | present | **none** (runtime) |
 | Image tag suffix | *(none)* | `-dhi` |
@@ -143,6 +153,12 @@ public `https://` URL:
   --build-arg BINARY_URL="s3://your-bucket/BridgeLink_unix_26_6_1.tar.gz" \
   --secret id=aws_credentials,src=$HOME/.aws/credentials
 ```
+
+**Java version.** Both Dockerfiles default to Java 21, which BridgeLink 26.6.1 and later require.
+To build a release from before 26.6.1, pass `--build-arg JAVA_MAJOR=17` — those releases were
+published on Java 17, and the weekly `-dhi` rebuild passes the same argument so an older tag keeps
+the JDK it shipped with. The acceptance suite checks the runtime's Java version when
+`EXPECTED_JAVA` is set (see **Test** below).
 
 **WebAdmin-only (slim) variant.** The new web-based BridgeLink Administrator (WebAdmin) replaces the
 legacy Swing desktop client. For deployments that use WebAdmin, the `INCLUDE_ADMIN_CLIENT` build-arg
@@ -204,6 +220,8 @@ shutdown, persistence) with the acceptance suite `test/image-test.sh` — the sa
 ```
 # Hardened (DHI) image — defaults:
 BINARY_URL="<release tarball>" test/image-test.sh              # builds, then tests
+# Also assert the runtime JDK (CI always does; 17 for releases before 26.6.1, 21 after):
+IMAGE=innovarhealthcare/bridgelink:26.3.1-dhi SKIP_BUILD=1 EXPECTED_JAVA=17 test/image-test.sh
 IMAGE=innovarhealthcare/bridgelink:26.6.1-dhi SKIP_BUILD=1 test/image-test.sh   # test an existing image
 
 # Rocky image (UID 1000, shell present -> no-shell check skipped):

@@ -24,6 +24,9 @@ Docker Hardened Image (DHI):
     dhi.io/amazoncorretto:21-debian13       (runtime)
     dhi.io/amazoncorretto:21-debian13-dev   (build stage)
 
+Images for BridgeLink releases before 26.6.1 are built from the Corretto 17
+tags of the same image (dhi.io/amazoncorretto:17-debian13 and -dev).
+
 - Docker's DHI build definitions, patches, and scripts are licensed under the
   Apache License 2.0, which permits building and redistributing derivative
   images. See: https://github.com/docker-hardened-images/catalog
@@ -43,7 +46,8 @@ the non-root user UID 65532. It does not modify the base OS or JDK packages.
 
 --------------------------------------------------------------------------------
 The Rocky Linux image (Dockerfile) is unaffected by the above and is built FROM
-rockylinux:9 with OpenJDK 21 installed via the distribution package manager.
+rockylinux:9 with OpenJDK 21 (OpenJDK 17 for BridgeLink releases before 26.6.1)
+installed via the distribution package manager.
 
 NOTE: attribution wording should be confirmed by Innovar Healthcare legal before
 a DHI-based image is published publicly.

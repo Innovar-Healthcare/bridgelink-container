@@ -37,6 +37,10 @@ on:
       version:
         description: "BridgeLink version to publish (e.g. 26.6.0)"
         required: true
+      java:
+        description: "Java major to build on (21 for 26.6.1 and later; 17 for earlier releases)"
+        required: false
+        default: "21"
       latest:
         description: "Also move the rolling `latest` tag to this version"
         type: boolean
@@ -90,10 +94,17 @@ jobs:
         id: url
         env:
           VERSION: ${{ github.event.inputs.version }}
+          JAVA: ${{ github.event.inputs.java || '21' }}
           RELEASE_BUCKET: ${{ vars.RELEASE_BUCKET }}
         run: |
           set -euo pipefail
           : "${RELEASE_BUCKET:?RELEASE_BUCKET repo variable is unset — set it in Settings > Secrets and variables > Actions}"
+          # Checked here, before anything is built: the value becomes a yum package name inside the
+          # Dockerfile, where a typo fails late with an error that does not name the input.
+          if ! [[ "$JAVA" =~ ^[0-9]+$ ]]; then
+            echo "::error::java must be a bare major version such as 17 or 21, got '$JAVA'." >&2
+            exit 1
+          fi
           VERSION_US="${VERSION//./_}"
           echo "binary_url=s3://${RELEASE_BUCKET}/bridgelink/${VERSION}/official-release/BridgeLink_unix_${VERSION_US}.tar.gz" >> "$GITHUB_OUTPUT"
 
@@ -132,11 +143,16 @@ jobs:
           tags: ${{ env.TEST_IMAGE }}
           build-args: |
             BINARY_URL=${{ steps.url.outputs.binary_url }}
+            JAVA_MAJOR=${{ github.event.inputs.java || '21' }}
           secret-files: |
             aws_credentials=${{ runner.temp }}/aws_credentials
 
       - name: Run acceptance tests
         # Rocky runs as UID 1000 and ships a shell, so the no-shell assertion is skipped for it.
+        # EXPECTED_JAVA proves the runtime is on the JDK this dispatch asked for. Via env, not
+        # spliced into the script, per this file's convention for inputs.
+        env:
+          EXPECTED_JAVA: ${{ github.event.inputs.java || '21' }}
         run: |
           IMAGE="$TEST_IMAGE" SKIP_BUILD=1 \
             DOCKERFILE=Dockerfile EXPECTED_UID=1000 CHECK_NO_SHELL=0 \
@@ -241,6 +257,7 @@ jobs:
           push: ${{ github.event.inputs.push == 'true' }}
           build-args: |
             BINARY_URL=${{ steps.url.outputs.binary_url }}
+            JAVA_MAJOR=${{ github.event.inputs.java || '21' }}
           secret-files: |
             aws_credentials=${{ runner.temp }}/aws_credentials
           tags: ${{ steps.tags.outputs.list }}

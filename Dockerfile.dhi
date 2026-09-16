@@ -8,15 +8,20 @@
 # bootstrap/BridgeLinkBootstrap.java (JDK-only: java.util.zip, java.net.http, file I/O).
 #
 # Base images: Community tier (free) is pulled directly from dhi.io after `docker login dhi.io`.
-# Corretto 21.x is required as of BridgeLink 26.6.1 (embedded Derby aborts on Java 17). The Corretto
-# Debian 13 runtime is nonroot UID 65532, no shell, no package manager; the -dev variant is root with
-# shell + apt. CI needs dhi.io creds as a secret. NOTE: the 21-debian13 tag has not been build-verified
-# here (needs `docker login dhi.io`) — confirm the tag in the catalog before publishing 26.6.1-dhi.
+# The Corretto Debian 13 runtime is nonroot UID 65532, no shell, no package manager; the -dev variant
+# is root with shell + apt. CI needs dhi.io creds as a secret.
 #   https://hub.docker.com/hardened-images/catalog/dhi/amazoncorretto
+#
+# JAVA_MAJOR selects the Corretto line. BridgeLink 26.6.1 and later need 21: the embedded Derby
+# database they ship aborts on 17. Every release before 26.6.1 was published on 17 and is rebuilt
+# with `--build-arg JAVA_MAJOR=17`, so the weekly base-image refresh of an already-released tag never
+# changes the JDK it runs on. Both the 17 and 21 Debian 13 tags exist in the catalog and both have
+# built here.
 # ============================================================
 
-ARG CORRETTO_DEV_IMAGE=dhi.io/amazoncorretto:21-debian13-dev
-ARG CORRETTO_RUNTIME_IMAGE=dhi.io/amazoncorretto:21-debian13
+ARG JAVA_MAJOR=21
+ARG CORRETTO_DEV_IMAGE=dhi.io/amazoncorretto:${JAVA_MAJOR}-debian13-dev
+ARG CORRETTO_RUNTIME_IMAGE=dhi.io/amazoncorretto:${JAVA_MAJOR}-debian13
 
 # ============================================================
 # Stage 1: Builder  (DHI -dev variant: has shell + apt, runs as root)
