@@ -161,6 +161,23 @@ jobs:
               echo "::error::binary_url is required when version is set on a manual dispatch." >&2
               exit 1
             fi
+            # Same guard as the publish workflows: if this version is already maintained, its
+            # pinned JDK wins (an omitted "java" means 17) and a conflicting java input is refused
+            # — a one-off dispatch must never move an already-released tag onto a different JDK.
+            # An unlisted (brand-new) version keeps ROCKY_JAVA (the java input, else DEFAULT_JAVA,
+            # else 21). ROCKY_JAVA feeds both this matrix entry and the rocky_java output below.
+            if [ -n "${MAINTAINED_VERSIONS_RAW:-}" ]; then
+              PINNED_JAVA="$(jq -r --arg v "$INPUT_VERSION" \
+                'map(select(.version==$v)) | if length>0 then (.[0].java // 17 | tostring) else "" end' \
+                <<<"$MAINTAINED_VERSIONS_RAW")"
+              if [ -n "$PINNED_JAVA" ]; then
+                if [ -n "$INPUT_JAVA" ] && [ "$INPUT_JAVA" != "$PINNED_JAVA" ]; then
+                  echo "::error::$INPUT_VERSION is pinned to Java $PINNED_JAVA in MAINTAINED_VERSIONS; refusing to build it on Java $INPUT_JAVA — that would move an already-released tag's JDK." >&2
+                  exit 1
+                fi
+                ROCKY_JAVA="$PINNED_JAVA"
+              fi
+            fi
             LATEST_FLAG="false"
             [ "$INPUT_UPDATE_LATEST" = "true" ] && LATEST_FLAG="true"
             PRIVATE_FLAG="false"
