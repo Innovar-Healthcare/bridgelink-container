@@ -27,11 +27,24 @@
 #                          "private": true publishes that version to the private ECR registry
 #                          INSTEAD of public Docker Hub. Optional; omitted means public, so an
 #                          existing public entry needs no edit.
+#                          "java": 17 or 21 — the JDK the image is built on (Dockerfile.dhi's
+#                          JAVA_MAJOR). Optional; OMITTED MEANS 17, because every entry written
+#                          before this field existed is a release that shipped on 17, and a
+#                          missing field must never move an already-released tag to a new JDK.
+#                          26.6.1 and later need 21 (embedded Derby aborts on 17), so a new entry
+#                          for those must say "java": 21 explicitly — if it does not, the
+#                          acceptance suite fails on the Derby boot and nothing is pushed.
 #     AWS_PUBLISH_ROLE_ARN OIDC role assumed for the ECR push (bridgelink-publish). Assumable from
 #                          the integration branch ONLY, so a private publish cannot be dispatched
 #                          from a feature branch. Only needed once a "private" entry exists.
 #     DEFAULT_VERSION      / DEFAULT_BINARY_URL   single version used only to gate PRs (dhi /
 #                          test-rocky on pull_request) — pin these to the current newest release.
+#     DEFAULT_JAVA         the JDK the PR gate builds that version on. Optional; unset means 21.
+#                          Pin it next to DEFAULT_VERSION: the gate can only prove the build
+#                          honoured its JAVA_MAJOR, not that the JDK was the right one for the
+#                          release, so a 17 release gated on 21 is green without exercising the
+#                          17 path anything ships on. When DEFAULT_VERSION moves to 26.6.1 this
+#                          can stay unset.
 #
 # Multi-version rebuild: the weekly schedule (and a manual dispatch left without a `version` input)
 # rebuilds every entry in MAINTAINED_VERSIONS via a job matrix, so older supported lines keep
@@ -50,6 +63,10 @@ on:
       binary_url:
         description: "One-off: BINARY_URL for the release tarball (s3:// or https://) — required if version is set"
         required: false
+      java:
+        description: "One-off: Java major to build on (21 for 26.6.1 and later; 17 for earlier releases)"
+        required: false
+        default: "21"
       push:
         description: "Push images"
         type: boolean
@@ -95,9 +112,9 @@ concurrency:
 
 jobs:
   # Resolve inputs vs. scheduled-run defaults once, share with downstream jobs. Produces a `matrix`
-  # output (JSON array of {version, binary_url, latest, private}) that the dhi job fans out over:
-  #   - pull_request              -> single entry from DEFAULT_VERSION/DEFAULT_BINARY_URL (PR gate)
-  #   - workflow_dispatch w/version -> single ad hoc entry from the version/binary_url/update_latest inputs
+  # output (JSON array of {version, binary_url, java, latest, private}) that the dhi job fans out over:
+  #   - pull_request              -> single entry from DEFAULT_VERSION/DEFAULT_BINARY_URL/DEFAULT_JAVA (PR gate)
+  #   - workflow_dispatch w/version -> single ad hoc entry from the version/binary_url/java/update_latest inputs
   #   - schedule, or workflow_dispatch w/o version -> every entry in MAINTAINED_VERSIONS
   params:
     runs-on: ubuntu-latest
@@ -106,6 +123,7 @@ jobs:
       push: ${{ steps.p.outputs.push }}
       rocky_version: ${{ steps.p.outputs.rocky_version }}
       rocky_binary_url: ${{ steps.p.outputs.rocky_binary_url }}
+      rocky_java: ${{ steps.p.outputs.rocky_java }}
     steps:
       - id: p
         env:
@@ -115,30 +133,58 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           INPUT_VERSION: ${{ github.event.inputs.version }}
           INPUT_BINARY_URL: ${{ github.event.inputs.binary_url }}
+          INPUT_JAVA: ${{ github.event.inputs.java }}
           INPUT_PUSH: ${{ github.event.inputs.push }}
           INPUT_UPDATE_LATEST: ${{ github.event.inputs.update_latest }}
           INPUT_PRIVATE: ${{ github.event.inputs.private }}
           DEFAULT_VERSION: ${{ vars.DEFAULT_VERSION }}
           DEFAULT_BINARY_URL: ${{ vars.DEFAULT_BINARY_URL }}
+          DEFAULT_JAVA: ${{ vars.DEFAULT_JAVA }}
           MAINTAINED_VERSIONS_RAW: ${{ vars.MAINTAINED_VERSIONS }}
         run: |
           set -euo pipefail
+          # Every matrix entry carries `java` (the JAVA_MAJOR build-arg) so the build and the
+          # acceptance suite's EXPECTED_JAVA assertion always agree on which JDK was meant.
+          # A dispatch names it; the PR gate takes DEFAULT_JAVA (see the header); otherwise the
+          # Dockerfiles' own default (21, the current release line).
+          ROCKY_JAVA="${INPUT_JAVA:-${DEFAULT_JAVA:-21}}"
+          if ! [[ "$ROCKY_JAVA" =~ ^[0-9]+$ ]]; then
+            echo "::error::java must be a bare major version such as 17 or 21, got '$ROCKY_JAVA'." >&2
+            exit 1
+          fi
           if [ "$EVENT_NAME" = "pull_request" ]; then
-            MATRIX=$(jq -nc --arg v "$DEFAULT_VERSION" --arg u "$DEFAULT_BINARY_URL" \
-              '[{version:$v, binary_url:$u, latest:false, private:false}]')
+            MATRIX=$(jq -nc --arg v "$DEFAULT_VERSION" --arg u "$DEFAULT_BINARY_URL" --arg j "$ROCKY_JAVA" \
+              '[{version:$v, binary_url:$u, java:$j, latest:false, private:false}]')
             PUSH="false"
           elif [ "$EVENT_NAME" = "workflow_dispatch" ] && [ -n "$INPUT_VERSION" ]; then
             if [ -z "$INPUT_BINARY_URL" ]; then
               echo "::error::binary_url is required when version is set on a manual dispatch." >&2
               exit 1
             fi
+            # Same guard as the publish workflows: if this version is already maintained, its
+            # pinned JDK wins (an omitted "java" means 17) and a conflicting java input is refused
+            # — a one-off dispatch must never move an already-released tag onto a different JDK.
+            # An unlisted (brand-new) version keeps ROCKY_JAVA (the java input, else DEFAULT_JAVA,
+            # else 21). ROCKY_JAVA feeds both this matrix entry and the rocky_java output below.
+            if [ -n "${MAINTAINED_VERSIONS_RAW:-}" ]; then
+              PINNED_JAVA="$(jq -r --arg v "$INPUT_VERSION" \
+                'map(select(.version==$v)) | if length>0 then (.[0].java // 17 | tostring) else "" end' \
+                <<<"$MAINTAINED_VERSIONS_RAW")"
+              if [ -n "$PINNED_JAVA" ]; then
+                if [ -n "$INPUT_JAVA" ] && [ "$INPUT_JAVA" != "$PINNED_JAVA" ]; then
+                  echo "::error::$INPUT_VERSION is pinned to Java $PINNED_JAVA in MAINTAINED_VERSIONS; refusing to build it on Java $INPUT_JAVA — that would move an already-released tag's JDK." >&2
+                  exit 1
+                fi
+                ROCKY_JAVA="$PINNED_JAVA"
+              fi
+            fi
             LATEST_FLAG="false"
             [ "$INPUT_UPDATE_LATEST" = "true" ] && LATEST_FLAG="true"
             PRIVATE_FLAG="false"
             [ "$INPUT_PRIVATE" = "true" ] && PRIVATE_FLAG="true"
-            MATRIX=$(jq -nc --arg v "$INPUT_VERSION" --arg u "$INPUT_BINARY_URL" \
+            MATRIX=$(jq -nc --arg v "$INPUT_VERSION" --arg u "$INPUT_BINARY_URL" --arg j "$ROCKY_JAVA" \
               --argjson l "$LATEST_FLAG" --argjson p "$PRIVATE_FLAG" \
-              '[{version:$v, binary_url:$u, latest:$l, private:$p}]')
+              '[{version:$v, binary_url:$u, java:$j, latest:$l, private:$p}]')
             PUSH="$INPUT_PUSH"
           else
             # Scheduled weekly rebuild, or a manual dispatch with no version override: rebuild every
@@ -165,7 +211,20 @@ jobs:
                 <<<"$MAINTAINED_VERSIONS_RAW" >&2 || true
               exit 1
             fi
-            MATRIX=$(jq -c 'map(.private = (.private // false))' <<<"$MAINTAINED_VERSIONS_RAW")
+            # `java`, when present, must be a bare major version (number or numeric string). It is
+            # normalised to a string because it is spliced into a build-arg and compared as text
+            # by the acceptance suite. An OMITTED field means 17 — see the header: every entry that
+            # predates the field is a Java 17 release, and the weekly rebuild must never move a
+            # released tag to a different JDK just because a field was not filled in.
+            if ! jq -e 'all(.[]; (has("java") | not) or ((.java | tostring) | test("^[0-9]+$")))' \
+                 <<<"$MAINTAINED_VERSIONS_RAW" >/dev/null; then
+              echo "::error::MAINTAINED_VERSIONS has a non-numeric \"java\" value. Use 17 or 21, or omit the key (which means 17)." >&2
+              jq -c '.[] | select(has("java") and ((.java | tostring) | test("^[0-9]+$") | not)) | {version, java}' \
+                <<<"$MAINTAINED_VERSIONS_RAW" >&2 || true
+              exit 1
+            fi
+            MATRIX=$(jq -c 'map(.private = (.private // false) | .java = ((.java // 17) | tostring))' \
+              <<<"$MAINTAINED_VERSIONS_RAW")
             if [ "$(jq 'length' <<<"$MATRIX")" -eq 0 ]; then
               echo "::error::MAINTAINED_VERSIONS repo variable parsed to an empty array — nothing to rebuild." >&2
               exit 1
@@ -176,6 +235,7 @@ jobs:
           echo "push=$PUSH" >> "$GITHUB_OUTPUT"
           echo "rocky_version=${INPUT_VERSION:-$DEFAULT_VERSION}" >> "$GITHUB_OUTPUT"
           echo "rocky_binary_url=${INPUT_BINARY_URL:-$DEFAULT_BINARY_URL}" >> "$GITHUB_OUTPUT"
+          echo "rocky_java=$ROCKY_JAVA" >> "$GITHUB_OUTPUT"
 
   # Test + publish the hardened (DHI) image, one job run per matrix version (see params for what
   # populates the matrix). Test and publish are steps of the SAME job run so a failure in one
@@ -225,6 +285,7 @@ jobs:
           tags: innovarhealthcare/bridgelink:dhi-test-${{ matrix.version }}
           build-args: |
             BINARY_URL=${{ matrix.binary_url }}
+            JAVA_MAJOR=${{ matrix.java }}
           # Only pass AWS creds on trusted (non-PR) events — needed for s3:// tarballs. On
           # pull_request the build uses the public-https default, so pass empty to avoid exposing
           # the secret to PR-branch code.
@@ -232,7 +293,10 @@ jobs:
             aws_credentials=${{ github.event_name != 'pull_request' && secrets.AWS_CREDENTIALS || '' }}
       - name: Run acceptance tests
         # DHI defaults (EXPECTED_UID=65532, CHECK_NO_SHELL=1, DOCKERFILE=Dockerfile.dhi) are implicit.
-        run: IMAGE=innovarhealthcare/bridgelink:dhi-test-${{ matrix.version }} SKIP_BUILD=1 bash test/image-test.sh
+        # EXPECTED_JAVA makes the suite prove the runtime is on the JDK this matrix entry asked for.
+        run: |
+          IMAGE=innovarhealthcare/bridgelink:dhi-test-${{ matrix.version }} SKIP_BUILD=1 \
+            EXPECTED_JAVA=${{ matrix.java }} bash test/image-test.sh
 
       # Gate the WebAdmin-only (slim) variant too: build it with the Swing Administrator stripped and
       # run the same suite plus the strip assertion (EXPECT_NO_ADMIN_CLIENT). Proves the server still
@@ -247,13 +311,14 @@ jobs:
           tags: innovarhealthcare/bridgelink:dhi-slim-test-${{ matrix.version }}
           build-args: |
             BINARY_URL=${{ matrix.binary_url }}
+            JAVA_MAJOR=${{ matrix.java }}
             INCLUDE_ADMIN_CLIENT=false
           secrets: |
             aws_credentials=${{ github.event_name != 'pull_request' && secrets.AWS_CREDENTIALS || '' }}
       - name: Run acceptance tests (slim)
         run: |
           IMAGE=innovarhealthcare/bridgelink:dhi-slim-test-${{ matrix.version }} SKIP_BUILD=1 \
-            EXPECT_NO_ADMIN_CLIENT=1 bash test/image-test.sh
+            EXPECT_NO_ADMIN_CLIENT=1 EXPECTED_JAVA=${{ matrix.java }} bash test/image-test.sh
 
       # --- Vulnerability scan (IRT-1390) -----------------------------------------------------------
       # Full report (all severities, incl. unfixed) -> SARIF -> Security tab. Non-failing so the gate
@@ -385,6 +450,7 @@ jobs:
           push: ${{ needs.params.outputs.push == 'true' }}
           build-args: |
             BINARY_URL=${{ matrix.binary_url }}
+            JAVA_MAJOR=${{ matrix.java }}
           # Mounted at /root/.aws/credentials for s3:// pulls (Dockerfile.dhi: --mount=type=secret,id=aws_credentials).
           secrets: |
             aws_credentials=${{ secrets.AWS_CREDENTIALS }}
@@ -402,6 +468,7 @@ jobs:
           push: ${{ needs.params.outputs.push == 'true' }}
           build-args: |
             BINARY_URL=${{ matrix.binary_url }}
+            JAVA_MAJOR=${{ matrix.java }}
             INCLUDE_ADMIN_CLIENT=false
           secrets: |
             aws_credentials=${{ secrets.AWS_CREDENTIALS }}
@@ -460,6 +527,7 @@ jobs:
           tags: innovarhealthcare/bridgelink:rocky-test
           build-args: |
             BINARY_URL=${{ needs.params.outputs.rocky_binary_url }}
+            JAVA_MAJOR=${{ needs.params.outputs.rocky_java }}
           # Only pass AWS creds on trusted (non-PR) events — see the dhi job's test steps for the rationale.
           secrets: |
             aws_credentials=${{ github.event_name != 'pull_request' && secrets.AWS_CREDENTIALS || '' }}
@@ -468,6 +536,7 @@ jobs:
         run: |
           IMAGE=innovarhealthcare/bridgelink:rocky-test SKIP_BUILD=1 \
             DOCKERFILE=Dockerfile EXPECTED_UID=1000 CHECK_NO_SHELL=0 \
+            EXPECTED_JAVA=${{ needs.params.outputs.rocky_java }} \
             bash test/image-test.sh
       - name: Trivy scan (SARIF, full report) — Rocky
         uses: aquasecurity/trivy-action@v0.36.0

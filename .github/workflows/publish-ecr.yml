@@ -37,6 +37,9 @@ on:
       version:
         description: "BridgeLink version to publish (e.g. 26.6.0)"
         required: true
+      java:
+        description: "Java major override. Optional — a version in MAINTAINED_VERSIONS resolves to its pinned JDK; an unlisted new release defaults to 21. Set only to publish a brand-new release on a non-default JDK."
+        required: false
       latest:
         description: "Also move the rolling `latest` tag to this version"
         type: boolean
@@ -86,16 +89,47 @@ jobs:
       # RELEASE_BUCKET is a repo variable rather than a literal. Guarded rather than defaulted:
       # an unset variable would otherwise build `s3:///bridgelink/...`, which fails deep inside
       # the Docker build with an error that does not name the cause.
-      - name: Compute BINARY_URL
+      - name: Compute BINARY_URL and JDK
         id: url
         env:
           VERSION: ${{ github.event.inputs.version }}
+          JAVA_INPUT: ${{ github.event.inputs.java }}
           RELEASE_BUCKET: ${{ vars.RELEASE_BUCKET }}
+          MAINTAINED_VERSIONS_RAW: ${{ vars.MAINTAINED_VERSIONS }}
         run: |
           set -euo pipefail
           : "${RELEASE_BUCKET:?RELEASE_BUCKET repo variable is unset — set it in Settings > Secrets and variables > Actions}"
+
+          # Resolve the JDK from MAINTAINED_VERSIONS — the same source of truth the weekly rebuild
+          # uses — so a manual publish can never move an already-released tag onto a different JDK.
+          # A listed version's pinned java wins (an omitted field there means 17); an explicit input
+          # that disagrees is refused, not silently honoured. A version not yet listed (a brand-new
+          # release) takes the input, or 21 by default.
+          PINNED=""
+          if [ -n "${MAINTAINED_VERSIONS_RAW:-}" ]; then
+            PINNED="$(jq -r --arg v "$VERSION" \
+              'map(select(.version==$v)) | if length>0 then (.[0].java // 17 | tostring) else "" end' \
+              <<<"$MAINTAINED_VERSIONS_RAW")"
+          fi
+          if [ -n "$PINNED" ]; then
+            if [ -n "$JAVA_INPUT" ] && [ "$JAVA_INPUT" != "$PINNED" ]; then
+              echo "::error::$VERSION is pinned to Java $PINNED in MAINTAINED_VERSIONS; refusing to publish it on Java $JAVA_INPUT — that would move an already-released tag's JDK." >&2
+              exit 1
+            fi
+            JAVA="$PINNED"
+          else
+            JAVA="${JAVA_INPUT:-21}"
+          fi
+          # The value becomes a yum package name inside the Dockerfile, where a typo fails late with
+          # an error that does not name the input; validate it here.
+          if ! [[ "$JAVA" =~ ^[0-9]+$ ]]; then
+            echo "::error::java must be a bare major version such as 17 or 21, got '$JAVA'." >&2
+            exit 1
+          fi
+
           VERSION_US="${VERSION//./_}"
           echo "binary_url=s3://${RELEASE_BUCKET}/bridgelink/${VERSION}/official-release/BridgeLink_unix_${VERSION_US}.tar.gz" >> "$GITHUB_OUTPUT"
+          echo "java=$JAVA" >> "$GITHUB_OUTPUT"
 
       # The Dockerfile fetches the binary during the build via a mounted aws_credentials secret.
       # region is the BUCKET's region, not the session's — see the env block above.
@@ -132,11 +166,16 @@ jobs:
           tags: ${{ env.TEST_IMAGE }}
           build-args: |
             BINARY_URL=${{ steps.url.outputs.binary_url }}
+            JAVA_MAJOR=${{ steps.url.outputs.java }}
           secret-files: |
             aws_credentials=${{ runner.temp }}/aws_credentials
 
       - name: Run acceptance tests
         # Rocky runs as UID 1000 and ships a shell, so the no-shell assertion is skipped for it.
+        # EXPECTED_JAVA proves the runtime is on the JDK resolved above. Via env, not spliced into
+        # the script, per this file's convention for inputs.
+        env:
+          EXPECTED_JAVA: ${{ steps.url.outputs.java }}
         run: |
           IMAGE="$TEST_IMAGE" SKIP_BUILD=1 \
             DOCKERFILE=Dockerfile EXPECTED_UID=1000 CHECK_NO_SHELL=0 \
@@ -241,6 +280,7 @@ jobs:
           push: ${{ github.event.inputs.push == 'true' }}
           build-args: |
             BINARY_URL=${{ steps.url.outputs.binary_url }}
+            JAVA_MAJOR=${{ steps.url.outputs.java }}
           secret-files: |
             aws_credentials=${{ runner.temp }}/aws_credentials
           tags: ${{ steps.tags.outputs.list }}

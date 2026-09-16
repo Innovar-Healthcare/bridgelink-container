@@ -25,6 +25,9 @@ on:
       binary_url:
         description: "Override the release tarball URL (default: public S3 download for the version)"
         required: false
+      java:
+        description: "Java major override. Optional — a version in MAINTAINED_VERSIONS resolves to its pinned JDK; an unlisted new release defaults to 21. Set only to publish a brand-new release on a non-default JDK."
+        required: false
       latest:
         description: "Also move the rolling `latest` tag to this version"
         type: boolean
@@ -49,18 +52,50 @@ jobs:
       - uses: docker/setup-buildx-action@v3
 
       # Default to the public download URL for this version; honor an explicit override.
-      - name: Compute BINARY_URL
+      - name: Compute BINARY_URL and JDK
         id: url
+        env:
+          JAVA_INPUT: ${{ github.event.inputs.java }}
+          MAINTAINED_VERSIONS_RAW: ${{ vars.MAINTAINED_VERSIONS }}
         run: |
           set -euo pipefail
+          VERSION="${{ github.event.inputs.version }}"
+
+          # Resolve the JDK from MAINTAINED_VERSIONS — the same source of truth the weekly rebuild
+          # uses — so a manual publish can never move an already-released tag onto a different JDK.
+          # A listed version's pinned java wins (an omitted field there means 17); an explicit input
+          # that disagrees is refused, not silently honoured. A version not yet listed (a brand-new
+          # release) takes the input, or 21 by default.
+          PINNED=""
+          if [ -n "${MAINTAINED_VERSIONS_RAW:-}" ]; then
+            PINNED="$(jq -r --arg v "$VERSION" \
+              'map(select(.version==$v)) | if length>0 then (.[0].java // 17 | tostring) else "" end' \
+              <<<"$MAINTAINED_VERSIONS_RAW")"
+          fi
+          if [ -n "$PINNED" ]; then
+            if [ -n "$JAVA_INPUT" ] && [ "$JAVA_INPUT" != "$PINNED" ]; then
+              echo "::error::$VERSION is pinned to Java $PINNED in MAINTAINED_VERSIONS; refusing to publish it on Java $JAVA_INPUT — that would move an already-released tag's JDK." >&2
+              exit 1
+            fi
+            JAVA="$PINNED"
+          else
+            JAVA="${JAVA_INPUT:-21}"
+          fi
+          # The value becomes a yum package name inside the Dockerfile, where a typo fails late with
+          # an error that does not name the input; validate it here.
+          if ! [[ "$JAVA" =~ ^[0-9]+$ ]]; then
+            echo "::error::java must be a bare major version such as 17 or 21, got '$JAVA'." >&2
+            exit 1
+          fi
+
           BINARY_URL="${{ github.event.inputs.binary_url }}"
           if [ -z "$BINARY_URL" ]; then
-            VERSION="${{ github.event.inputs.version }}"
             VERSION_US="${VERSION//./_}"
             BINARY_URL="https://bridgelink-downloads.s3.us-east-2.amazonaws.com/bridgelink-server/${VERSION}/linux/BridgeLink_unix_${VERSION_US}.tar.gz"
           fi
           echo "binary_url=$BINARY_URL" >> "$GITHUB_OUTPUT"
-          echo "Using BINARY_URL=$BINARY_URL"
+          echo "java=$JAVA" >> "$GITHUB_OUTPUT"
+          echo "Using BINARY_URL=$BINARY_URL JAVA_MAJOR=$JAVA"
 
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
@@ -88,4 +123,5 @@ jobs:
           push: true
           build-args: |
             BINARY_URL=${{ steps.url.outputs.binary_url }}
+            JAVA_MAJOR=${{ steps.url.outputs.java }}
           tags: ${{ steps.tags.outputs.list }}

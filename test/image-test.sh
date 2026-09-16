@@ -11,14 +11,21 @@
 #   SKIP_BUILD      1 = test an existing IMAGE instead of building
 #   EXPECT_NO_ADMIN_CLIENT  1 = assert the Swing Administrator (client-lib, public_html) is absent
 #                           (WebAdmin-only image built with INCLUDE_ADMIN_CLIENT=false); 0 = skip
+#   EXPECTED_JAVA   Java major the runtime must report (e.g. 17 or 21); empty = skip. CI passes the
+#                   JAVA_MAJOR it built with, so a rebuild of an old release proves it stayed on 17.
+#   JAVA_MAJOR      when building (SKIP_BUILD!=1): the JDK to build on (Dockerfile default 21).
+#                   Set it together with EXPECTED_JAVA when building a pre-26.6.1 release.
 #
 # Usage:
 #   # DHI (defaults):
-#   BINARY_URL="https://.../BridgeLink_unix_26_3_1.tar.gz" test/image-test.sh
-#   IMAGE=innovarhealthcare/bridgelink:26.3.1-dhi SKIP_BUILD=1 test/image-test.sh
+#   BINARY_URL="https://.../BridgeLink_unix_26_6_1.tar.gz" test/image-test.sh
+#   IMAGE=innovarhealthcare/bridgelink:26.6.1-dhi SKIP_BUILD=1 test/image-test.sh
 #   # Rocky:
 #   BINARY_URL="https://.../..." IMAGE=innovarhealthcare/bridgelink:rocky-test \
 #     DOCKERFILE=Dockerfile EXPECTED_UID=1000 CHECK_NO_SHELL=0 test/image-test.sh
+#   # A pre-26.6.1 release, asserting it is on Java 17 (existing image, then build-and-test):
+#   IMAGE=innovarhealthcare/bridgelink:26.3.1-dhi SKIP_BUILD=1 EXPECTED_JAVA=17 test/image-test.sh
+#   BINARY_URL="https://.../BridgeLink_unix_26_3_1.tar.gz" JAVA_MAJOR=17 EXPECTED_JAVA=17 test/image-test.sh
 #
 # Requires: docker (with buildx), python3, curl. Building the DHI image needs `docker login dhi.io`.
 set -u
@@ -155,6 +162,7 @@ if [ "$SKIP_BUILD" != "1" ]; then
   : "${BINARY_URL:?set BINARY_URL to build, or set SKIP_BUILD=1 to test an existing IMAGE}"
   docker build -f "$REPO_ROOT/$DOCKERFILE" --load \
     --build-arg BINARY_URL="$BINARY_URL" \
+    ${JAVA_MAJOR:+--build-arg JAVA_MAJOR=$JAVA_MAJOR} \
     ${AWS_CREDENTIALS_FILE:+--secret id=aws_credentials,src=$AWS_CREDENTIALS_FILE} \
     -t "$IMAGE" "$REPO_ROOT" || { echo "BUILD FAILED"; exit 1; }
 fi
@@ -213,6 +221,17 @@ if [ "${EXPECT_NO_ADMIN_CLIENT:-0}" = "1" ]; then
   else
     ok "client-lib and public_html absent"
   fi
+fi
+
+# ---- 2c. Runtime JDK major matches the JAVA_MAJOR the image was built with ----------------------
+# Releases before 26.6.1 stay on Java 17 while 26.6.1+ need 21, and the weekly rebuild republishes
+# both from the same Dockerfile. This is the assertion that a rebuilt old tag did not silently move.
+# `java` is resolved via the image's own PATH, so it works for the no-shell DHI runtime too.
+if [ -n "${EXPECTED_JAVA:-}" ]; then
+  info "2c. Runtime JDK major $EXPECTED_JAVA"
+  JV="$(docker run --rm --entrypoint java "$IMAGE" -XshowSettings:properties -version 2>&1 \
+        | sed -n 's/^ *java\.specification\.version = //p' | tr -d '[:space:]')"
+  [ "$JV" = "$EXPECTED_JAVA" ] && ok "runtime reports Java $JV" || bad "runtime reports Java '${JV:-?}' (expected $EXPECTED_JAVA)"
 fi
 
 # ---- 3. Boot (Derby) + config injection -------------------------------------------------------
@@ -491,7 +510,7 @@ if docker inspect bl-pg --format '{{.State.Running}}' 2>/dev/null | grep -q true
       last_health_output bl-pg | sed 's/^/    last health output: /'
     fi
 
-    # jcmd is present in the Rocky runtime (java-17-openjdk-devel) but is not guaranteed in the
+    # jcmd is present in the Rocky runtime (java-21-openjdk-devel) but is not guaranteed in the
     # hardened one, so the thread measurements are gated rather than silently returning nothing.
     T0=""; S0=""
     if [ "$CHECK_NO_SHELL" = "0" ]; then

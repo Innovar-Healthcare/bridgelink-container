@@ -1,7 +1,14 @@
+# Java major version to install in both stages. BridgeLink 26.6.1 and later need 21: the embedded
+# Derby database they ship aborts on 17. Every release before 26.6.1 was published on 17 and is
+# rebuilt with `--build-arg JAVA_MAJOR=17`, so a rebuild of an already-released tag never changes
+# the JDK it runs on. Declared before the first FROM so both stages see the same value.
+ARG JAVA_MAJOR=21
+
 # ============================================================
 # Stage 1: Builder
 # ============================================================
 FROM rockylinux:9 AS builder
+ARG JAVA_MAJOR
 
 # Update and install system tools and language support
 RUN yum update -y && \
@@ -12,9 +19,9 @@ ENV LANG=en_US.UTF-8
 ENV LANGUAGE=en_US:en
 ENV LC_ALL=en_US.UTF-8
 
-# Install OpenJDK 17 and set JAVA_HOME
-RUN yum -y install java-17-openjdk java-17-openjdk-devel
-ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk
+# Install OpenJDK and set JAVA_HOME (see the JAVA_MAJOR note at the top of this file)
+RUN yum -y install java-${JAVA_MAJOR}-openjdk java-${JAVA_MAJOR}-openjdk-devel
+ENV JAVA_HOME=/usr/lib/jvm/java-${JAVA_MAJOR}-openjdk
 ENV PATH=$JAVA_HOME/bin:$PATH
 
 # Install AWS CLI (multi-arch: detects amd64/arm64)
@@ -81,12 +88,13 @@ RUN chmod 755 /opt/scripts/entrypoint.sh && \
 # Stage 2: Runtime
 # ============================================================
 FROM rockylinux:9 AS final
+ARG JAVA_MAJOR
 
 # Patch base OS packages (the base image ships stale packages; without this the runtime image keeps
 # them — the builder stage's update does not carry over across the FROM). Then install runtime deps
 # and locale support. Keeps the Trivy OS scan (IRT-1390) green on genuinely-patched packages.
 RUN yum update -y && \
-    yum install -y java-17-openjdk java-17-openjdk-devel python3 glibc-langpack-en && \
+    yum install -y java-${JAVA_MAJOR}-openjdk java-${JAVA_MAJOR}-openjdk-devel python3 glibc-langpack-en && \
     yum clean all
 
 # Set UTF-8 locale environment variables
@@ -95,7 +103,7 @@ ENV LANGUAGE=en_US:en
 ENV LC_ALL=en_US.UTF-8
 
 # Set Java environment
-ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk
+ENV JAVA_HOME=/usr/lib/jvm/java-${JAVA_MAJOR}-openjdk
 ENV PATH=$JAVA_HOME/bin:$PATH
 
 # Recreate the bridgelink user (ensuring the same UID as in the builder)
