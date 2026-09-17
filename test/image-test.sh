@@ -15,6 +15,14 @@
 #                   JAVA_MAJOR it built with, so a rebuild of an old release proves it stayed on 17.
 #   JAVA_MAJOR      when building (SKIP_BUILD!=1): the JDK to build on (Dockerfile default 21).
 #                   Set it together with EXPECTED_JAVA when building a pre-26.6.1 release.
+#   DEFAULT_DB      backend for every container that does not name one itself: derby (default) or
+#                   postgres. Set postgres for an image whose bundled Derby cannot run on its JDK
+#                   (a 26.6.1-or-later release built on Java 17) — the server exits at startup on
+#                   the shipped Derby default there, so 13 of the 15 containers below would fail for
+#                   a reason that is not a defect. In that mode the suite starts its own postgres
+#                   and gives each container its own database on it.
+#   EXPECT_DERBY_EXIT  1 = additionally assert that the shipped Derby default is REFUSED on this
+#                   image (test 3b). Pairs with DEFAULT_DB=postgres; default 0.
 #
 # Usage:
 #   # DHI (defaults):
@@ -26,6 +34,9 @@
 #   # A pre-26.6.1 release, asserting it is on Java 17 (existing image, then build-and-test):
 #   IMAGE=innovarhealthcare/bridgelink:26.3.1-dhi SKIP_BUILD=1 EXPECTED_JAVA=17 test/image-test.sh
 #   BINARY_URL="https://.../BridgeLink_unix_26_3_1.tar.gz" JAVA_MAJOR=17 EXPECTED_JAVA=17 test/image-test.sh
+#   # A 26.6.1-or-later release built on Java 17 (no usable embedded Derby):
+#   IMAGE=innovarhealthcare/bridgelink:26.6.1-dhi-jdk17 SKIP_BUILD=1 EXPECTED_JAVA=17 \
+#     DEFAULT_DB=postgres EXPECT_DERBY_EXIT=1 test/image-test.sh
 #
 # Requires: docker (with buildx), python3, curl. Building the DHI image needs `docker login dhi.io`.
 set -u
@@ -35,6 +46,17 @@ SKIP_BUILD="${SKIP_BUILD:-0}"
 DOCKERFILE="${DOCKERFILE:-Dockerfile.dhi}"
 EXPECTED_UID="${EXPECTED_UID:-65532}"
 CHECK_NO_SHELL="${CHECK_NO_SHELL:-1}"
+DEFAULT_DB="${DEFAULT_DB:-derby}"
+EXPECT_DERBY_EXIT="${EXPECT_DERBY_EXIT:-0}"
+# Fixture for the default-backend containers in DEFAULT_DB=postgres mode. Deliberately NOT the `pg`
+# fixture test 6 starts: test 6c stops that one to prove the healthcheck's behaviour during a
+# database outage and never restarts it, so anything sharing it would lose its backend mid-suite.
+PGDEF="pgdef"
+PGUSER="bridgelinktest"
+PGPASS="bridgelinktest"
+# First boot against a fresh external database is slower than against embedded Derby (test 6 already
+# allows 120s for exactly that). Raised in postgres mode below; 90 keeps the derby path unchanged.
+BOOT_TIMEOUT=90
 NET="bl-test-net-$$"
 WORK="$(mktemp -d)"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -56,7 +78,53 @@ cleanup() {
 }
 CIDS=()
 trap cleanup EXIT
-run() { local name="$1"; shift; CIDS+=("$name"); docker run -d --name "$name" "$@" "$IMAGE" >/dev/null; }
+
+# Start a BridgeLink container. In DEFAULT_DB=postgres mode, any container that does not name its
+# own MP_DATABASE is pointed at the shared $PGDEF fixture instead of the image's embedded Derby
+# default, and joined to $NET so it can reach it.
+#
+# Each container gets its OWN database on that one instance. A BridgeLink server takes ownership of
+# its schema on first boot, and up to eleven of them are alive at once here (bl-boot survives until
+# test 7), so a single shared database would mean concurrent first-boot DDL and shared configuration
+# and channel state — the servers would fight rather than the tests failing cleanly. The name is
+# derived from the container name, so a `docker restart` (tests 6c2 and 8) reattaches to the same
+# database and the persistence assertions still mean what they say.
+#
+# ORDERING NOTE, load-bearing for test 5b: that test serves a CUSTOM_PROPERTIES file captured from
+# another container, which in this mode carries that container's database URL. It is safe only
+# because the bootstrap downloads CUSTOM_PROPERTIES *before* applying MP_ env vars
+# (BridgeLinkBootstrap.java main(); scripts/entrypoint.sh does the same), so the injection below
+# wins. Reversing that order would silently put two servers on one database.
+run() {
+  local name="$1"; shift
+  CIDS+=("$name")
+  local -a extra=()
+  if [ "$DEFAULT_DB" = "postgres" ]; then
+    local a has_net=0 has_db=0
+    for a in "$@"; do
+      case "$a" in
+        --network|--network=*) has_net=1 ;;
+        MP_DATABASE=*)         has_db=1 ;;
+      esac
+    done
+    if [ "$has_db" = "0" ]; then
+      local db
+      db="bl_$(printf '%s' "$name" | tr -c '[:alnum:]' '_')"
+      docker exec "$PGDEF" psql -U "$PGUSER" -d postgres -c "CREATE DATABASE $db" >/dev/null 2>&1 || true
+      [ "$has_net" = "0" ] && extra+=(--network "$NET")
+      # max-connections is capped well below the pool default: eleven servers at the stock size
+      # would exhaust postgres' connection slots, which fails as an unrelated-looking boot timeout.
+      extra+=(-e MP_DATABASE=postgres
+              -e "MP_DATABASE_URL=jdbc:postgresql://$PGDEF:5432/$db"
+              -e "MP_DATABASE_USERNAME=$PGUSER"
+              -e "MP_DATABASE_PASSWORD=$PGPASS"
+              -e MP_DATABASE_MAX__CONNECTIONS=8)
+    fi
+  fi
+  # ${extra[@]+...}: empty-array expansion is an "unbound variable" error under set -u on bash 3.2
+  # (macOS /bin/bash) — same guard as cleanup() above.
+  docker run -d --name "$name" ${extra[@]+"${extra[@]}"} "$@" "$IMAGE" >/dev/null
+}
 
 # vmoptions assertions differ by launcher: the DHI bootstrap echoes the assembled JVM command line to
 # stdout (so we grep the log — this also exercises the bootstrap's add-opens dedup logic); the Rocky
@@ -95,9 +163,26 @@ wait_for_fixture() {
   return 1
 }
 
+# Wait until a postgres fixture accepts connections. wait_for_fixture above probes with the curl
+# inside nginx:alpine; postgres:16-alpine has no curl, but does ship pg_isready.
+#
+# -h localhost is load-bearing: the official image runs a TEMPORARY server during initdb with
+# listen_addresses='', then shuts it down and starts the real one. A socket probe answers during
+# that window, so without -h this returns ready, the CREATE DATABASE in run() lands in the restart
+# gap, and the first server boots against a database that does not exist. TCP is refused until the
+# final server is up, which is the state actually being waited for.
+wait_for_pg() {
+  local name="$1" timeout="${2:-90}" i=0
+  while [ "$i" -lt "$timeout" ]; do
+    docker exec "$name" pg_isready -h localhost -U "$PGUSER" -d postgres >/dev/null 2>&1 && return 0
+    sleep 1; i=$((i+1))
+  done
+  return 1
+}
+
 # Poll a container's logs for a pattern (default: successful start). Returns non-zero on timeout.
 wait_for_log() {
-  local name="$1" pattern="${2:-server successfully started}" timeout="${3:-90}" i=0
+  local name="$1" pattern="${2:-server successfully started}" timeout="${3:-$BOOT_TIMEOUT}" i=0
   while [ "$i" -lt "$timeout" ]; do
     docker logs "$name" 2>&1 | grep -qE "$pattern" && return 0
     sleep 1; i=$((i+1))
@@ -234,26 +319,80 @@ if [ -n "${EXPECTED_JAVA:-}" ]; then
   [ "$JV" = "$EXPECTED_JAVA" ] && ok "runtime reports Java $JV" || bad "runtime reports Java '${JV:-?}' (expected $EXPECTED_JAVA)"
 fi
 
-# ---- 3. Boot (Derby) + config injection -------------------------------------------------------
-info "3. Boot on Derby + MP_/SERVER_ID/MP_VMOPTIONS injection"
-run bl-derby -p 8443 \
+# ---- 3-pre. Shared external database (DEFAULT_DB=postgres only) --------------------------------
+# Started before test 3 because from here on every default-backend container needs it. See run()
+# for why each container gets its own database, and the PGDEF comment for why this is not test 6's
+# `pg` fixture.
+if [ "$DEFAULT_DB" = "postgres" ]; then
+  info "3-pre. Shared external database for the default-backend containers"
+  # max_connections is raised because up to eleven servers are alive at once; the per-server pool is
+  # capped in run() as well. Both are needed — either alone still runs out.
+  docker run -d --name "$PGDEF" --network "$NET" \
+    -e POSTGRES_USER="$PGUSER" -e POSTGRES_PASSWORD="$PGPASS" -e POSTGRES_DB=postgres \
+    postgres:16-alpine -c max_connections=300 >/dev/null && CIDS+=("$PGDEF")
+  if wait_for_pg "$PGDEF" 90; then
+    ok "shared postgres fixture ready"
+  else
+    bad "shared postgres fixture never became ready"
+    docker logs "$PGDEF" 2>&1 | tail -20
+  fi
+  BOOT_TIMEOUT=150
+fi
+
+# ---- 3b. The shipped Derby default must be refused ---------------------------------------------
+# Only for an image whose bundled Derby cannot run on its JDK. This is the contract the image is
+# published under, so it is asserted rather than assumed: the server must REFUSE to start, loudly
+# and at startup, instead of booting and failing later somewhere harder to diagnose.
+#
+# The container is given no database configuration at all, which is what a customer who pulls the
+# image and runs it with no environment gets.
+if [ "$EXPECT_DERBY_EXIT" = "1" ]; then
+  info "3b. Shipped Derby default is refused on this JDK"
+  CIDS+=(bl-preflight)
+  docker run -d --name bl-preflight "$IMAGE" >/dev/null
+  PF_STATE="running"; PF_I=0
+  while [ "$PF_I" -lt 90 ]; do
+    PF_STATE="$(docker inspect bl-preflight --format '{{.State.Status}}' 2>/dev/null || echo unknown)"
+    [ "$PF_STATE" != "running" ] && break
+    sleep 1; PF_I=$((PF_I+1))
+  done
+  PF_EC="$(docker inspect bl-preflight --format '{{.State.ExitCode}}' 2>/dev/null || echo '?')"
+  # Grep a stable fragment, not the whole sentence: the tail of the message is operator advice and
+  # may be reworded upstream without the contract changing.
+  PF_MSG=0
+  docker logs bl-preflight 2>&1 | grep -q 'embedded Derby requires Java 21+' && PF_MSG=1
+  if [ "$PF_STATE" != "running" ] && [ "$PF_EC" = "1" ] && [ "$PF_MSG" = "1" ]; then
+    ok "refused the Derby default (exit 1, documented message)"
+  else
+    bad "the shipped Derby default was not refused as documented (state=$PF_STATE exit=$PF_EC message=$PF_MSG)"
+    echo "    this image's bundled Derby cannot run on its JDK, so a container started with no"
+    echo "    database configuration must exit 1 at startup — that refusal is the published contract"
+    docker logs bl-preflight 2>&1 | tail -20
+  fi
+fi
+
+# ---- 3. Boot + config injection ----------------------------------------------------------------
+# Backend depends on DEFAULT_DB; every assertion here is backend-independent (server.id file, a
+# mirth.properties key, and two vmoptions properties).
+info "3. Boot on $DEFAULT_DB + MP_/SERVER_ID/MP_VMOPTIONS injection"
+run bl-boot -p 8443 \
   -e SERVER_ID=11111111-2222-3333-4444-555555555555 \
   -e MP_KEYSTORE_STOREPASS=testStorePass123 \
   -e "MP_VMOPTIONS=512,-Dfoo.bar=baz"
-if wait_for_log bl-derby; then
+if wait_for_log bl-boot; then
   ok "server started"
-  P="$(https_port bl-derby)"
+  P="$(https_port bl-boot)"
   [ "$(api_code "$P")" = "200" ] && ok "API 200" || bad "API not 200"
-  docker cp bl-derby:/opt/bridgelink/appdata/server.id "$WORK/sid" >/dev/null 2>&1
+  docker cp bl-boot:/opt/bridgelink/appdata/server.id "$WORK/sid" >/dev/null 2>&1
   grep -q '11111111-2222-3333-4444-555555555555' "$WORK/sid" && ok "SERVER_ID written" || bad "SERVER_ID missing"
-  docker cp bl-derby:/opt/bridgelink/conf/mirth.properties "$WORK/mp" >/dev/null 2>&1
+  docker cp bl-boot:/opt/bridgelink/conf/mirth.properties "$WORK/mp" >/dev/null 2>&1
   grep -q '^keystore.storepass = testStorePass123' "$WORK/mp" && ok "MP_ injected" || bad "MP_ not injected"
-  vmopt_has bl-derby '-Xmx512m' && ok "MP_VMOPTIONS -Xmx applied" || bad "MP_VMOPTIONS not applied"
+  vmopt_has bl-boot '-Xmx512m' && ok "MP_VMOPTIONS -Xmx applied" || bad "MP_VMOPTIONS not applied"
   # add-opens must appear exactly once (dedup)
-  N="$(vmopt_count bl-derby 'add-opens=java.base/java.util=ALL-UNNAMED')"
+  N="$(vmopt_count bl-boot 'add-opens=java.base/java.util=ALL-UNNAMED')"
   [ "$N" = "1" ] && ok "add-opens dedup (x1)" || bad "add-opens appears x$N"
 else
-  bad "server did not start (Derby)"; docker logs bl-derby 2>&1 | tail -20
+  bad "server did not start ($DEFAULT_DB)"; docker logs bl-boot 2>&1 | tail -20
 fi
 
 # ---- 4. Docker secrets + custom-extensions zip ------------------------------------------------
@@ -428,7 +567,12 @@ fi
 
 # ---- 6c. HEALTHCHECK: two-phase probe, and the thread leak it exists to avoid ----------------
 # IRT-2015 / issue #38. Consumes the bl-pg + pg pair from test 6 (finished with them) — tests 7 and
-# 8 use bl-derby and bl-persist, so nothing later depends on them.
+# 8 use bl-boot and bl-persist, so nothing later depends on them.
+#
+# NOTE for DEFAULT_DB=postgres: the outage below stops the `pg` fixture and never restarts it. That
+# is why the default-backend containers use a SEPARATE fixture ($PGDEF) — reusing `pg` here would
+# pull the backend out from under bl-restart, bl-window and bl-persist mid-suite, and the resulting
+# failures in tests 6c2, 6d and 8 would look like flake rather than like this decision.
 #
 # The probe polls /api/server/status until the server first reports ready, then switches to
 # /api/server/version. That is not an optimisation: /status leaks one Jetty worker thread per request
@@ -594,6 +738,8 @@ fi
 # deploy. Anything gated on `depends_on: service_healthy` with `restart: true` -- the reporter's exact
 # configuration in issue #38 -- is then released into the not-ready window on every restart after the
 # first. Both launchers now delete the marker on boot; this proves it.
+# Backend-independent: what is asserted is that the readiness marker is cleared on restart and
+# health returns, which is the bootstrap's behaviour and not the database's.
 info "6c2. Restart re-proves readiness"
 run bl-restart -p 8443
 if wait_for_health bl-restart healthy 180 && wait_for_phase bl-restart version 90; then
@@ -643,6 +789,9 @@ fi
 # HEALTHY_AT is quantized by docker's healthcheck interval, so part of what it measures is probe
 # scheduling rather than the true readiness moment. The strict comparison is still safe -- healthy
 # requires a successful probe, which requires the port -- so healthy-before-port cannot happen.
+# Backend-independent: the window exists because Mirth.java calls startWebServer() before the
+# engine starts, whatever the backend is. An external database shifts the absolute timings but
+# not the inequality this asserts.
 info "6d. Startup window (port answers before the engine is ready)"
 now_ms() { python3 -c 'import time;print(int(time.time()*1000))'; }
 run bl-window -p 8443
@@ -700,22 +849,44 @@ fi
 #
 # -t 30 leaves a loaded CI runner room to finish before docker escalates to SIGKILL, without hiding a
 # genuine hang: a hang still lands on 137 and fails.
+#
+# "Database shut down normally" is printed by EMBEDDED DERBY as it closes, so it exists only on the
+# derby path. With an external backend there is no equivalent: the server's own shutdown line is
+# unreliable for the reason above, and counting server-side connections after the stop cannot tell a
+# clean pool close from a dropped TCP connection. So the postgres path asserts the weaker pair of
+# exit 143 (the signal was handled, not escalated to SIGKILL) and completion well inside the grace
+# period (it unwound rather than hanging until docker gave up). Weaker is stated, not hidden: the
+# derby path keeps the strong assertion and is what the Java 21 images are gated on.
 info "7. Graceful shutdown"
-docker stop -t 30 bl-derby >/dev/null 2>&1
-SHUT_EC="$(docker inspect bl-derby --format '{{.State.ExitCode}}' 2>/dev/null || echo '?')"
-DB_CLOSED=0
-docker logs bl-derby 2>&1 | grep -q 'Database shut down normally' && DB_CLOSED=1
-if [ "$SHUT_EC" = "143" ] && [ "$DB_CLOSED" = "1" ]; then
-  ok "graceful shutdown (exit 143 on SIGTERM, database closed normally)"
+SHUT_T0="$(date +%s)"
+docker stop -t 30 bl-boot >/dev/null 2>&1
+SHUT_ELAPSED=$(( $(date +%s) - SHUT_T0 ))
+SHUT_EC="$(docker inspect bl-boot --format '{{.State.ExitCode}}' 2>/dev/null || echo '?')"
+if [ "$DEFAULT_DB" = "derby" ]; then
+  DB_CLOSED=0
+  docker logs bl-boot 2>&1 | grep -q 'Database shut down normally' && DB_CLOSED=1
+  if [ "$SHUT_EC" = "143" ] && [ "$DB_CLOSED" = "1" ]; then
+    ok "graceful shutdown (exit 143 on SIGTERM, database closed normally)"
+  else
+    bad "no graceful shutdown (exit=$SHUT_EC, database-closed=$DB_CLOSED)"
+    docker logs bl-boot 2>&1 | tail -20
+  fi
 else
-  bad "no graceful shutdown (exit=$SHUT_EC, database-closed=$DB_CLOSED)"
-  docker logs bl-derby 2>&1 | tail -20
+  if [ "$SHUT_EC" = "143" ] && [ "$SHUT_ELAPSED" -lt 25 ]; then
+    ok "graceful shutdown (exit 143 on SIGTERM, unwound in ${SHUT_ELAPSED}s of a 30s grace period)"
+  else
+    bad "no graceful shutdown (exit=$SHUT_EC, took ${SHUT_ELAPSED}s of a 30s grace period)"
+    docker logs bl-boot 2>&1 | tail -20
+  fi
 fi
-docker logs bl-derby 2>&1 | grep -qi 'shutting down' \
+docker logs bl-boot 2>&1 | grep -qi 'shutting down' \
   || echo "  NOTE: server shutdown log line absent (known logger-teardown race; graceful shutdown is" \
-          "asserted above on exit code + database close, not on this line)"
+          "asserted above on exit code and backend-appropriate evidence, not on this line)"
 
 # ---- 8. appdata persistence across restart ----------------------------------------------------
+# Backend-independent: both assertions compare files in the appdata VOLUME (server.id, the
+# generated keystore) across a restart, not database rows. In postgres mode the container also
+# reattaches to the same database, because run() derives the name from the container name.
 info "8. Persistence across restart"
 docker volume create bl-dhi-appdata >/dev/null
 run bl-persist -p 8443 -v bl-dhi-appdata:/opt/bridgelink/appdata \
