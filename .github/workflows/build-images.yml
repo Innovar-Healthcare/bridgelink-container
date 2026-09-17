@@ -152,6 +152,7 @@ jobs:
       rocky_version: ${{ steps.p.outputs.rocky_version }}
       rocky_binary_url: ${{ steps.p.outputs.rocky_binary_url }}
       rocky_java: ${{ steps.p.outputs.rocky_java }}
+      rocky_derby_unsupported: ${{ steps.p.outputs.rocky_derby_unsupported }}
     steps:
       - id: p
         env:
@@ -197,6 +198,11 @@ jobs:
           }
 
           ROCKY_JAVA="${INPUT_JAVA:-${DEFAULT_JAVA:-21}}"
+          # Tracks ROCKY_JAVA: whichever JDK the Rocky gate builds on, the suite has to be told
+          # whether that build can use embedded Derby. Only a dispatch that matches a
+          # derby_unsupported entry sets it; the PR gate and the weekly run build DEFAULT_VERSION,
+          # which is a Java 21 release.
+          ROCKY_DERBY="false"
           if ! [[ "$ROCKY_JAVA" =~ ^[0-9]+$ ]]; then
             echo "::error::java must be a bare major version such as 17 or 21, got '$ROCKY_JAVA'." >&2
             exit 1
@@ -276,6 +282,7 @@ jobs:
             [ "$INPUT_PRIVATE" = "true" ] && PRIVATE_FLAG="true"
             DERBY_FLAG="false"
             [ "$INPUT_DERBY_UNSUPPORTED" = "true" ] && DERBY_FLAG="true"
+            ROCKY_DERBY="$DERBY_FLAG"
             MATRIX=$(jq -nc --arg v "$INPUT_VERSION" --arg u "$INPUT_BINARY_URL" --arg j "$ROCKY_JAVA" \
               --arg s "$INPUT_TAG_SUFFIX" \
               --argjson l "$LATEST_FLAG" --argjson p "$PRIVATE_FLAG" --argjson d "$DERBY_FLAG" \
@@ -397,6 +404,7 @@ jobs:
           echo "rocky_version=${INPUT_VERSION:-$DEFAULT_VERSION}" >> "$GITHUB_OUTPUT"
           echo "rocky_binary_url=${INPUT_BINARY_URL:-$DEFAULT_BINARY_URL}" >> "$GITHUB_OUTPUT"
           echo "rocky_java=$ROCKY_JAVA" >> "$GITHUB_OUTPUT"
+          echo "rocky_derby_unsupported=$ROCKY_DERBY" >> "$GITHUB_OUTPUT"
 
   # Test + publish the hardened (DHI) image, one job run per matrix version (see params for what
   # populates the matrix). Test and publish are steps of the SAME job run so a failure in one
@@ -725,6 +733,15 @@ jobs:
             aws_credentials=${{ github.event_name != 'pull_request' && secrets.AWS_CREDENTIALS || '' }}
       - name: Run acceptance tests
         # Rocky runs as UID 1000 and ships a shell, so the no-shell assertion is skipped for it.
+        #
+        # The suite mode has to follow rocky_java, exactly as it does in the dhi job. This gate
+        # builds whatever JDK params resolved, so a dispatch for a release whose bundled Derby
+        # cannot run on that JDK produces a Rocky image with the same constraint as the hardened
+        # one -- and running it in derby mode fails every default-backend container at the
+        # preflight, which is a property of the release and not a defect in the image.
+        env:
+          DEFAULT_DB: ${{ needs.params.outputs.rocky_derby_unsupported == 'true' && 'postgres' || 'derby' }}
+          EXPECT_DERBY_EXIT: ${{ needs.params.outputs.rocky_derby_unsupported == 'true' && '1' || '0' }}
         run: |
           IMAGE=innovarhealthcare/bridgelink:rocky-test SKIP_BUILD=1 \
             DOCKERFILE=Dockerfile EXPECTED_UID=1000 CHECK_NO_SHELL=0 \
