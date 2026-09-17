@@ -22,8 +22,10 @@
 #                          e.g. [{"version":"<ver>","binary_url":"https://...","latest":false},
 #                                {"version":"<ver>","binary_url":"s3://...","latest":true,
 #                                 "private":true}]
-#                          Exactly one entry should have "latest": true — that's the one that gets
-#                          the rolling latest-dhi / latest-dhi-slim tags.
+#                          Exactly one UNQUALIFIED entry should have "latest": true — that's the one
+#                          that gets the rolling latest-dhi / latest-dhi-slim tags. An entry with a
+#                          tag_suffix has its own rolling pair (latest-dhi<suffix>), so "latest" is
+#                          one-per-qualifier rather than one overall; the gate below enforces it.
 #                          "private": true publishes that version to the private ECR registry
 #                          INSTEAD of public Docker Hub. Optional; omitted means public, so an
 #                          existing public entry needs no edit.
@@ -34,6 +36,25 @@
 #                          26.6.1 and later need 21 (embedded Derby aborts on 17), so a new entry
 #                          for those must say "java": 21 explicitly — if it does not, the
 #                          acceptance suite fails on the Derby boot and nothing is pushed.
+#                          "tag_suffix": a qualifier appended to this entry's published tags, e.g.
+#                          "-jdk17" gives <ver>-dhi-jdk17 / <ver>-dhi-slim-jdk17. Optional; omitted
+#                          means no qualifier. It exists so ONE version can be published on TWO
+#                          JDKs: without it a second entry for the same version resolves to the same
+#                          tag and the weekly rebuild replaces an already-released image. Entries
+#                          that would publish the same tag are rejected before anything is built —
+#                          that check, not reviewer attention, is what makes an omitted suffix safe,
+#                          because this variable lives in repo settings and never goes through a PR.
+#                          A "-jdkN" suffix must agree with this entry's "java": nothing downstream
+#                          can catch a tag that names a JDK the image was not built on, since the
+#                          suite compares the runtime to the build-arg and never to the tag.
+#                          "derby_unsupported": true when this release's bundled Derby cannot run on
+#                          this entry's "java" — a 26.6.1-or-later release built on 17. The
+#                          acceptance suite then runs every default-backend container against an
+#                          external database, and asserts the server REFUSES to start on the shipped
+#                          Derby default. Optional; omitted means false. It cannot be derived from
+#                          "java" < 21: 26.3.1 and 26.6.0 are also built on 17 and their Derby boots
+#                          fine. Forgetting it is loud — every default-backend container hits the
+#                          preflight and the suite fails red, before any push.
 #     AWS_PUBLISH_ROLE_ARN OIDC role assumed for the ECR push (bridgelink-publish). Assumable from
 #                          the integration branch ONLY, so a private publish cannot be dispatched
 #                          from a feature branch. Only needed once a "private" entry exists.
@@ -64,9 +85,16 @@ on:
         description: "One-off: BINARY_URL for the release tarball (s3:// or https://) — required if version is set"
         required: false
       java:
-        description: "One-off: Java major to build on (21 for 26.6.1 and later; 17 for earlier releases)"
+        description: "One-off: Java major override. Optional — a version already in MAINTAINED_VERSIONS resolves to its pinned JDK; an unlisted new release defaults to 21. Set only to publish a brand-new release on a non-default JDK."
         required: false
-        default: "21"
+      tag_suffix:
+        description: "One-off: qualifier appended to the published tags, e.g. -jdk17 for a second build of a version already published on another JDK (leave blank for none)"
+        required: false
+        default: ""
+      derby_unsupported:
+        description: "One-off: this build cannot use embedded Derby (a 26.6.1+ release built on Java 17) — test against an external database and assert the Derby default is refused"
+        type: boolean
+        default: false
       push:
         description: "Push images"
         type: boolean
@@ -137,6 +165,8 @@ jobs:
           INPUT_PUSH: ${{ github.event.inputs.push }}
           INPUT_UPDATE_LATEST: ${{ github.event.inputs.update_latest }}
           INPUT_PRIVATE: ${{ github.event.inputs.private }}
+          INPUT_TAG_SUFFIX: ${{ github.event.inputs.tag_suffix }}
+          INPUT_DERBY_UNSUPPORTED: ${{ github.event.inputs.derby_unsupported }}
           DEFAULT_VERSION: ${{ vars.DEFAULT_VERSION }}
           DEFAULT_BINARY_URL: ${{ vars.DEFAULT_BINARY_URL }}
           DEFAULT_JAVA: ${{ vars.DEFAULT_JAVA }}
@@ -147,14 +177,37 @@ jobs:
           # acceptance suite's EXPECTED_JAVA assertion always agree on which JDK was meant.
           # A dispatch names it; the PR gate takes DEFAULT_JAVA (see the header); otherwise the
           # Dockerfiles' own default (21, the current release line).
+          # A tag qualifier is what lets one version be published on two JDKs. Both checks below
+          # run on every path, so a one-off dispatch is validated exactly like the repo variable.
+          #  - shape: a leading '-' is mandatory and ':' and '/' are excluded, so a bad value can
+          #    never redirect the push to a different repository or registry.
+          #  - agreement: nothing downstream can catch a "-jdk17" tag on an image built with
+          #    JAVA_MAJOR=21, because EXPECTED_JAVA compares the runtime to the build-arg and never
+          #    to the tag. This is the only place that mismatch is visible.
+          validate_suffix() {   # $1 = suffix (may be empty), $2 = java major
+            [ -z "$1" ] && return 0
+            if ! [[ "$1" =~ ^-[a-z0-9][a-z0-9._-]{0,30}$ ]]; then
+              echo "::error::tag_suffix must start with '-' and contain only lowercase letters, digits, '.', '_' or '-', got '$1'." >&2
+              exit 1
+            fi
+            if [[ "$1" =~ ^-jdk([0-9]+)$ ]] && [ "${BASH_REMATCH[1]}" != "$2" ]; then
+              echo "::error::tag_suffix '$1' disagrees with java '$2' — the tag would name a JDK the image was not built on." >&2
+              exit 1
+            fi
+          }
+
           ROCKY_JAVA="${INPUT_JAVA:-${DEFAULT_JAVA:-21}}"
           if ! [[ "$ROCKY_JAVA" =~ ^[0-9]+$ ]]; then
             echo "::error::java must be a bare major version such as 17 or 21, got '$ROCKY_JAVA'." >&2
             exit 1
           fi
           if [ "$EVENT_NAME" = "pull_request" ]; then
+            # tag_suffix/derby_unsupported are spelled out rather than left absent so every
+            # (matrix entries carry version, binary_url, java, latest, private, tag_suffix and
+            # derby_unsupported on every path)
+            # `matrix.<field>` splice downstream has a value on every event type.
             MATRIX=$(jq -nc --arg v "$DEFAULT_VERSION" --arg u "$DEFAULT_BINARY_URL" --arg j "$ROCKY_JAVA" \
-              '[{version:$v, binary_url:$u, java:$j, latest:false, private:false}]')
+              '[{version:$v, binary_url:$u, java:$j, latest:false, private:false, tag_suffix:"", derby_unsupported:false}]')
             PUSH="false"
           elif [ "$EVENT_NAME" = "workflow_dispatch" ] && [ -n "$INPUT_VERSION" ]; then
             if [ -z "$INPUT_BINARY_URL" ]; then
@@ -166,25 +219,67 @@ jobs:
             # — a one-off dispatch must never move an already-released tag onto a different JDK.
             # An unlisted (brand-new) version keeps ROCKY_JAVA (the java input, else DEFAULT_JAVA,
             # else 21). ROCKY_JAVA feeds both this matrix entry and the rocky_java output below.
+            #
+            # The lookup is keyed on (version, tag_suffix), not version alone, because one version
+            # can now be published on two JDKs. Keyed on version alone, `.[0]` would resolve by
+            # array order — so a dispatch of the Java 17 build could silently pick up the Java 21
+            # entry's JDK, or vice versa, depending on how someone happened to order the variable.
             if [ -n "${MAINTAINED_VERSIONS_RAW:-}" ]; then
-              PINNED_JAVA="$(jq -r --arg v "$INPUT_VERSION" \
-                'map(select(.version==$v)) | if length>0 then (.[0].java // 17 | tostring) else "" end' \
+              PINNED_JAVA="$(jq -r --arg v "$INPUT_VERSION" --arg s "$INPUT_TAG_SUFFIX" \
+                'map(select(.version==$v and (.tag_suffix // "")==$s)) | if length>0 then (.[0].java // 17 | tostring) else "" end' \
                 <<<"$MAINTAINED_VERSIONS_RAW")"
               if [ -n "$PINNED_JAVA" ]; then
                 if [ -n "$INPUT_JAVA" ] && [ "$INPUT_JAVA" != "$PINNED_JAVA" ]; then
-                  echo "::error::$INPUT_VERSION is pinned to Java $PINNED_JAVA in MAINTAINED_VERSIONS; refusing to build it on Java $INPUT_JAVA — that would move an already-released tag's JDK." >&2
+                  echo "::error::$INPUT_VERSION${INPUT_TAG_SUFFIX} is pinned to Java $PINNED_JAVA in MAINTAINED_VERSIONS; refusing to build it on Java $INPUT_JAVA — that would move an already-released tag's JDK. To publish this version on a second JDK, add a separate entry with its own tag_suffix and dispatch with that suffix." >&2
                   exit 1
                 fi
                 ROCKY_JAVA="$PINNED_JAVA"
+                # derby_unsupported is pinned from the same entry, for the same reason: it describes
+                # the image this line publishes, so a one-off rebuild of a maintained line should not
+                # depend on the operator remembering to tick it. An unlisted version takes the input.
+                PINNED_DERBY="$(jq -r --arg v "$INPUT_VERSION" --arg s "$INPUT_TAG_SUFFIX" \
+                  'map(select(.version==$v and (.tag_suffix // "")==$s)) | .[0].derby_unsupported // false | tostring' \
+                  <<<"$MAINTAINED_VERSIONS_RAW")"
+                [ "$PINNED_DERBY" = "true" ] && INPUT_DERBY_UNSUPPORTED=true
+                # Destination is pinned from the entry for the same reason the JDK is, and it is the
+                # more costly one to get wrong: a maintained line that is published privately and
+                # dispatched with `private` unticked would push that image to public Docker Hub.
+                # A disagreeing input is refused rather than overridden, so the operator sees it.
+                PINNED_PRIVATE="$(jq -r --arg v "$INPUT_VERSION" --arg s "$INPUT_TAG_SUFFIX" \
+                  'map(select(.version==$v and (.tag_suffix // "")==$s)) | .[0].private // false | tostring' \
+                  <<<"$MAINTAINED_VERSIONS_RAW")"
+                if [ "$INPUT_PRIVATE" = "true" ] && [ "$PINNED_PRIVATE" != "true" ]; then
+                  echo "::error::$INPUT_VERSION${INPUT_TAG_SUFFIX} is published publicly per MAINTAINED_VERSIONS; refusing a private dispatch. Change the entry if the destination is meant to move." >&2
+                  exit 1
+                fi
+                if [ "$PINNED_PRIVATE" = "true" ] && [ "$INPUT_PRIVATE" != "true" ]; then
+                  echo "::error::$INPUT_VERSION${INPUT_TAG_SUFFIX} is published to the private registry per MAINTAINED_VERSIONS; refusing a dispatch that would push it to public Docker Hub. Tick the private input." >&2
+                  exit 1
+                fi
+                # Finding: a rolling tag on a qualified line has no healer. The weekly rebuild only
+                # re-pushes latest-dhi<suffix> for an entry with latest:true, so moving one from a
+                # one-off dispatch against a latest:false entry strands a tag that is never
+                # repatched again — while the README promises the weekly refresh.
+                PINNED_LATEST="$(jq -r --arg v "$INPUT_VERSION" --arg s "$INPUT_TAG_SUFFIX" \
+                  'map(select(.version==$v and (.tag_suffix // "")==$s)) | .[0].latest // false | tostring' \
+                  <<<"$MAINTAINED_VERSIONS_RAW")"
+                if [ "$INPUT_UPDATE_LATEST" = "true" ] && [ "$PINNED_LATEST" != "true" ]; then
+                  echo "::error::$INPUT_VERSION${INPUT_TAG_SUFFIX} is not the latest line in MAINTAINED_VERSIONS, so the rolling tag it would move is one the weekly rebuild never re-pushes. Set update_latest=false, or make that entry latest:true." >&2
+                  exit 1
+                fi
               fi
             fi
+            validate_suffix "$INPUT_TAG_SUFFIX" "$ROCKY_JAVA"
             LATEST_FLAG="false"
             [ "$INPUT_UPDATE_LATEST" = "true" ] && LATEST_FLAG="true"
             PRIVATE_FLAG="false"
             [ "$INPUT_PRIVATE" = "true" ] && PRIVATE_FLAG="true"
+            DERBY_FLAG="false"
+            [ "$INPUT_DERBY_UNSUPPORTED" = "true" ] && DERBY_FLAG="true"
             MATRIX=$(jq -nc --arg v "$INPUT_VERSION" --arg u "$INPUT_BINARY_URL" --arg j "$ROCKY_JAVA" \
-              --argjson l "$LATEST_FLAG" --argjson p "$PRIVATE_FLAG" \
-              '[{version:$v, binary_url:$u, java:$j, latest:$l, private:$p}]')
+              --arg s "$INPUT_TAG_SUFFIX" \
+              --argjson l "$LATEST_FLAG" --argjson p "$PRIVATE_FLAG" --argjson d "$DERBY_FLAG" \
+              '[{version:$v, binary_url:$u, java:$j, latest:$l, private:$p, tag_suffix:$s, derby_unsupported:$d}]')
             PUSH="$INPUT_PUSH"
           else
             # Scheduled weekly rebuild, or a manual dispatch with no version override: rebuild every
@@ -223,14 +318,80 @@ jobs:
                 <<<"$MAINTAINED_VERSIONS_RAW" >&2 || true
               exit 1
             fi
-            MATRIX=$(jq -c 'map(.private = (.private // false) | .java = ((.java // 17) | tostring))' \
+            # `derby_unsupported` must be a real JSON boolean or absent, for the same reason
+            # `private` must be: it is read both by a GitHub `if:`-style expression splice and by a
+            # string comparison in the suite, and those two disagree about what a bare string means.
+            if ! jq -e 'all(.[]; (has("derby_unsupported") | not) or (.derby_unsupported | type == "boolean"))' \
+                 <<<"$MAINTAINED_VERSIONS_RAW" >/dev/null; then
+              echo "::error::MAINTAINED_VERSIONS has a non-boolean \"derby_unsupported\" value. Use true or false (unquoted), or omit the key." >&2
+              jq -c '.[] | select(has("derby_unsupported") and (.derby_unsupported | type != "boolean")) | {version, derby_unsupported}' \
+                <<<"$MAINTAINED_VERSIONS_RAW" >&2 || true
+              exit 1
+            fi
+            # `tag_suffix` shape, and its agreement with the entry's `java` — same rules the
+            # dispatch path gets, applied per entry.
+            # java first, suffix second: a tab is IFS whitespace, so `read` collapses a LEADING
+            # empty field and an entry with no tag_suffix would otherwise read its java as the
+            # suffix and be rejected. A trailing empty field reads as empty, which is correct.
+            while IFS=$'\t' read -r _j _s; do
+              validate_suffix "$_s" "$_j"
+            done < <(jq -r '.[] | [((.java // 17) | tostring), (.tag_suffix // "")] | @tsv' \
+                       <<<"$MAINTAINED_VERSIONS_RAW")
+            MATRIX=$(jq -c 'map(.private = (.private // false)
+                                | .java = ((.java // 17) | tostring)
+                                | .tag_suffix = (.tag_suffix // "")
+                                | .derby_unsupported = (.derby_unsupported // false))' \
               <<<"$MAINTAINED_VERSIONS_RAW")
             if [ "$(jq 'length' <<<"$MATRIX")" -eq 0 ]; then
               echo "::error::MAINTAINED_VERSIONS repo variable parsed to an empty array — nothing to rebuild." >&2
               exit 1
             fi
+            # THE anti-overwrite gate. Two entries that publish the same tag would have the weekly
+            # rebuild replace one already-released image with the other, on a green run and with
+            # nothing in the log saying so. This runs before any build, so a duplicate stops the
+            # whole run with nothing pushed — and since MAINTAINED_VERSIONS is a repo variable
+            # rather than a file, this check is the only review it ever gets.
+            #
+            # It compares the ACTUAL image references, enumerated exactly as Compute tags builds
+            # them, rather than a version+suffix key. The suffix is appended to the tag while the
+            # variant sits between version and suffix, so those two are not the same comparison:
+            # an entry with tag_suffix "-slim" publishes <ver>-dhi-slim, which is another entry's
+            # SLIM tag, and a version+suffix key sees no duplicate. Rolling tags are enumerated
+            # here too, so this also covers two entries claiming the same latest tag.
+            DUPES="$(jq -r '.[] |
+                       (if .private then
+                          {d:"ecr", f:"innovarhealthcare/bridgelink-dhi", s:"innovarhealthcare/bridgelink-dhi-slim"}
+                        else
+                          {d:"hub", f:"innovarhealthcare/bridgelink", s:"innovarhealthcare/bridgelink"}
+                        end) as $r
+                       | [ "\($r.d) \($r.f):\(.version)-dhi\(.tag_suffix)",
+                           "\($r.d) \($r.s):\(.version)-dhi-slim\(.tag_suffix)" ]
+                         + (if .latest then
+                              [ "\($r.d) \($r.f):latest-dhi\(.tag_suffix)",
+                                "\($r.d) \($r.s):latest-dhi-slim\(.tag_suffix)" ]
+                            else [] end)
+                       | .[]' <<<"$MATRIX" | sort | uniq -d)"
+            if [ -n "$DUPES" ]; then
+              echo "::error::Two MAINTAINED_VERSIONS entries publish the same image reference, so this rebuild would replace an already-released image. Give one of them a distinct tag_suffix (e.g. -jdk17), or check which entry owns the rolling latest tag. Colliding: $(tr '\n' ' ' <<<"$DUPES")" >&2
+              exit 1
+            fi
             PUSH="$([ "$EVENT_NAME" = "schedule" ] && echo true || echo "$INPUT_PUSH")"
           fi
+          # Print the resolved plan before anything is built. On the one-off dispatch path there is
+          # nothing for the uniqueness gate above to compare against — a dispatch naming an existing
+          # version with a blank tag_suffix is a legitimate rebuild of that tag — so this summary is
+          # the operator's last chance to notice that the tags are not the ones they meant.
+          {
+            echo "### Planned builds"
+            echo
+            echo "| tags | java | destination | push |"
+            echo "|---|---|---|---|"
+            jq -r --arg push "$PUSH" '.[] |
+              "| `\(.version)-dhi\(.tag_suffix)` + `\(.version)-dhi-slim\(.tag_suffix)`"
+              + (if .latest then " + `latest-dhi\(.tag_suffix)` + `latest-dhi-slim\(.tag_suffix)`" else "" end)
+              + " | \(.java) | \(if .private then "private ECR" else "public Docker Hub" end) | \($push) |"' \
+              <<<"$MATRIX"
+          } >> "$GITHUB_STEP_SUMMARY"
           echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
           echo "push=$PUSH" >> "$GITHUB_OUTPUT"
           echo "rocky_version=${INPUT_VERSION:-$DEFAULT_VERSION}" >> "$GITHUB_OUTPUT"
@@ -282,7 +443,7 @@ jobs:
           file: Dockerfile.dhi
           load: true
           push: false
-          tags: innovarhealthcare/bridgelink:dhi-test-${{ matrix.version }}
+          tags: innovarhealthcare/bridgelink:dhi-test-${{ matrix.version }}${{ matrix.tag_suffix }}
           build-args: |
             BINARY_URL=${{ matrix.binary_url }}
             JAVA_MAJOR=${{ matrix.java }}
@@ -294,8 +455,16 @@ jobs:
       - name: Run acceptance tests
         # DHI defaults (EXPECTED_UID=65532, CHECK_NO_SHELL=1, DOCKERFILE=Dockerfile.dhi) are implicit.
         # EXPECTED_JAVA makes the suite prove the runtime is on the JDK this matrix entry asked for.
+        #
+        # derby_unsupported selects the suite's external-database mode: the shipped Derby default
+        # cannot run on this entry's JDK, so every otherwise-default container is pointed at a
+        # throwaway postgres and the Derby default is asserted to be REFUSED rather than ignored.
+        # On every entry without the flag these render as derby/0, which is the historical behaviour.
+        env:
+          DEFAULT_DB: ${{ matrix.derby_unsupported && 'postgres' || 'derby' }}
+          EXPECT_DERBY_EXIT: ${{ matrix.derby_unsupported && '1' || '0' }}
         run: |
-          IMAGE=innovarhealthcare/bridgelink:dhi-test-${{ matrix.version }} SKIP_BUILD=1 \
+          IMAGE=innovarhealthcare/bridgelink:dhi-test-${{ matrix.version }}${{ matrix.tag_suffix }} SKIP_BUILD=1 \
             EXPECTED_JAVA=${{ matrix.java }} bash test/image-test.sh
 
       # Gate the WebAdmin-only (slim) variant too: build it with the Swing Administrator stripped and
@@ -308,7 +477,7 @@ jobs:
           file: Dockerfile.dhi
           load: true
           push: false
-          tags: innovarhealthcare/bridgelink:dhi-slim-test-${{ matrix.version }}
+          tags: innovarhealthcare/bridgelink:dhi-slim-test-${{ matrix.version }}${{ matrix.tag_suffix }}
           build-args: |
             BINARY_URL=${{ matrix.binary_url }}
             JAVA_MAJOR=${{ matrix.java }}
@@ -316,8 +485,11 @@ jobs:
           secrets: |
             aws_credentials=${{ github.event_name != 'pull_request' && secrets.AWS_CREDENTIALS || '' }}
       - name: Run acceptance tests (slim)
+        env:
+          DEFAULT_DB: ${{ matrix.derby_unsupported && 'postgres' || 'derby' }}
+          EXPECT_DERBY_EXIT: ${{ matrix.derby_unsupported && '1' || '0' }}
         run: |
-          IMAGE=innovarhealthcare/bridgelink:dhi-slim-test-${{ matrix.version }} SKIP_BUILD=1 \
+          IMAGE=innovarhealthcare/bridgelink:dhi-slim-test-${{ matrix.version }}${{ matrix.tag_suffix }} SKIP_BUILD=1 \
             EXPECT_NO_ADMIN_CLIENT=1 EXPECTED_JAVA=${{ matrix.java }} bash test/image-test.sh
 
       # --- Vulnerability scan (IRT-1390) -----------------------------------------------------------
@@ -326,21 +498,24 @@ jobs:
       - name: Trivy scan (SARIF, full report) — DHI
         uses: aquasecurity/trivy-action@v0.36.0
         with:
-          image-ref: innovarhealthcare/bridgelink:dhi-test-${{ matrix.version }}
+          image-ref: innovarhealthcare/bridgelink:dhi-test-${{ matrix.version }}${{ matrix.tag_suffix }}
           scanners: vuln
           format: sarif
-          output: trivy-dhi-${{ matrix.version }}.sarif
+          output: trivy-dhi-${{ matrix.version }}${{ matrix.tag_suffix }}.sarif
           exit-code: "0"
         env:
           # Full report must include everything; do NOT apply .trivyignore here (it stays scoped to
           # the gate step) so allowlisted findings remain visible in the Security tab.
           TRIVY_IGNOREFILE: /dev/null
+      # Keyed on version+tag_suffix, not version: two entries for one version (the same release on
+      # two JDKs) would otherwise upload two analyses under one category for the same ref, and the
+      # Security tab would show them as one image with the findings of whichever finished last.
       - name: Upload Trivy SARIF — DHI
         if: always()
         uses: github/codeql-action/upload-sarif@v3
         with:
-          sarif_file: trivy-dhi-${{ matrix.version }}.sarif
-          category: trivy-dhi-${{ matrix.version }}
+          sarif_file: trivy-dhi-${{ matrix.version }}${{ matrix.tag_suffix }}.sarif
+          category: trivy-dhi-${{ matrix.version }}${{ matrix.tag_suffix }}
       # Gate: fail the run on FIXABLE HIGH/CRITICAL in OS/base packages — the layer this repo owns.
       # Library CVEs from the bundled BridgeLink app JARs come from the Core release tarball and can't
       # be fixed here; they're surfaced in the SARIF above and tracked against Core (see README).
@@ -348,7 +523,7 @@ jobs:
       - name: Trivy gate (fixable HIGH/CRITICAL, OS packages) — DHI
         uses: aquasecurity/trivy-action@v0.36.0
         with:
-          image-ref: innovarhealthcare/bridgelink:dhi-test-${{ matrix.version }}
+          image-ref: innovarhealthcare/bridgelink:dhi-test-${{ matrix.version }}${{ matrix.tag_suffix }}
           scanners: vuln
           severity: HIGH,CRITICAL
           ignore-unfixed: true
@@ -397,8 +572,13 @@ jobs:
         uses: aws-actions/amazon-ecr-login@v2
 
       # Version tag always; rolling latest-dhi only when this matrix entry's `latest` flag is set
-      # (exactly one entry in MAINTAINED_VERSIONS should be latest:true). The slim variant
+      # (one owner per qualifier — see the header). The slim variant
       # (WebAdmin-only, no Swing Administrator) gets the same tags with a `-slim` suffix.
+      #
+      # matrix.tag_suffix, when set, is appended to every tag this entry publishes — including the
+      # rolling ones, so a qualified line has its own `latest-dhi<suffix>` rather than competing for
+      # the unqualified one. That is one rule instead of two, and params already rejects two entries
+      # claiming the same rolling tag. Unqualified tags always mean the release's primary JDK.
       #
       # The variant lives in the repository NAME for ECR (bridgelink-dhi) and in the TAG for Docker
       # Hub (bridgelink:<ver>-dhi), because Docker Hub has one repository for everything while ECR
@@ -414,26 +594,34 @@ jobs:
           PRIVATE: ${{ matrix.private }}
           LATEST: ${{ matrix.latest }}
           VERSION: ${{ matrix.version }}
+          SUFFIX: ${{ matrix.tag_suffix }}
           REGISTRY: ${{ steps.ecr.outputs.registry }}
         run: |
           set -euo pipefail
+          # Re-validate the qualifier here, as the last gate before a push: params validated it, but
+          # this is the step that actually composes a registry reference, and a value carrying ':'
+          # or '/' would silently retarget the push rather than fail.
+          if [ -n "$SUFFIX" ] && ! [[ "$SUFFIX" =~ ^-[a-z0-9][a-z0-9._-]{0,30}$ ]]; then
+            echo "::error::refusing to push with tag_suffix '$SUFFIX'." >&2
+            exit 1
+          fi
           if [ "$PRIVATE" = "true" ]; then
             if [ -z "$REGISTRY" ]; then
               echo "::error::ECR login produced no registry — cannot publish $VERSION privately." >&2
               exit 1
             fi
-            T="$REGISTRY/innovarhealthcare/bridgelink-dhi:${VERSION}-dhi"
-            S="$REGISTRY/innovarhealthcare/bridgelink-dhi-slim:${VERSION}-dhi-slim"
+            T="$REGISTRY/innovarhealthcare/bridgelink-dhi:${VERSION}-dhi${SUFFIX}"
+            S="$REGISTRY/innovarhealthcare/bridgelink-dhi-slim:${VERSION}-dhi-slim${SUFFIX}"
             if [ "$LATEST" = "true" ]; then
-              T="$T"$'\n'"$REGISTRY/innovarhealthcare/bridgelink-dhi:latest-dhi"
-              S="$S"$'\n'"$REGISTRY/innovarhealthcare/bridgelink-dhi-slim:latest-dhi-slim"
+              T="$T"$'\n'"$REGISTRY/innovarhealthcare/bridgelink-dhi:latest-dhi${SUFFIX}"
+              S="$S"$'\n'"$REGISTRY/innovarhealthcare/bridgelink-dhi-slim:latest-dhi-slim${SUFFIX}"
             fi
           else
-            T="innovarhealthcare/bridgelink:${VERSION}-dhi"
-            S="innovarhealthcare/bridgelink:${VERSION}-dhi-slim"
+            T="innovarhealthcare/bridgelink:${VERSION}-dhi${SUFFIX}"
+            S="innovarhealthcare/bridgelink:${VERSION}-dhi-slim${SUFFIX}"
             if [ "$LATEST" = "true" ]; then
-              T="$T"$'\n'"innovarhealthcare/bridgelink:latest-dhi"
-              S="$S"$'\n'"innovarhealthcare/bridgelink:latest-dhi-slim"
+              T="$T"$'\n'"innovarhealthcare/bridgelink:latest-dhi${SUFFIX}"
+              S="$S"$'\n'"innovarhealthcare/bridgelink:latest-dhi-slim${SUFFIX}"
             fi
           fi
           { echo "list<<EOF"; echo "$T"; echo "EOF"; } >> "$GITHUB_OUTPUT"
@@ -483,17 +671,21 @@ jobs:
         # Values via env rather than spliced into the script, per this workflow's convention.
         env:
           VERSION: ${{ matrix.version }}
+          SUFFIX: ${{ matrix.tag_suffix }}
+          JAVA: ${{ matrix.java }}
           DESTINATION: ${{ matrix.private && 'private ECR' || 'public Docker Hub' }}
           DHI_DIGEST: ${{ steps.dhi.outputs.digest }}
           SLIM_DIGEST: ${{ steps.slim.outputs.digest }}
         run: |
           {
-            echo "### $VERSION ($DESTINATION)"
+            # Heading carries the qualifier and the JDK: two entries for one version publish two
+            # different images, and a summary that headed both "### <version>" would read as one.
+            echo "### ${VERSION}${SUFFIX} — Java $JAVA ($DESTINATION)"
             echo
-            echo "| variant | digest |"
-            echo "| --- | --- |"
-            echo "| dhi | \`$DHI_DIGEST\` |"
-            echo "| dhi-slim | \`$SLIM_DIGEST\` |"
+            echo "| variant | tag | digest |"
+            echo "| --- | --- | --- |"
+            echo "| dhi | \`${VERSION}-dhi${SUFFIX}\` | \`$DHI_DIGEST\` |"
+            echo "| dhi-slim | \`${VERSION}-dhi-slim${SUFFIX}\` | \`$SLIM_DIGEST\` |"
             echo
             echo "Tags are mutable; pin by digest for an immutable reference."
           } >> "$GITHUB_STEP_SUMMARY"
@@ -604,11 +796,15 @@ jobs:
           }
           sec="$SERVER_URL/$REPO/security/code-scanning"
           run="$SERVER_URL/$REPO/actions/runs/$RUN_ID"
-          # One DHI line per maintained version (each has its own trivy-dhi-<version> SARIF category).
+          # One DHI line per matrix ENTRY, keyed on version+tag_suffix to match the SARIF category
+          # the dhi job uploads. Keyed on version alone, a release published on two JDKs printed the
+          # same line twice and looked up a category that exists for neither.
+          # The published tag and the SARIF category interleave the suffix differently
+          # (26.6.1-dhi-jdk17 vs trivy-dhi-26.6.1-jdk17), so read the two fields and build each.
           dhi_lines=""
-          while IFS= read -r v; do
-            dhi_lines="$dhi_lines"$'\n'"  - \`$v\`-dhi: $(count "trivy-dhi-$v") findings"
-          done < <(echo "$MATRIX_JSON" | jq -r '.[].version')
+          while IFS=$'\t' read -r v sfx; do
+            dhi_lines="$dhi_lines"$'\n'"  - \`${v}-dhi${sfx}\`: $(count "trivy-dhi-${v}${sfx}") findings"
+          done < <(echo "$MATRIX_JSON" | jq -r '.[] | [.version, (.tag_suffix // "")] | @tsv')
           text="$(printf '%s\n' \
             "*BridgeLink container — image scan summary* (\`main\`)" \
             "$(icon "$DHI_RESULT") DHI gate: \`$DHI_RESULT\`$dhi_lines" \

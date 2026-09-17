@@ -107,8 +107,13 @@ jobs:
           # release) takes the input, or 21 by default.
           PINNED=""
           if [ -n "${MAINTAINED_VERSIONS_RAW:-}" ]; then
+            # Only the PRIMARY entry for this version — the one with no tag_suffix. A version may
+            # have a second MAINTAINED_VERSIONS entry publishing a qualified DHI tag on a different
+            # JDK (e.g. -jdk17); that entry describes a hardened image built by build-images.yml and
+            # says nothing about the Rocky image this workflow publishes. Keyed on version alone,
+            # `.[0]` would resolve by array order and could build Rocky on the qualified line's JDK.
             PINNED="$(jq -r --arg v "$VERSION" \
-              'map(select(.version==$v)) | if length>0 then (.[0].java // 17 | tostring) else "" end' \
+              'map(select(.version==$v and (.tag_suffix // "")=="")) | if length>0 then (.[0].java // 17 | tostring) else "" end' \
               <<<"$MAINTAINED_VERSIONS_RAW")"
           fi
           if [ -n "$PINNED" ]; then
