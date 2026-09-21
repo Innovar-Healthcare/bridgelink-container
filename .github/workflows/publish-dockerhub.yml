@@ -28,8 +28,20 @@ on:
       java:
         description: "Java major override. Optional — a version in MAINTAINED_VERSIONS resolves to its pinned JDK; an unlisted new release defaults to 21. Set only to publish a brand-new release on a non-default JDK."
         required: false
+      tag_suffix:
+        description: "Qualifier appended to the published tag, e.g. -jdk17 to publish a second build of a version already released on another JDK (leave blank for none)"
+        required: false
+        default: ""
+      derby_unsupported:
+        description: "This build cannot use embedded Derby (a 26.6.1+ release built on Java 17) — test against an external database and assert the Derby default is refused"
+        type: boolean
+        default: false
       latest:
         description: "Also move the rolling `latest` tag to this version"
+        type: boolean
+        default: true
+      push:
+        description: "Push the image. Untick for a dry run: everything builds, the suite and scan run, and the tags are printed, but nothing is published."
         type: boolean
         default: true
 
@@ -56,6 +68,8 @@ jobs:
         id: url
         env:
           JAVA_INPUT: ${{ github.event.inputs.java }}
+          SUFFIX: ${{ github.event.inputs.tag_suffix }}
+          LATEST_INPUT: ${{ github.event.inputs.latest }}
           MAINTAINED_VERSIONS_RAW: ${{ vars.MAINTAINED_VERSIONS }}
         run: |
           set -euo pipefail
@@ -66,25 +80,58 @@ jobs:
           # A listed version's pinned java wins (an omitted field there means 17); an explicit input
           # that disagrees is refused, not silently honoured. A version not yet listed (a brand-new
           # release) takes the input, or 21 by default.
-          PINNED=""
-          if [ -n "${MAINTAINED_VERSIONS_RAW:-}" ]; then
+          # A qualifier publishes to a DIFFERENT tag, so validate its shape first — a value carrying
+          # ':' or '/' would retarget the push to another repository rather than fail.
+          if [ -n "$SUFFIX" ] && ! [[ "$SUFFIX" =~ ^-[a-z0-9][a-z0-9._-]{0,30}$ ]]; then
+            echo "::error::tag_suffix must start with '-' and contain only lowercase letters, digits, '.', '_' or '-', got '$SUFFIX'." >&2
+            exit 1
+          fi
+
+          if [ -z "$SUFFIX" ]; then
+            # UNQUALIFIED publish: this pushes <version>, the tag MAINTAINED_VERSIONS describes.
             # Only the PRIMARY entry for this version — the one with no tag_suffix. A version may
             # have a second MAINTAINED_VERSIONS entry publishing a qualified DHI tag on a different
             # JDK (e.g. -jdk17); that entry describes a hardened image built by build-images.yml and
             # says nothing about the Rocky image this workflow publishes. Keyed on version alone,
             # `.[0]` would resolve by array order and could build Rocky on the qualified line's JDK.
-            PINNED="$(jq -r --arg v "$VERSION" \
-              'map(select(.version==$v and (.tag_suffix // "")=="")) | if length>0 then (.[0].java // 17 | tostring) else "" end' \
-              <<<"$MAINTAINED_VERSIONS_RAW")"
-          fi
-          if [ -n "$PINNED" ]; then
-            if [ -n "$JAVA_INPUT" ] && [ "$JAVA_INPUT" != "$PINNED" ]; then
-              echo "::error::$VERSION is pinned to Java $PINNED in MAINTAINED_VERSIONS; refusing to publish it on Java $JAVA_INPUT — that would move an already-released tag's JDK." >&2
+            PINNED=""
+            if [ -n "${MAINTAINED_VERSIONS_RAW:-}" ]; then
+              PINNED="$(jq -r --arg v "$VERSION" \
+                'map(select(.version==$v and (.tag_suffix // "")=="")) | if length>0 then (.[0].java // 17 | tostring) else "" end' \
+                <<<"$MAINTAINED_VERSIONS_RAW")"
+            fi
+            if [ -n "$PINNED" ]; then
+              if [ -n "$JAVA_INPUT" ] && [ "$JAVA_INPUT" != "$PINNED" ]; then
+                echo "::error::$VERSION is pinned to Java $PINNED in MAINTAINED_VERSIONS; refusing to publish it on Java $JAVA_INPUT — that would move an already-released tag's JDK. To publish this version on a second JDK, give it a tag_suffix (e.g. -jdk17)." >&2
+                exit 1
+              fi
+              JAVA="$PINNED"
+            else
+              JAVA="${JAVA_INPUT:-21}"
+            fi
+          else
+            # QUALIFIED publish: a second Rocky build of a version already released on another JDK.
+            # MAINTAINED_VERSIONS says nothing about it — that variable drives the DHI weekly
+            # rebuild, and Rocky images are published once per release and never repatched — so the
+            # JDK cannot be pinned from it and must be stated. Requiring it explicitly is the point:
+            # there is no entry to be authoritative, so a default would be a guess.
+            if [ -z "$JAVA_INPUT" ]; then
+              echo "::error::java is required when tag_suffix is set — a qualified tag has no MAINTAINED_VERSIONS entry to take the JDK from, and defaulting would publish <version>$SUFFIX on whatever the Dockerfile happens to default to." >&2
               exit 1
             fi
-            JAVA="$PINNED"
-          else
-            JAVA="${JAVA_INPUT:-21}"
+            JAVA="$JAVA_INPUT"
+            # A -jdkN tag must name the JDK the image is actually built on. Nothing downstream can
+            # catch this: the suite compares the runtime to the build-arg, never to the tag.
+            if [[ "$SUFFIX" =~ ^-jdk([0-9]+)$ ]] && [ "${BASH_REMATCH[1]}" != "$JAVA" ]; then
+              echo "::error::tag_suffix '$SUFFIX' disagrees with java '$JAVA' — the tag would name a JDK the image was not built on." >&2
+              exit 1
+            fi
+            # The rolling tag always means the primary line. Moving it to a qualified build would
+            # hand `latest` to, for example, a Java 17 image of a release that ships on 21.
+            if [ "$LATEST_INPUT" = "true" ]; then
+              echo "::error::refusing to move the rolling 'latest' tag to a qualified build ($VERSION$SUFFIX). Untick latest; it belongs to the unqualified line." >&2
+              exit 1
+            fi
           fi
           # The value becomes a yum package name inside the Dockerfile, where a typo fails late with
           # an error that does not name the input; validate it here.
@@ -98,9 +145,12 @@ jobs:
             VERSION_US="${VERSION//./_}"
             BINARY_URL="https://bridgelink-downloads.s3.us-east-2.amazonaws.com/bridgelink-server/${VERSION}/linux/BridgeLink_unix_${VERSION_US}.tar.gz"
           fi
-          echo "binary_url=$BINARY_URL" >> "$GITHUB_OUTPUT"
-          echo "java=$JAVA" >> "$GITHUB_OUTPUT"
-          echo "Using BINARY_URL=$BINARY_URL JAVA_MAJOR=$JAVA"
+          {
+            echo "binary_url=$BINARY_URL"
+            echo "java=$JAVA"
+            echo "suffix=$SUFFIX"
+          } >> "$GITHUB_OUTPUT"
+          echo "Using BINARY_URL=$BINARY_URL JAVA_MAJOR=$JAVA TAG_SUFFIX=${SUFFIX:-(none)}"
 
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
@@ -108,15 +158,74 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      # --- Gate: build and acceptance-test before publishing ----------------------------------------
+      # Single-arch local build, mirroring publish-ecr.yml and build-images.yml's test-rocky job.
+      # The multi-arch publish build below reuses the same layers from the buildx cache.
+      #
+      # This gate did not exist here: the public Rocky publish built and pushed in one step, so
+      # nothing tested what reached Docker Hub. That was tolerable while every Rocky image was the
+      # same release on its own JDK, and is not once a version can be published on two.
+      - name: Build Rocky test image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          load: true
+          push: false
+          tags: ${{ env.IMAGE }}:rocky-publish-test
+          build-args: |
+            BINARY_URL=${{ steps.url.outputs.binary_url }}
+            JAVA_MAJOR=${{ steps.url.outputs.java }}
+
+      - name: Run acceptance tests
+        # Rocky runs as UID 1000 and ships a shell, so the no-shell assertion is skipped for it.
+        # EXPECTED_JAVA proves the runtime is on the JDK resolved above.
+        #
+        # derby_unsupported selects the suite's external-database mode. A 26.6.1-or-later release
+        # built on Java 17 cannot load its bundled Derby, so the server refuses to start on the
+        # shipped default; running the suite in derby mode there fails every default-backend
+        # container at the preflight, which is a property of the release and not a defect.
+        env:
+          EXPECTED_JAVA: ${{ steps.url.outputs.java }}
+          DEFAULT_DB: ${{ github.event.inputs.derby_unsupported == 'true' && 'postgres' || 'derby' }}
+          EXPECT_DERBY_EXIT: ${{ github.event.inputs.derby_unsupported == 'true' && '1' || '0' }}
+        run: |
+          IMAGE="${{ env.IMAGE }}:rocky-publish-test" SKIP_BUILD=1 \
+            DOCKERFILE=Dockerfile EXPECTED_UID=1000 CHECK_NO_SHELL=0 \
+            bash test/image-test.sh
+
       - name: Compute tags
         id: tags
+        env:
+          VERSION: ${{ github.event.inputs.version }}
+          SUFFIX: ${{ steps.url.outputs.suffix }}
+          LATEST: ${{ github.event.inputs.latest }}
+          JAVA_RESOLVED: ${{ steps.url.outputs.java }}
+          PUSH_INPUT: ${{ github.event.inputs.push }}
         run: |
           set -euo pipefail
-          T="${{ env.IMAGE }}:${{ github.event.inputs.version }}"
-          if [ "${{ github.event.inputs.latest }}" = "true" ]; then
+          # Re-validate as the last gate before a push: this step composes a registry reference.
+          if [ -n "$SUFFIX" ] && ! [[ "$SUFFIX" =~ ^-[a-z0-9][a-z0-9._-]{0,30}$ ]]; then
+            echo "::error::refusing to push with tag_suffix '$SUFFIX'." >&2
+            exit 1
+          fi
+          T="${{ env.IMAGE }}:${VERSION}${SUFFIX}"
+          if [ "$LATEST" = "true" ]; then
+            # Only reachable for an unqualified publish; the JDK step refuses the combination.
             T="$T"$'\n'"${{ env.IMAGE }}:latest"
           fi
           { echo "list<<EOF"; echo "$T"; echo "EOF"; } >> "$GITHUB_OUTPUT"
+          # Print the exact references before the publish step runs, so a dry run is readable and a
+          # real one is auditable without digging through the build log.
+          {
+            echo "### Tags"
+            echo
+            # Four-space indent renders as a markdown code block, and needs no backticks in the
+            # format string (which shellcheck reads as an attempted expansion).
+            while IFS= read -r line; do [ -n "$line" ] && printf -- '    %s\n' "$line"; done <<<"$T"
+            echo
+            echo "Java $JAVA_RESOLVED · push=$PUSH_INPUT"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       # Public https tarball -> plain curl fetch inside the build; no AWS creds needed.
       - name: Build & push image to Docker Hub
@@ -125,7 +234,7 @@ jobs:
           context: .
           file: Dockerfile
           platforms: linux/amd64,linux/arm64
-          push: true
+          push: ${{ github.event.inputs.push != 'false' }}
           build-args: |
             BINARY_URL=${{ steps.url.outputs.binary_url }}
             JAVA_MAJOR=${{ steps.url.outputs.java }}
