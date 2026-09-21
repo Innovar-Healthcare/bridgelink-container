@@ -48,6 +48,7 @@ on:
 
 permissions:
   contents: read
+  security-events: write # upload the Trivy SARIF to Security > Code scanning
 
 concurrency:
   group: publish-dockerhub-${{ github.event.inputs.version }}
