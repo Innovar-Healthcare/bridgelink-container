@@ -30,9 +30,9 @@ BridgeLink 26.6.1 and later run on **Java 21** (the embedded Derby database they
 Every earlier release runs on **Java 17** and stays there: a rebuild of an older tag keeps the
 JDK it was released with.
 
-For deployments that cannot move to Java 21 yet, 26.6.1 is also published on the Corretto 17
-hardened base as `26.6.1-dhi-jdk17`. **Those images require an external database** — see
-[Java version](#java-version) before using one.
+For deployments that cannot move to Java 21 yet, 26.6.1 is also published on Java 17 — as
+`26.6.1-jdk17` (Rocky) and `26.6.1-dhi-jdk17` (hardened). **Those images require an external
+database** — see [Java version](#java-version) before using one.
 
 ##### Rockylinux9 OpenJDK 21
 
@@ -40,6 +40,7 @@ hardened base as `26.6.1-dhi-jdk17`. **Those images require an external database
 
 ##### Rockylinux9 OpenJDK 17
 
+* [26.6.1-jdk17](https://github.com/Innovar-Healthcare/bridgelink-container/blob/bl_26.6.1/) — requires an external database ([why](#java-version))
 * [26.6.0](https://github.com/Innovar-Healthcare/bridgelink-container/blob/bl_26.6.0/)
 * [26.3.1](https://github.com/Innovar-Healthcare/bridgelink-container/blob/bl_26.3.1/)
 * [26.3.0](https://github.com/Innovar-Healthcare/bridgelink-container/blob/bl_26.3.0/)
@@ -172,8 +173,13 @@ the JDK it shipped with. The acceptance suite checks the runtime's Java version 
 `EXPECTED_JAVA` is set (see **Test** below).
 
 **Java 17 build of 26.6.1 (`-jdk17` tags).** For deployments that must stay on Java 17, 26.6.1 is
-also published as `26.6.1-dhi-jdk17` and `26.6.1-dhi-slim-jdk17`, built on the Corretto 17 hardened
-base and repatched on the same weekly schedule as the Java 21 tags.
+also published as `26.6.1-jdk17` (Rocky) and, on the Corretto 17 hardened base,
+`26.6.1-dhi-jdk17` and `26.6.1-dhi-slim-jdk17`.
+
+Only the hardened tags are rebuilt weekly against a repatched base. The Rocky image is built once
+per release, as it always has been, so its OS packages age until the next release — that is the
+same trade the unqualified Rocky tags carry, and it is the reason to prefer a `-dhi` tag if you
+want ongoing base patching.
 
 > **These images require an external database.** The Derby database bundled with 26.6.1 is built for
 > Java 21 and cannot be loaded on 17, so the server refuses to start rather than fail later in a way
@@ -185,6 +191,9 @@ base and repatched on the same weekly schedule as the Java 21 tags.
 > ```
 >
 > and exits with status 1.
+
+This applies to the Rocky `26.6.1-jdk17` tag exactly as it does to the hardened ones: the
+constraint is the bundled Derby, which is the same in both images.
 
 Set `MP_DATABASE` (`postgres`, `mysql`, `oracle` or `sqlserver`) together with `MP_DATABASE_URL`,
 `MP_DATABASE_USERNAME` and `MP_DATABASE_PASSWORD` — see [Environment Variables](#environment-variables)
