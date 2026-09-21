@@ -1,7 +1,8 @@
 # Publish the BridgeLink Rocky image to Docker Hub (public)  —  IRT-1451
 #
 # Publishes the default Rocky image (Dockerfile) to the public innovarhealthcare/bridgelink
-# repository on Docker Hub, tagged `<version>` (+ optional `latest`). This replaces the old manual
+# repository on Docker Hub, tagged `<version><tag_suffix>` (+ optional `latest`, which only an
+# unqualified publish may move). This replaces the old manual
 # "docker build && docker push" Rocky release step with a repeatable, multi-arch CI job — the
 # public-registry counterpart to publish-ecr.yml.
 #
@@ -84,6 +85,18 @@ jobs:
           # ':' or '/' would retarget the push to another repository rather than fail.
           if [ -n "$SUFFIX" ] && ! [[ "$SUFFIX" =~ ^-[a-z0-9][a-z0-9._-]{0,30}$ ]]; then
             echo "::error::tag_suffix must start with '-' and contain only lowercase letters, digits, '.', '_' or '-', got '$SUFFIX'." >&2
+            exit 1
+          fi
+
+          # Rocky and DHI share ONE Docker Hub repository; the only thing separating them is the
+          # `-dhi` infix in the tag. So a suffix carrying `dhi` or `slim` would publish this Rocky
+          # build over a hardened or WebAdmin-only image -- `-dhi-jdk17` is a live tag, and the
+          # -jdkN agreement check below does not fire on it because it is not an exact -jdkN.
+          # The uniqueness gate in build-images.yml cannot see this either: Rocky publishes
+          # deliberately do not go through MAINTAINED_VERSIONS, so this workflow has to refuse the
+          # namespace itself. Nothing here builds those variants.
+          if [[ "$SUFFIX" =~ (^|-)(dhi|slim)(-|$) ]]; then
+            echo "::error::tag_suffix '$SUFFIX' is in the hardened (-dhi) or WebAdmin-only (-slim) tag namespace, which this workflow does not build. Publishing here would replace one of those images with a Rocky build." >&2
             exit 1
           fi
 
@@ -194,6 +207,45 @@ jobs:
             DOCKERFILE=Dockerfile EXPECTED_UID=1000 CHECK_NO_SHELL=0 \
             bash test/image-test.sh
 
+      # Same two-step scan the other release paths run: a full non-failing SARIF for the Security
+      # tab, then a gate on fixable HIGH/CRITICAL OS packages -- the layer this repo owns. Library
+      # CVEs come from the Core release tarball and cannot be fixed here.
+      #
+      # This was the only release path without it, and it is the one the public pulls.
+      - name: Trivy scan (SARIF, full report)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ env.IMAGE }}:rocky-publish-test
+          scanners: vuln
+          format: sarif
+          output: trivy-rocky-hub.sarif
+          exit-code: "0"
+        env:
+          # Full report must include everything; .trivyignore stays scoped to the gate step below.
+          TRIVY_IGNOREFILE: /dev/null
+
+      - name: Upload Trivy SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-rocky-hub.sarif
+          # Distinct from build-images.yml's trivy-rocky and publish-ecr.yml's
+          # trivy-rocky-release, and carries the suffix so two builds of one version do not
+          # overwrite each other's findings.
+          category: trivy-rocky-hub-${{ github.event.inputs.version }}${{ steps.url.outputs.suffix }}
+
+      - name: Trivy gate (fixable HIGH/CRITICAL, OS packages)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ env.IMAGE }}:rocky-publish-test
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          format: table
+          exit-code: "1"
+        env:
+          TRIVY_PKG_TYPES: os
+
       - name: Compute tags
         id: tags
         env:
@@ -207,6 +259,10 @@ jobs:
           # Re-validate as the last gate before a push: this step composes a registry reference.
           if [ -n "$SUFFIX" ] && ! [[ "$SUFFIX" =~ ^-[a-z0-9][a-z0-9._-]{0,30}$ ]]; then
             echo "::error::refusing to push with tag_suffix '$SUFFIX'." >&2
+            exit 1
+          fi
+          if [[ "$SUFFIX" =~ (^|-)(dhi|slim)(-|$) ]]; then
+            echo "::error::refusing to push a Rocky build into the '-dhi'/'-slim' tag namespace ('$SUFFIX')." >&2
             exit 1
           fi
           T="${{ env.IMAGE }}:${VERSION}${SUFFIX}"
@@ -229,13 +285,37 @@ jobs:
 
       # Public https tarball -> plain curl fetch inside the build; no AWS creds needed.
       - name: Build & push image to Docker Hub
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile
           platforms: linux/amd64,linux/arm64
-          push: ${{ github.event.inputs.push != 'false' }}
+          # == 'true', matching publish-ecr.yml and build-images.yml. The inverse (!= 'false')
+          # pushes when the value is empty, which is the wrong direction for a publish step.
+          push: ${{ github.event.inputs.push == 'true' }}
           build-args: |
             BINARY_URL=${{ steps.url.outputs.binary_url }}
             JAVA_MAJOR=${{ steps.url.outputs.java }}
           tags: ${{ steps.tags.outputs.list }}
+
+      # Tags in this repository are mutable — a later release can move `latest`, and a rebuild can
+      # replace a version tag. The immutable identity is the manifest digest, which is what the
+      # README tells customers to pin, so surface it here rather than making them go and look.
+      - name: Record published digest
+        if: github.event.inputs.push == 'true'
+        env:
+          VERSION: ${{ github.event.inputs.version }}
+          SUFFIX: ${{ steps.url.outputs.suffix }}
+          JAVA_RESOLVED: ${{ steps.url.outputs.java }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          {
+            echo "### Published"
+            echo
+            echo "| tag | java | digest |"
+            echo "| --- | --- | --- |"
+            echo "| ${VERSION}${SUFFIX} | $JAVA_RESOLVED | $DIGEST |"
+            echo
+            echo "Tags are mutable; pin by digest for an immutable reference."
+          } >> "$GITHUB_STEP_SUMMARY"
