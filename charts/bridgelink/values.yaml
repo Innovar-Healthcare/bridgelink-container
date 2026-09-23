@@ -196,3 +196,75 @@ postgres:
       cpu: 1000m
       # -- PostgreSQL memory limit
       memory: 1Gi
+
+# @section WebAdmin Settings
+webadmin:
+  # -- Deploy WebAdmin, the browser-based administrator, alongside BridgeLink. It is pointed at this
+  # release's BridgeLink Service automatically. Requires `acceptLicense` as well.
+  enabled: false
+
+  # -- Accept the WebAdmin license: the Business Source License 1.1 plus the BridgeLink WebAdmin
+  # Supplemental Terms. Read them with `docker run --rm --entrypoint cat
+  # innovarhealthcare/bridgelink-webadmin:26.6.0 /app/LICENSE /app/SUPPLEMENTAL-TERMS.md`. The chart
+  # never accepts them for you: with `enabled: true` and this left false, `helm install` fails with
+  # an explanation instead of starting a container that would exit without running.
+  acceptLicense: false
+
+  image:
+    # -- WebAdmin container image repository
+    repository: innovarhealthcare/bridgelink-webadmin
+    # -- WebAdmin container image tag. WebAdmin is released separately from BridgeLink, and 26.6.0 is
+    # the newest WebAdmin release for the 26.6 line. Bump it together with `bridgelink.image.tag`.
+    tag: "26.6.0"
+    # -- Image pull policy
+    pullPolicy: IfNotPresent
+
+  # -- Port WebAdmin listens on (HTTPS). 8444 is WebAdmin's documented default. It is passed to the
+  # container as `PORT`, because the image's built-in config still says 3000.
+  containerPort: 8444
+
+  service:
+    # -- Service type for WebAdmin (LoadBalancer, ClusterIP, NodePort)
+    type: LoadBalancer
+    # -- Service port for WebAdmin
+    port: 8444
+
+  # -- Extra environment variables for WebAdmin, e.g. `BRIDGELINK_PUBLIC_HOST` or `COOKIE_SECURE`.
+  # `BRIDGELINK_SERVER_URL`, `PORT` and `BL_ACCEPT_LICENSE` are set by the chart and ignored here.
+  env: {}
+
+  resources:
+    requests:
+      # -- CPU request for WebAdmin pods
+      cpu: 100m
+      # -- Memory request for WebAdmin pods
+      memory: 256Mi
+    limits:
+      # -- CPU limit for WebAdmin pods
+      cpu: 500m
+      # -- Memory limit for WebAdmin pods
+      memory: 512Mi
+
+  # -- Liveness probe for WebAdmin. The image has no health endpoint, so this checks the port.
+  livenessProbe:
+    tcpSocket:
+      port: https
+    periodSeconds: 20
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+  # -- Readiness probe for WebAdmin. The image has no health endpoint, so this checks the port.
+  readinessProbe:
+    tcpSocket:
+      port: https
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+  # -- Node selector for WebAdmin pods
+  nodeSelector: {}
+  # -- Pod tolerations for WebAdmin
+  tolerations: []
+  # -- Pod affinity for WebAdmin
+  affinity: {}

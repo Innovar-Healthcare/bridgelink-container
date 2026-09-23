@@ -430,6 +430,145 @@
       ],
       "title": "postgres",
       "type": "object"
+    },
+    "webadmin": {
+      "additionalProperties": false,
+      "description": "Optional WebAdmin deployment",
+      "properties": {
+        "acceptLicense": {
+          "default": false,
+          "description": "Accept the WebAdmin license (BSL 1.1 plus the BridgeLink WebAdmin Supplemental Terms). Required when enabled is true; the chart never accepts it for you.",
+          "required": [],
+          "title": "acceptLicense",
+          "type": "boolean"
+        },
+        "affinity": {
+          "default": "`{}`",
+          "description": "Affinity rules for WebAdmin pod assignment",
+          "required": [],
+          "title": "affinity",
+          "type": "object"
+        },
+        "containerPort": {
+          "default": 8444,
+          "description": "Port WebAdmin listens on (HTTPS), passed to the container as PORT",
+          "required": [],
+          "title": "containerPort",
+          "type": "integer"
+        },
+        "enabled": {
+          "default": false,
+          "description": "Deploy WebAdmin alongside BridgeLink, pointed at this release's BridgeLink Service",
+          "required": [],
+          "title": "enabled",
+          "type": "boolean"
+        },
+        "env": {
+          "additionalProperties": {
+            "type": [
+              "string",
+              "number",
+              "boolean"
+            ]
+          },
+          "default": "`{}`",
+          "description": "Extra environment variables for WebAdmin",
+          "required": [],
+          "title": "env",
+          "type": "object"
+        },
+        "image": {
+          "additionalProperties": false,
+          "properties": {
+            "pullPolicy": {
+              "default": "IfNotPresent",
+              "description": "WebAdmin image pull policy",
+              "required": [],
+              "title": "pullPolicy"
+            },
+            "repository": {
+              "default": "innovarhealthcare/bridgelink-webadmin",
+              "description": "WebAdmin container image repository",
+              "required": [],
+              "title": "repository"
+            },
+            "tag": {
+              "default": "26.6.0",
+              "description": "WebAdmin container image tag",
+              "required": [],
+              "title": "tag"
+            }
+          },
+          "required": [],
+          "title": "image",
+          "type": "object"
+        },
+        "livenessProbe": {
+          "description": "Liveness probe for the WebAdmin container. Set to null to disable.",
+          "required": [],
+          "title": "livenessProbe",
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "nodeSelector": {
+          "default": "`{}`",
+          "description": "Node labels for WebAdmin pod assignment",
+          "required": [],
+          "title": "nodeSelector",
+          "type": "object"
+        },
+        "readinessProbe": {
+          "description": "Readiness probe for the WebAdmin container. Set to null to disable.",
+          "required": [],
+          "title": "readinessProbe",
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "resources": {
+          "description": "Resource limits and requests for the WebAdmin container",
+          "required": [],
+          "title": "resources",
+          "type": "object"
+        },
+        "service": {
+          "additionalProperties": false,
+          "properties": {
+            "port": {
+              "default": 8444,
+              "description": "Service port for WebAdmin",
+              "required": [],
+              "title": "port",
+              "type": "integer"
+            },
+            "type": {
+              "default": "`LoadBalancer`",
+              "description": "Kubernetes Service type for WebAdmin",
+              "required": [],
+              "title": "type"
+            }
+          },
+          "required": [],
+          "title": "service",
+          "type": "object"
+        },
+        "tolerations": {
+          "default": "`[]`",
+          "description": "Tolerations for WebAdmin pod assignment",
+          "items": {
+            "required": []
+          },
+          "required": [],
+          "title": "tolerations",
+          "type": "array"
+        }
+      },
+      "required": [],
+      "title": "webadmin",
+      "type": "object"
     }
   },
   "required": [

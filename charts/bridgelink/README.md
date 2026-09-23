@@ -1,6 +1,6 @@
 # bridgelink
 
-![Version: 0.3.0](https://img.shields.io/badge/Version-0.3.0-informational?style=flat-square)
+![Version: 0.4.0](https://img.shields.io/badge/Version-0.4.0-informational?style=flat-square)
 ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square)
 ![AppVersion: 26.6.1](https://img.shields.io/badge/AppVersion-26.6.1-informational?style=flat-square)
 
@@ -59,7 +59,18 @@ helm uninstall bridgelink
 ## Testing the Deployment
 
 > Using a WebAdmin-only (`-slim`) image? It has no bundled Swing Administrator — manage the instance
-> with WebAdmin (its own deployment) instead of the launcher below.
+> with WebAdmin instead of the launcher below. The chart can deploy it for you, pointed at this
+> release's BridgeLink service:
+>
+> ```bash
+> helm install bridgelink bridgelink/bridgelink \
+>   --set webadmin.enabled=true --set webadmin.acceptLicense=true
+> ```
+>
+> `webadmin.acceptLicense` records that you have read and accept the WebAdmin license (Business
+> Source License 1.1 plus the BridgeLink WebAdmin Supplemental Terms). The chart will not set it for
+> you, and refuses to install WebAdmin without it. WebAdmin then listens on port 8444; the install
+> notes print its URL.
 
 1. Download and install [BridgeLink Administrator Launcher](https://www.innovarhealthcare.com/bridgelink-downloads#comp-mg0zikp4)
 
@@ -203,6 +214,24 @@ not apply.
 | postgres.resources.requests.cpu | string | `"200m"` | PostgreSQL CPU request |
 | postgres.resources.requests.memory | string | `"256Mi"` | PostgreSQL memory request |
 | postgres.service.port | int | `5432` | PostgreSQL port number |
+| webadmin.acceptLicense | bool | `false` | Accept the WebAdmin license: the Business Source License 1.1 plus the BridgeLink WebAdmin Supplemental Terms. Read them with `docker run --rm --entrypoint cat innovarhealthcare/bridgelink-webadmin:26.6.0 /app/LICENSE /app/SUPPLEMENTAL-TERMS.md`. The chart never accepts them for you: with `enabled: true` and this left false, `helm install` fails with an explanation instead of starting a container that would exit without running. |
+| webadmin.affinity | object | `{}` | Pod affinity for WebAdmin |
+| webadmin.containerPort | int | `8444` | Port WebAdmin listens on (HTTPS). 8444 is WebAdmin's documented default. It is passed to the container as `PORT`, because the image's built-in config still says 3000. |
+| webadmin.enabled | bool | `false` | Deploy WebAdmin, the browser-based administrator, alongside BridgeLink. It is pointed at this release's BridgeLink Service automatically. Requires `acceptLicense` as well. |
+| webadmin.env | object | `{}` | Extra environment variables for WebAdmin, e.g. `BRIDGELINK_PUBLIC_HOST` or `COOKIE_SECURE`. `BRIDGELINK_SERVER_URL`, `PORT` and `BL_ACCEPT_LICENSE` are set by the chart and ignored here. |
+| webadmin.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy |
+| webadmin.image.repository | string | `"innovarhealthcare/bridgelink-webadmin"` | WebAdmin container image repository |
+| webadmin.image.tag | string | `"26.6.0"` | WebAdmin container image tag. WebAdmin is released separately from BridgeLink, and 26.6.0 is the newest WebAdmin release for the 26.6 line. Bump it together with `bridgelink.image.tag`. |
+| webadmin.livenessProbe | object | `{"failureThreshold":3,"periodSeconds":20,"tcpSocket":{"port":"https"},"timeoutSeconds":5}` | Liveness probe for WebAdmin. The image has no health endpoint, so this checks the port. |
+| webadmin.nodeSelector | object | `{}` | Node selector for WebAdmin pods |
+| webadmin.readinessProbe | object | `{"failureThreshold":3,"initialDelaySeconds":5,"periodSeconds":10,"tcpSocket":{"port":"https"},"timeoutSeconds":5}` | Readiness probe for WebAdmin. The image has no health endpoint, so this checks the port. |
+| webadmin.resources.limits.cpu | string | `"500m"` | CPU limit for WebAdmin pods |
+| webadmin.resources.limits.memory | string | `"512Mi"` | Memory limit for WebAdmin pods |
+| webadmin.resources.requests.cpu | string | `"100m"` | CPU request for WebAdmin pods |
+| webadmin.resources.requests.memory | string | `"256Mi"` | Memory request for WebAdmin pods |
+| webadmin.service.port | int | `8444` | Service port for WebAdmin |
+| webadmin.service.type | string | `"LoadBalancer"` | Service type for WebAdmin (LoadBalancer, ClusterIP, NodePort) |
+| webadmin.tolerations | list | `[]` | Pod tolerations for WebAdmin |
 
 ## Environment Variables
 

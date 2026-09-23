@@ -59,3 +59,24 @@ Create the name of the service account to use
 {{- default "default" .Values.serviceAccount.name }}
 {{- end }}
 {{- end }}
+
+{{/*
+WebAdmin selector labels. Deliberately NOT built on bridgelink.selectorLabels: the BridgeLink
+Service selects on `app: bl`, so WebAdmin pods carrying it would receive BridgeLink traffic.
+*/}}
+{{- define "bridgelink.webadminSelectorLabels" -}}
+app: webadmin
+app.kubernetes.io/name: {{ include "bridgelink.name" . }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/component: webadmin
+{{- end }}
+
+{{/*
+WebAdmin labels
+*/}}
+{{- define "bridgelink.webadminLabels" -}}
+helm.sh/chart: {{ include "bridgelink.chart" . }}
+{{ include "bridgelink.webadminSelectorLabels" . }}
+app.kubernetes.io/version: {{ .Values.webadmin.image.tag | quote }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- end }}
