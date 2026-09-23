@@ -114,6 +114,86 @@ jobs:
             | grep -q "livenessProbe:" && { echo "::error::livenessProbe=null did not disable it"; exit 1; }
           echo "livenessProbe=null disables it"
 
+      - name: WebAdmin is off by default
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import yaml
+          docs = [d for d in yaml.safe_load_all(open('/tmp/rendered.yaml')) if d]
+          wa = [d['metadata']['name'] for d in docs if d['metadata']['name'].endswith('-webadmin')]
+          assert not wa, f'WebAdmin rendered without webadmin.enabled: {wa}'
+          print('no WebAdmin resources by default')
+          PY
+
+      - name: WebAdmin, when enabled, points at this release's BridgeLink
+        run: |
+          set -euo pipefail
+          # webadmin.env tries to override every chart-owned variable. The chart must ignore those
+          # entries (a duplicate env name is rejected by Kubernetes only at apply time) and keep
+          # unrelated extras.
+          helm template bl charts/bridgelink \
+            --set webadmin.enabled=true --set webadmin.acceptLicense=true \
+            --set webadmin.env.BRIDGELINK_SERVER_URL=https://elsewhere:8443 \
+            --set webadmin.env.PORT=3000 --set webadmin.env.BL_ACCEPT_LICENSE=0 \
+            --set webadmin.env.COOKIE_SECURE=false > /tmp/webadmin.yaml
+          python3 - <<'PY'
+          import yaml
+          docs = [d for d in yaml.safe_load_all(open('/tmp/webadmin.yaml')) if d]
+          vals = yaml.safe_load(open('charts/bridgelink/values.yaml'))
+          def one(kind, suffix):
+              m = [d for d in docs if d['kind'] == kind and d['metadata']['name'].endswith(suffix)]
+              assert len(m) == 1, f'expected one {kind} *{suffix}, got {len(m)}'
+              return m[0]
+          bl_svc, wa_svc = one('Service', '-bl'), one('Service', '-webadmin')
+          bl_dep, wa_dep = one('Deployment', '-bl'), one('Deployment', '-webadmin')
+          c = wa_dep['spec']['template']['spec']['containers'][0]
+          names = [e['name'] for e in c['env']]
+          dupes = sorted({n for n in names if names.count(n) > 1})
+          assert not dupes, f'duplicate env names (webadmin.env overrode a chart-owned one): {dupes}'
+          env = {e['name']: e.get('value') for e in c['env']}
+          assert env.get('COOKIE_SECURE') == 'false', 'webadmin.env extras must still be passed through'
+
+          # Computed from the rendered Service, so a rename of either side fails here.
+          https = next(p['port'] for p in bl_svc['spec']['ports'] if p['name'] == 'https')
+          want = f"https://{bl_svc['metadata']['name']}:{https}"
+          assert env.get('BRIDGELINK_SERVER_URL') == want, \
+              f"BRIDGELINK_SERVER_URL is {env.get('BRIDGELINK_SERVER_URL')!r}, want {want!r}"
+          assert env.get('BL_ACCEPT_LICENSE') == '1', 'BL_ACCEPT_LICENSE must be "1" once accepted'
+
+          # 8444 is WebAdmin's documented default. The image's built-in config says 3000, so PORT
+          # must be passed, and it must agree with the port the Service targets.
+          port = next(p for p in c['ports'] if p['name'] == 'https')['containerPort']
+          assert port == 8444, f'WebAdmin containerPort is {port}, want the documented 8444'
+          assert env.get('PORT') == str(port), f"PORT env {env.get('PORT')!r} != containerPort {port}"
+          assert wa_svc['spec']['ports'][0]['targetPort'] == 'https'
+
+          tag = c['image'].rsplit(':', 1)[1]
+          # str(): an unquoted two-part tag such as 26.7 loads from YAML as a float.
+          assert tag == str(vals['webadmin']['image']['tag']), f'image tag {tag} is not the values pin'
+
+          # The BridgeLink Service selects on `app: bl`. WebAdmin pods carrying it would receive
+          # BridgeLink traffic, so each Service must select only its own pods.
+          def selects(svc, dep):
+              labels = dep['spec']['template']['metadata']['labels']
+              return all(labels.get(k) == v for k, v in svc['spec']['selector'].items())
+          assert selects(bl_svc, bl_dep) and selects(wa_svc, wa_dep), 'a Service misses its own pods'
+          assert not selects(bl_svc, wa_dep), 'the BridgeLink Service selects WebAdmin pods'
+          assert not selects(wa_svc, bl_dep), 'the WebAdmin Service selects BridgeLink pods'
+          print('WebAdmin wiring OK')
+          PY
+
+      - name: WebAdmin is never deployed with the license accepted implicitly
+        run: |
+          set -euo pipefail
+          # Accepting the WebAdmin license is the user's decision. Enabling WebAdmin without
+          # webadmin.acceptLicense must fail the render, not deploy something that accepts it.
+          if helm template bl charts/bridgelink --set webadmin.enabled=true > /tmp/nolicense.txt 2>&1; then
+            echo "::error::webadmin.enabled=true rendered without webadmin.acceptLicense=true"; exit 1
+          fi
+          grep -q "acceptLicense" /tmp/nolicense.txt \
+            || { echo "::error::the failure does not name webadmin.acceptLicense"; cat /tmp/nolicense.txt; exit 1; }
+          echo "enabling WebAdmin without acceptLicense is refused"
+
       - name: Chart README is regenerated from values.yaml
         run: |
           set -euo pipefail
