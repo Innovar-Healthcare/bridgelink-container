@@ -55,6 +55,12 @@
 #                          "java" < 21: 26.3.1 and 26.6.0 are also built on 17 and their Derby boots
 #                          fine. Forgetting it is loud — every default-backend container hits the
 #                          preflight and the suite fails red, before any push.
+#                          "version" must be a plain <major>.<minor>.<patch>, because it is spliced
+#                          into every tag and the floating minor tag is derived from it.
+#                          Floating minor tags (<major>.<minor>-dhi / <major>.<minor>-dhi-slim) are
+#                          DERIVED, not configured: in each (destination, minor) group, the newest
+#                          entry with no tag_suffix gets them. A qualified entry never does — its
+#                          tags name a specific JDK, and a floating tag cannot promise that.
 #     AWS_PUBLISH_ROLE_ARN OIDC role assumed for the ECR push (bridgelink-publish). Assumable from
 #                          the integration branch ONLY, so a private publish cannot be dispatched
 #                          from a feature branch. Only needed once a "private" entry exists.
@@ -140,7 +146,8 @@ concurrency:
 
 jobs:
   # Resolve inputs vs. scheduled-run defaults once, share with downstream jobs. Produces a `matrix`
-  # output (JSON array of {version, binary_url, java, latest, private}) that the dhi job fans out over:
+  # output (JSON array of {version, binary_url, java, latest, private, tag_suffix, derby_unsupported,
+  # minor}) that the dhi job fans out over:
   #   - pull_request              -> single entry from DEFAULT_VERSION/DEFAULT_BINARY_URL/DEFAULT_JAVA (PR gate)
   #   - workflow_dispatch w/version -> single ad hoc entry from the version/binary_url/java/update_latest inputs
   #   - schedule, or workflow_dispatch w/o version -> every entry in MAINTAINED_VERSIONS
@@ -197,6 +204,39 @@ jobs:
             fi
           }
 
+          # Floating minor tags. <major>.<minor>-dhi follows the newest patch of that minor, so a
+          # user can take patches without also taking the next minor (which `latest-dhi` would).
+          #  - Newest is decided per DESTINATION: a version goes to either private ECR or public
+          #    Docker Hub, and a newer patch published only privately must not leave the public
+          #    minor tag pointing at nothing newer than it already had. So the group key is
+          #    (private, minor), not minor alone.
+          #  - Only entries with no tag_suffix take part. A qualified tag names a JDK; the minor
+          #    tag follows each release's primary JDK, which can change inside one minor (26.6.0
+          #    shipped on 17, 26.6.1 on 21).
+          #  - Versions compare numerically (26.6.10 > 26.6.9). The shape check below rejects
+          #    leading zeros, which would otherwise make 26.06.1 and 26.6.1 compare equal while
+          #    producing two different minor tags.
+          # Both matrix paths use this same definition, so a one-off dispatch and the weekly rebuild
+          # can never disagree about which patch owns a minor tag. Every jq call that uses it must
+          # pass --arg re "$VERSION_RE" (a jq string literal would need the backslashes doubled).
+          VERSION_RE='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+          # A quoted heredoc rather than a single-quoted string, so shellcheck does not read the jq
+          # variables as shell expansions that failed to happen.
+          MINOR_JQ="$(cat <<'JQ'
+            def eligible: (.tag_suffix // "") == "" and (.version | type == "string" and test($re));
+            def minor_of: .version | split(".")[0:2] | join(".");
+            def newest_per_minor:
+              map(select(eligible))
+              | group_by([(.private // false), minor_of])
+              | map(max_by(.version | split(".") | map(tonumber)) | {p: (.private // false), v: .version});
+            def with_minor($maintained):
+              ($maintained | newest_per_minor) as $n
+              | map(. as $e | .minor = (($e | eligible)
+                                       and any($n[]; .p == ($e.private // false) and .v == $e.version)));
+          JQ
+          )"
+
+          MINOR_NOTE=""
           ROCKY_JAVA="${INPUT_JAVA:-${DEFAULT_JAVA:-21}}"
           # Tracks ROCKY_JAVA: whichever JDK the Rocky gate builds on, the suite has to be told
           # whether that build can use embedded Derby. Only a dispatch that matches a
@@ -213,11 +253,17 @@ jobs:
             # derby_unsupported on every path)
             # `matrix.<field>` splice downstream has a value on every event type.
             MATRIX=$(jq -nc --arg v "$DEFAULT_VERSION" --arg u "$DEFAULT_BINARY_URL" --arg j "$ROCKY_JAVA" \
-              '[{version:$v, binary_url:$u, java:$j, latest:false, private:false, tag_suffix:"", derby_unsupported:false}]')
+              '[{version:$v, binary_url:$u, java:$j, latest:false, private:false, tag_suffix:"", derby_unsupported:false, minor:false}]')
             PUSH="false"
           elif [ "$EVENT_NAME" = "workflow_dispatch" ] && [ -n "$INPUT_VERSION" ]; then
             if [ -z "$INPUT_BINARY_URL" ]; then
               echo "::error::binary_url is required when version is set on a manual dispatch." >&2
+              exit 1
+            fi
+            # Same shape rule as the weekly path. The uniqueness gate never sees a one-off, so this
+            # is what stops a "26.6" dispatch publishing its version tag over the 26.6-dhi floating tag.
+            if ! [[ "$INPUT_VERSION" =~ $VERSION_RE ]]; then
+              echo "::error::version must be a plain <major>.<minor>.<patch> (e.g. 26.6.1, no leading zeros), got '$INPUT_VERSION'." >&2
               exit 1
             fi
             # Same guard as the publish workflows: if this version is already maintained, its
@@ -287,6 +333,15 @@ jobs:
               --arg s "$INPUT_TAG_SUFFIX" \
               --argjson l "$LATEST_FLAG" --argjson p "$PRIVATE_FLAG" --argjson d "$DERBY_FLAG" \
               '[{version:$v, binary_url:$u, java:$j, latest:$l, private:$p, tag_suffix:$s, derby_unsupported:$d}]')
+            # The minor tag is decided against MAINTAINED_VERSIONS, never against this dispatch
+            # alone. A version that is not listed gets none: if a one-off moved 26.6-dhi to an
+            # unlisted 26.6.2, the next weekly rebuild would move it straight back to the newest
+            # LISTED patch. Listing the version is what makes the minor tag follow it.
+            MATRIX=$(jq -c --arg re "$VERSION_RE" --argjson m "${MAINTAINED_VERSIONS_RAW:-[]}" \
+              "$MINOR_JQ"' with_minor($m)' <<<"$MATRIX")
+            if [ "$(jq -r '.[0].minor' <<<"$MATRIX")" != "true" ] && [ -z "$INPUT_TAG_SUFFIX" ]; then
+              MINOR_NOTE="\`${INPUT_VERSION%.*}-dhi\` is not moved: $INPUT_VERSION is not the newest patch of its minor in MAINTAINED_VERSIONS for this destination. Add or update its entry, and the next weekly rebuild moves it."
+            fi
             PUSH="$INPUT_PUSH"
           else
             # Scheduled weekly rebuild, or a manual dispatch with no version override: rebuild every
@@ -344,10 +399,23 @@ jobs:
               validate_suffix "$_s" "$_j"
             done < <(jq -r '.[] | [((.java // 17) | tostring), (.tag_suffix // "")] | @tsv' \
                        <<<"$MAINTAINED_VERSIONS_RAW")
-            MATRIX=$(jq -c 'map(.private = (.private // false)
-                                | .java = ((.java // 17) | tostring)
-                                | .tag_suffix = (.tag_suffix // "")
-                                | .derby_unsupported = (.derby_unsupported // false))' \
+            # `version` must be a plain <major>.<minor>.<patch>. It is spliced into every tag this
+            # entry publishes and the floating minor tag is cut from it, so a "26.6" entry would
+            # publish its version tag straight over the 26.6 floating tag, and a "26.6.1-rc1" entry
+            # would silently never own one.
+            if ! jq -e --arg re "$VERSION_RE" 'all(.[]; (.version | type == "string") and (.version | test($re)))' \
+                 <<<"$MAINTAINED_VERSIONS_RAW" >/dev/null; then
+              echo "::error::MAINTAINED_VERSIONS has a \"version\" that is not a plain <major>.<minor>.<patch> (e.g. 26.6.1, no leading zeros)." >&2
+              jq -c --arg re "$VERSION_RE" '.[] | select((.version | type != "string") or (.version | test($re) | not)) | {version}' \
+                <<<"$MAINTAINED_VERSIONS_RAW" >&2 || true
+              exit 1
+            fi
+            MATRIX=$(jq -c --arg re "$VERSION_RE" "$MINOR_JQ"'
+                          map(.private = (.private // false)
+                              | .java = ((.java // 17) | tostring)
+                              | .tag_suffix = (.tag_suffix // "")
+                              | .derby_unsupported = (.derby_unsupported // false))
+                          | with_minor(.)' \
               <<<"$MAINTAINED_VERSIONS_RAW")
             if [ "$(jq 'length' <<<"$MATRIX")" -eq 0 ]; then
               echo "::error::MAINTAINED_VERSIONS repo variable parsed to an empty array — nothing to rebuild." >&2
@@ -364,22 +432,29 @@ jobs:
             # variant sits between version and suffix, so those two are not the same comparison:
             # an entry with tag_suffix "-slim" publishes <ver>-dhi-slim, which is another entry's
             # SLIM tag, and a version+suffix key sees no duplicate. Rolling tags are enumerated
-            # here too, so this also covers two entries claiming the same latest tag.
+            # here too, so this also covers two entries claiming the same latest tag, and two
+            # entries claiming the same floating minor tag (two unqualified entries for one version
+            # and destination both come out newest, and both are reported here).
             DUPES="$(jq -r '.[] |
                        (if .private then
                           {d:"ecr", f:"innovarhealthcare/bridgelink-dhi", s:"innovarhealthcare/bridgelink-dhi-slim"}
                         else
                           {d:"hub", f:"innovarhealthcare/bridgelink", s:"innovarhealthcare/bridgelink"}
                         end) as $r
+                       | (.version | split(".")[0:2] | join(".")) as $minor
                        | [ "\($r.d) \($r.f):\(.version)-dhi\(.tag_suffix)",
                            "\($r.d) \($r.s):\(.version)-dhi-slim\(.tag_suffix)" ]
                          + (if .latest then
                               [ "\($r.d) \($r.f):latest-dhi\(.tag_suffix)",
                                 "\($r.d) \($r.s):latest-dhi-slim\(.tag_suffix)" ]
                             else [] end)
+                         + (if .minor then
+                              [ "\($r.d) \($r.f):\($minor)-dhi",
+                                "\($r.d) \($r.s):\($minor)-dhi-slim" ]
+                            else [] end)
                        | .[]' <<<"$MATRIX" | sort | uniq -d)"
             if [ -n "$DUPES" ]; then
-              echo "::error::Two MAINTAINED_VERSIONS entries publish the same image reference, so this rebuild would replace an already-released image. Give one of them a distinct tag_suffix (e.g. -jdk17), or check which entry owns the rolling latest tag. Colliding: $(tr '\n' ' ' <<<"$DUPES")" >&2
+              echo "::error::Two MAINTAINED_VERSIONS entries publish the same image reference, so this rebuild would replace an already-released image. Give one of them a distinct tag_suffix (e.g. -jdk17), or check which entry owns the rolling latest tag or the floating minor tag. Colliding: $(tr '\n' ' ' <<<"$DUPES")" >&2
               exit 1
             fi
             PUSH="$([ "$EVENT_NAME" = "schedule" ] && echo true || echo "$INPUT_PUSH")"
@@ -394,10 +469,16 @@ jobs:
             echo "| tags | java | destination | push |"
             echo "|---|---|---|---|"
             jq -r --arg push "$PUSH" '.[] |
-              "| `\(.version)-dhi\(.tag_suffix)` + `\(.version)-dhi-slim\(.tag_suffix)`"
+              (.version | split(".")[0:2] | join(".")) as $minor
+              | "| `\(.version)-dhi\(.tag_suffix)` + `\(.version)-dhi-slim\(.tag_suffix)`"
               + (if .latest then " + `latest-dhi\(.tag_suffix)` + `latest-dhi-slim\(.tag_suffix)`" else "" end)
+              + (if .minor then " + `\($minor)-dhi` + `\($minor)-dhi-slim`" else "" end)
               + " | \(.java) | \(if .private then "private ECR" else "public Docker Hub" end) | \($push) |"' \
               <<<"$MATRIX"
+            if [ -n "$MINOR_NOTE" ]; then
+              echo
+              echo "$MINOR_NOTE"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
           echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
           echo "push=$PUSH" >> "$GITHUB_OUTPUT"
@@ -601,6 +682,7 @@ jobs:
         env:
           PRIVATE: ${{ matrix.private }}
           LATEST: ${{ matrix.latest }}
+          MINOR: ${{ matrix.minor }}
           VERSION: ${{ matrix.version }}
           SUFFIX: ${{ matrix.tag_suffix }}
           REGISTRY: ${{ steps.ecr.outputs.registry }}
@@ -613,6 +695,17 @@ jobs:
             echo "::error::refusing to push with tag_suffix '$SUFFIX'." >&2
             exit 1
           fi
+          # Floating minor tag (params decided which entry owns it). Re-checked here for the same
+          # reason as the suffix: a qualified entry must never move the unqualified minor tag, and
+          # the tag is cut from VERSION, which has to be <major>.<minor>.<patch> for that to work.
+          MINOR_TAG=""
+          if [ "$MINOR" = "true" ]; then
+            if [ -n "$SUFFIX" ] || ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::refusing to move a floating minor tag from '$VERSION$SUFFIX'." >&2
+              exit 1
+            fi
+            MINOR_TAG="${VERSION%.*}"
+          fi
           if [ "$PRIVATE" = "true" ]; then
             if [ -z "$REGISTRY" ]; then
               echo "::error::ECR login produced no registry — cannot publish $VERSION privately." >&2
@@ -624,12 +717,20 @@ jobs:
               T="$T"$'\n'"$REGISTRY/innovarhealthcare/bridgelink-dhi:latest-dhi${SUFFIX}"
               S="$S"$'\n'"$REGISTRY/innovarhealthcare/bridgelink-dhi-slim:latest-dhi-slim${SUFFIX}"
             fi
+            if [ -n "$MINOR_TAG" ]; then
+              T="$T"$'\n'"$REGISTRY/innovarhealthcare/bridgelink-dhi:${MINOR_TAG}-dhi"
+              S="$S"$'\n'"$REGISTRY/innovarhealthcare/bridgelink-dhi-slim:${MINOR_TAG}-dhi-slim"
+            fi
           else
             T="innovarhealthcare/bridgelink:${VERSION}-dhi${SUFFIX}"
             S="innovarhealthcare/bridgelink:${VERSION}-dhi-slim${SUFFIX}"
             if [ "$LATEST" = "true" ]; then
               T="$T"$'\n'"innovarhealthcare/bridgelink:latest-dhi${SUFFIX}"
               S="$S"$'\n'"innovarhealthcare/bridgelink:latest-dhi-slim${SUFFIX}"
+            fi
+            if [ -n "$MINOR_TAG" ]; then
+              T="$T"$'\n'"innovarhealthcare/bridgelink:${MINOR_TAG}-dhi"
+              S="$S"$'\n'"innovarhealthcare/bridgelink:${MINOR_TAG}-dhi-slim"
             fi
           fi
           { echo "list<<EOF"; echo "$T"; echo "EOF"; } >> "$GITHUB_OUTPUT"
@@ -680,11 +781,18 @@ jobs:
         env:
           VERSION: ${{ matrix.version }}
           SUFFIX: ${{ matrix.tag_suffix }}
+          MINOR: ${{ matrix.minor }}
           JAVA: ${{ matrix.java }}
           DESTINATION: ${{ matrix.private && 'private ECR' || 'public Docker Hub' }}
           DHI_DIGEST: ${{ steps.dhi.outputs.digest }}
           SLIM_DIGEST: ${{ steps.slim.outputs.digest }}
         run: |
+          DHI_TAGS="\`${VERSION}-dhi${SUFFIX}\`"
+          SLIM_TAGS="\`${VERSION}-dhi-slim${SUFFIX}\`"
+          if [ "$MINOR" = "true" ]; then
+            DHI_TAGS="$DHI_TAGS, \`${VERSION%.*}-dhi\`"
+            SLIM_TAGS="$SLIM_TAGS, \`${VERSION%.*}-dhi-slim\`"
+          fi
           {
             # Heading carries the qualifier and the JDK: two entries for one version publish two
             # different images, and a summary that headed both "### <version>" would read as one.
@@ -692,8 +800,8 @@ jobs:
             echo
             echo "| variant | tag | digest |"
             echo "| --- | --- | --- |"
-            echo "| dhi | \`${VERSION}-dhi${SUFFIX}\` | \`$DHI_DIGEST\` |"
-            echo "| dhi-slim | \`${VERSION}-dhi-slim${SUFFIX}\` | \`$SLIM_DIGEST\` |"
+            echo "| dhi | $DHI_TAGS | \`$DHI_DIGEST\` |"
+            echo "| dhi-slim | $SLIM_TAGS | \`$SLIM_DIGEST\` |"
             echo
             echo "Tags are mutable; pin by digest for an immutable reference."
           } >> "$GITHUB_STEP_SUMMARY"
