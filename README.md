@@ -35,15 +35,22 @@ For deployments that cannot move to Java 21 yet, 26.6.1 is also published on Jav
 `26.6.1-jdk17` (Rocky) and `26.6.1-dhi-jdk17` (hardened). **Those images require an external
 database** — see [Java version](#java-version) before using one.
 
+**Minor-version tags** such as `26.6`, `26.6-dhi` and `26.6-dhi-slim` follow the newest patch of
+that release line. Use one to pick up patch releases without also moving to the next minor
+release, which `latest` would do. A minor tag follows each release's **primary JDK**, so it can
+change Java version within one line: 26.6.0 runs on Java 17 and 26.6.1 on Java 21. If you must
+stay on Java 17, use the exact `-jdk17` tags; they have no minor-version tag. When an upgrade has
+to be deliberate, pin by digest (see [Tag stability](#tag-stability)).
+
 ##### Rockylinux9 OpenJDK 21
 
-* [26.6.1, latest](https://github.com/Innovar-Healthcare/bridgelink-container/blob/bl_26.6.1/)
+* [26.6.1, 26.6, latest](https://github.com/Innovar-Healthcare/bridgelink-container/blob/bl_26.6.1/)
 
 ##### Rockylinux9 OpenJDK 17
 
 * [26.6.1-jdk17](https://github.com/Innovar-Healthcare/bridgelink-container/blob/bl_26.6.1/) — requires an external database ([why](#java-version))
 * [26.6.0](https://github.com/Innovar-Healthcare/bridgelink-container/blob/bl_26.6.0/)
-* [26.3.1](https://github.com/Innovar-Healthcare/bridgelink-container/blob/bl_26.3.1/)
+* [26.3.1, 26.3](https://github.com/Innovar-Healthcare/bridgelink-container/blob/bl_26.3.1/)
 * [26.3.0](https://github.com/Innovar-Healthcare/bridgelink-container/blob/bl_26.3.0/)
 * [4.6.1](https://github.com/Innovar-Healthcare/bridgelink-container/blob/bl_4.6.1/Dockerfile)
 * [4.6.0](https://github.com/Innovar-Healthcare/bridgelink-container/blob/bl_4.6.0/Dockerfile)
@@ -52,8 +59,8 @@ database** — see [Java version](#java-version) before using one.
 
 ##### Amazon Corretto 21 Debian 13 — Docker Hardened Image (DHI)
 
-* [26.6.1-dhi, latest-dhi](https://github.com/Innovar-Healthcare/bridgelink-container/blob/main/Dockerfile.dhi)
-* [26.6.1-dhi-slim, latest-dhi-slim](https://github.com/Innovar-Healthcare/bridgelink-container/blob/main/Dockerfile.dhi) — WebAdmin-only (no bundled Swing Administrator)
+* [26.6.1-dhi, 26.6-dhi, latest-dhi](https://github.com/Innovar-Healthcare/bridgelink-container/blob/main/Dockerfile.dhi)
+* [26.6.1-dhi-slim, 26.6-dhi-slim, latest-dhi-slim](https://github.com/Innovar-Healthcare/bridgelink-container/blob/main/Dockerfile.dhi) — WebAdmin-only (no bundled Swing Administrator)
 
 ##### Amazon Corretto 17 Debian 13 — Docker Hardened Image (DHI)
 
@@ -61,8 +68,8 @@ database** — see [Java version](#java-version) before using one.
 * [26.6.1-dhi-slim-jdk17](https://github.com/Innovar-Healthcare/bridgelink-container/blob/main/Dockerfile.dhi) — WebAdmin-only (no bundled Swing Administrator); requires an external database
 * [26.6.0-dhi](https://github.com/Innovar-Healthcare/bridgelink-container/blob/main/Dockerfile.dhi)
 * [26.6.0-dhi-slim](https://github.com/Innovar-Healthcare/bridgelink-container/blob/main/Dockerfile.dhi) — WebAdmin-only (no bundled Swing Administrator)
-* [26.3.1-dhi](https://github.com/Innovar-Healthcare/bridgelink-container/blob/main/Dockerfile.dhi)
-* [26.3.1-dhi-slim](https://github.com/Innovar-Healthcare/bridgelink-container/blob/main/Dockerfile.dhi) — WebAdmin-only (no bundled Swing Administrator)
+* [26.3.1-dhi, 26.3-dhi](https://github.com/Innovar-Healthcare/bridgelink-container/blob/main/Dockerfile.dhi)
+* [26.3.1-dhi-slim, 26.3-dhi-slim](https://github.com/Innovar-Healthcare/bridgelink-container/blob/main/Dockerfile.dhi) — WebAdmin-only (no bundled Swing Administrator)
 
 ------------
 
@@ -135,6 +142,7 @@ A tag may also carry a **JDK qualifier** when one release is published on two Ja
 `26.6.1-dhi` is the Java 21 build and `26.6.1-dhi-jdk17` the Java 17 one. An unqualified tag always
 means that release's primary JDK, so existing references keep pointing where they did.
 
+<a name="tag-stability"></a>
 **Tag stability, and what keeps getting patched.** The `-dhi` and `-dhi-slim` tags are **mutable by
 design**: when the upstream hardened base is repatched, the same `<version>-dhi` tag is rebuilt and
 re-pushed, so pulling a supported version keeps picking up base-image security fixes without you
@@ -147,6 +155,11 @@ docker pull innovarhealthcare/bridgelink@sha256:<digest>
 
 The standard Rocky tags work the other way: they are built once per release and are **not** rebuilt,
 so OS-level CVEs in them accumulate until the next release.
+
+Minor-version tags move on the same schedule as the tags they follow. `26.6-dhi` moves every week
+with the hardened rebuild, and also when a new 26.6 patch ships. The Rocky `26.6` tag moves only
+when a new 26.6 patch is published. Either way, a minor tag can move you to a new patch, and with
+it a new JDK, without warning. Pin by digest if that is not acceptable.
 
 **Build** (the DHI base is pulled from the free Community registry — run `docker login dhi.io` first).
 `BINARY_URL` points at a BridgeLink release tarball:
