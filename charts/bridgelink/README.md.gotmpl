@@ -57,7 +57,18 @@ helm uninstall bridgelink
 ## Testing the Deployment
 
 > Using a WebAdmin-only (`-slim`) image? It has no bundled Swing Administrator — manage the instance
-> with WebAdmin (its own deployment) instead of the launcher below.
+> with WebAdmin instead of the launcher below. The chart can deploy it for you, pointed at this
+> release's BridgeLink service:
+>
+> ```bash
+> helm install bridgelink bridgelink/bridgelink \
+>   --set webadmin.enabled=true --set webadmin.acceptLicense=true
+> ```
+>
+> `webadmin.acceptLicense` records that you have read and accept the WebAdmin license (Business
+> Source License 1.1 plus the BridgeLink WebAdmin Supplemental Terms). The chart will not set it for
+> you, and refuses to install WebAdmin without it. WebAdmin then listens on port 8444; the install
+> notes print its URL.
 
 1. Download and install [BridgeLink Administrator Launcher](https://www.innovarhealthcare.com/bridgelink-downloads#comp-mg0zikp4)
 

@@ -6,6 +6,7 @@
 * [Quick Reference](#quick-reference)
 * [What is BridgeLink (formerly Mirth Connect)](#what-is-connect)
 * [Hardened (DHI) image](#hardened-dhi-image)
+  * [Running WebAdmin alongside](#running-webadmin)
 * [Image security scanning](#image-security-scanning)
 * [How to use this image](#how-to-use)
   * [Start a BridgeLink instance](#start-bridgelink)
@@ -241,6 +242,33 @@ docker build \
 > Note: this image contains BridgeLink **Core** without the Swing client — it does **not** bundle the
 > WebAdmin/WebUI itself, which ships as its own separate container.
 
+<a name="running-webadmin"></a>
+**Running WebAdmin alongside.** WebAdmin runs as a second container next to BridgeLink
+(`innovarhealthcare/bridgelink-webadmin`). Both compose files in this repo and the Helm chart can
+start it for you, already pointed at the bundled server. It is off by default:
+
+```
+# docker-compose.yml (Rocky) or docker-compose.dhi.yml (hardened) -- then open https://localhost:8444
+BL_ACCEPT_LICENSE=1 docker compose --profile webadmin up
+BL_ACCEPT_LICENSE=1 docker compose -f docker-compose.dhi.yml --profile webadmin up
+
+# Helm chart (charts/bridgelink/)
+helm install bridgelink charts/bridgelink \
+  --set webadmin.enabled=true --set webadmin.acceptLicense=true
+```
+
+WebAdmin is licensed under the Business Source License 1.1 plus the BridgeLink WebAdmin
+Supplemental Terms, and neither [`docker-compose.yml`](docker-compose.yml),
+[`docker-compose.dhi.yml`](docker-compose.dhi.yml) nor the [chart](charts/bridgelink/) accepts
+them for you. `BL_ACCEPT_LICENSE=1` (compose) and `webadmin.acceptLicense=true` (Helm) are how
+you do that yourself. Without it, the compose container prints the terms and exits, and the chart
+refuses to install WebAdmin.
+
+WebAdmin is not bundled into the BridgeLink images. It is a Node app and BridgeLink is a JVM
+server, so one image would need two processes and a supervisor to run them. The hardened image has
+no shell to run a supervisor, and adding a Node runtime would add to the CVE surface that image
+exists to minimize.
+
 **Run.** The hardened image runs like the Rocky one; you just select it by tag and run as UID
 `65532`. Any mounted `appdata` / `custom-extensions` directory must be owned by `65532` so the
 container can write to it. A ready-to-use compose file, `docker-compose.dhi.yml`, is the DHI
@@ -380,6 +408,10 @@ Look at the [Environment Variables](#environment-variables) section for more ava
 ## Using [`docker stack deploy`](https://docs.docker.com/engine/reference/commandline/stack_deploy/) or [`docker-compose`](https://github.com/docker/compose) [↑](#top)
 
 With `docker stack` or `docker-compose` you can easily setup and launch multiple related containers. For example you might want to launch both BridgeLink *and* a PostgreSQL database to run alongside it.
+
+The `docker-compose.yml` and `docker-compose.dhi.yml` files in this repo can also start WebAdmin, the
+browser-based administrator, with `--profile webadmin`; see
+[Running WebAdmin alongside](#running-webadmin).
 
 ```bash
 docker-compose -f stack.yml up

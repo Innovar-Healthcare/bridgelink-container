@@ -1,0 +1,17 @@
+{{- if .Values.webadmin.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "bridgelink.fullname" . }}-webadmin
+  labels:
+    {{- include "bridgelink.webadminLabels" . | nindent 4 }}
+spec:
+  type: {{ .Values.webadmin.service.type }}
+  ports:
+    - port: {{ .Values.webadmin.service.port }}
+      targetPort: https
+      protocol: TCP
+      name: https
+  selector:
+    {{- include "bridgelink.webadminSelectorLabels" . | nindent 4 }}
+{{- end }}

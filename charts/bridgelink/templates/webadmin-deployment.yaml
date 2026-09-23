@@ -1,0 +1,74 @@
+{{- if .Values.webadmin.enabled }}
+{{- if not .Values.webadmin.acceptLicense }}
+{{- fail (printf "webadmin.enabled=true also requires webadmin.acceptLicense=true. WebAdmin is licensed under the Business Source License 1.1 and the BridgeLink WebAdmin Supplemental Terms; read them before accepting: docker run --rm --entrypoint cat %s:%s /app/LICENSE /app/SUPPLEMENTAL-TERMS.md -- the chart does not accept them for you." .Values.webadmin.image.repository (toString .Values.webadmin.image.tag)) }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "bridgelink.fullname" . }}-webadmin
+  labels:
+    {{- include "bridgelink.webadminLabels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "bridgelink.webadminSelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "bridgelink.webadminSelectorLabels" . | nindent 8 }}
+    spec:
+      securityContext:
+        # The image's `node` user. Its entrypoint writes webadmin.conf and a self-signed TLS
+        # certificate under /app at startup, so the root filesystem must stay writable.
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+      containers:
+        - name: webadmin
+          image: "{{ .Values.webadmin.image.repository }}:{{ .Values.webadmin.image.tag }}"
+          imagePullPolicy: {{ .Values.webadmin.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+          ports:
+            - name: https
+              containerPort: {{ .Values.webadmin.containerPort }}
+              protocol: TCP
+          env:
+            # This release's BridgeLink Service. WebAdmin accepts its self-signed certificate.
+            - name: BRIDGELINK_SERVER_URL
+              value: "https://{{ include "bridgelink.fullname" . }}-bl:{{ .Values.bridgelink.service.ports.https }}"
+            - name: PORT
+              value: {{ .Values.webadmin.containerPort | quote }}
+            # Only reached when webadmin.acceptLicense is true (see the check at the top).
+            - name: BL_ACCEPT_LICENSE
+              value: "1"
+            {{- range $key, $value := .Values.webadmin.env }}
+            {{- if not (has $key (list "BRIDGELINK_SERVER_URL" "PORT" "BL_ACCEPT_LICENSE")) }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.webadmin.resources | nindent 12 }}
+          {{- if .Values.webadmin.livenessProbe }}
+          livenessProbe:
+            {{- toYaml .Values.webadmin.livenessProbe | nindent 12 }}
+          {{- end }}
+          {{- if .Values.webadmin.readinessProbe }}
+          readinessProbe:
+            {{- toYaml .Values.webadmin.readinessProbe | nindent 12 }}
+          {{- end }}
+      {{- with .Values.webadmin.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.webadmin.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.webadmin.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

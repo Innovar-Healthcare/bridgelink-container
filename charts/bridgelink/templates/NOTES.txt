@@ -28,6 +28,20 @@ To get the application URL, run these commands:
   - HTTPS: https://127.0.0.1:{{ .Values.bridgelink.service.ports.https }}
 {{- end }}
 
+{{- if .Values.webadmin.enabled }}
+{{- $wa := printf "%s-webadmin" (include "bridgelink.fullname" .) }}
+
+WebAdmin (connected to this release's BridgeLink server):
+{{- if eq .Values.webadmin.service.type "LoadBalancer" }}
+  export WEBADMIN_IP=$(kubectl get svc --namespace {{ .Release.Namespace }} {{ $wa }} -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+  echo "- WebAdmin: https://$WEBADMIN_IP:{{ .Values.webadmin.service.port }}"
+{{- else }}
+  kubectl port-forward --namespace {{ .Release.Namespace }} svc/{{ $wa }} {{ .Values.webadmin.service.port }}:{{ .Values.webadmin.service.port }} &
+  Then open https://127.0.0.1:{{ .Values.webadmin.service.port }}
+{{- end }}
+  WebAdmin serves a self-signed certificate by default, so expect a browser warning.
+{{- end }}
+
 Database connection:
   Host: {{ include "bridgelink.fullname" . }}-postgres.{{ .Release.Namespace }}.svc:5432
   Database: {{ .Values.postgres.credentials.database }}
