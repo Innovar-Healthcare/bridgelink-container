@@ -204,10 +204,11 @@ webadmin:
   enabled: false
 
   # -- Accept the WebAdmin license: the Business Source License 1.1 plus the BridgeLink WebAdmin
-  # Supplemental Terms. Read them with `docker run --rm --entrypoint cat
-  # innovarhealthcare/bridgelink-webadmin:26.6.0 /app/LICENSE /app/SUPPLEMENTAL-TERMS.md`. The chart
-  # never accepts them for you: with `enabled: true` and this left false, `helm install` fails with
-  # an explanation instead of starting a container that would exit without running.
+  # Supplemental Terms. Read them with `docker run --rm --entrypoint cat <image> /app/LICENSE
+  # /app/SUPPLEMENTAL-TERMS.md`, using the image set under `image:` below; the install error prints
+  # the exact command. The chart never accepts them for you: with `enabled: true` and this left
+  # false, `helm install` fails with an explanation instead of starting a container that would exit
+  # without running.
   acceptLicense: false
 
   image:

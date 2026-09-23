@@ -214,7 +214,7 @@ not apply.
 | postgres.resources.requests.cpu | string | `"200m"` | PostgreSQL CPU request |
 | postgres.resources.requests.memory | string | `"256Mi"` | PostgreSQL memory request |
 | postgres.service.port | int | `5432` | PostgreSQL port number |
-| webadmin.acceptLicense | bool | `false` | Accept the WebAdmin license: the Business Source License 1.1 plus the BridgeLink WebAdmin Supplemental Terms. Read them with `docker run --rm --entrypoint cat innovarhealthcare/bridgelink-webadmin:26.6.0 /app/LICENSE /app/SUPPLEMENTAL-TERMS.md`. The chart never accepts them for you: with `enabled: true` and this left false, `helm install` fails with an explanation instead of starting a container that would exit without running. |
+| webadmin.acceptLicense | bool | `false` | Accept the WebAdmin license: the Business Source License 1.1 plus the BridgeLink WebAdmin Supplemental Terms. Read them with `docker run --rm --entrypoint cat <image> /app/LICENSE /app/SUPPLEMENTAL-TERMS.md`, using the image set under `image:` below; the install error prints the exact command. The chart never accepts them for you: with `enabled: true` and this left false, `helm install` fails with an explanation instead of starting a container that would exit without running. |
 | webadmin.affinity | object | `{}` | Pod affinity for WebAdmin |
 | webadmin.containerPort | int | `8444` | Port WebAdmin listens on (HTTPS). 8444 is WebAdmin's documented default. It is passed to the container as `PORT`, because the image's built-in config still says 3000. |
 | webadmin.enabled | bool | `false` | Deploy WebAdmin, the browser-based administrator, alongside BridgeLink. It is pointed at this release's BridgeLink Service automatically. Requires `acceptLicense` as well. |
