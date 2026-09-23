@@ -10,6 +10,9 @@
 # Unlike its GHCR predecessor this gates the release: the acceptance suite and the Trivy
 # fixable-HIGH/CRITICAL OS gate both run against a locally built image before anything is pushed.
 #
+# Tags: `<version>`, `latest` when asked, and the floating `<major>.<minor>` when this is the newest
+# patch of its minor in this registry (decided automatically, see Compute BINARY_URL and JDK).
+#
 # Manual-only (workflow_dispatch). Fetches the release tarball from a private s3:// location via
 # OIDC — no long-lived AWS credentials.
 #
@@ -100,6 +103,13 @@ jobs:
           set -euo pipefail
           : "${RELEASE_BUCKET:?RELEASE_BUCKET repo variable is unset — set it in Settings > Secrets and variables > Actions}"
 
+          # The floating minor tag is cut from the version, and a two-part version such as "26.6"
+          # would publish its version tag straight over the 26.6 floating tag.
+          if ! [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::version must be a plain <major>.<minor>.<patch> (e.g. 26.6.1, no leading zeros), got '$VERSION'." >&2
+            exit 1
+          fi
+
           # Resolve the JDK from MAINTAINED_VERSIONS — the same source of truth the weekly rebuild
           # uses — so a manual publish can never move an already-released tag onto a different JDK.
           # A listed version's pinned java wins (an omitted field there means 17); an explicit input
@@ -132,9 +142,41 @@ jobs:
             exit 1
           fi
 
+          # Floating minor tag: <major>.<minor> follows the newest patch of that minor, so users
+          # can take patches without also taking the next minor (which `latest` would).
+          # Rocky publishes do not go through MAINTAINED_VERSIONS, so the only record of which
+          # Rocky patches exist here is the repository itself: move the tag only if no tag already
+          # in it names a newer patch. `>=`, not `>`, so republishing the newest patch is harmless.
+          # Decided per registry, so a patch published only to Docker Hub does not hold this one
+          # back, and vice versa. Decided before the long build, and a failed lookup fails the job
+          # rather than skipping, because a skipped move leaves the tag stale with no signal.
+          # Not guarded against two concurrent publishes of different patches in one minor
+          # (concurrency is keyed per version); publishes are manual, so run them one at a time.
+          # Uses the OIDC session above; bridgelink-publish carries ecr:DescribeImages.
+          MINOR="${VERSION%.*}"
+          MINOR_TAG=""
+          if ! TAGS_JSON="$(aws ecr describe-images --region "$ECR_REGION" \
+                 --repository-name "$ECR_REPOSITORY" --filter tagStatus=TAGGED \
+                 --query 'imageDetails[].imageTags[]' --output json)"; then
+            echo "::error::could not list ECR tags to decide whether $VERSION is the newest $MINOR patch." >&2
+            exit 1
+          fi
+          NEWER="$(jq -r --arg v "$VERSION" --arg m "$MINOR" '
+            (. // []) | map(select(startswith($m + ".")) | ltrimstr($m + ".") | select(test("^[0-9]+$")) | tonumber)
+            | map(select(. > ($v | split(".")[2] | tonumber))) | max // empty | "\($m).\(.)"' <<<"$TAGS_JSON")"
+          if [ -z "$NEWER" ]; then
+            MINOR_TAG="$MINOR"
+            echo "$VERSION is the newest $MINOR patch in ECR; the $MINOR tag moves to it."
+          else
+            echo "$NEWER is already in ECR; the $MINOR tag stays where it is."
+          fi
+
           VERSION_US="${VERSION//./_}"
-          echo "binary_url=s3://${RELEASE_BUCKET}/bridgelink/${VERSION}/official-release/BridgeLink_unix_${VERSION_US}.tar.gz" >> "$GITHUB_OUTPUT"
-          echo "java=$JAVA" >> "$GITHUB_OUTPUT"
+          {
+            echo "binary_url=s3://${RELEASE_BUCKET}/bridgelink/${VERSION}/official-release/BridgeLink_unix_${VERSION_US}.tar.gz"
+            echo "java=$JAVA"
+            echo "minor_tag=$MINOR_TAG"
+          } >> "$GITHUB_OUTPUT"
 
       # The Dockerfile fetches the binary during the build via a mounted aws_credentials secret.
       # region is the BUCKET's region, not the session's — see the env block above.
@@ -263,6 +305,7 @@ jobs:
           REGISTRY: ${{ steps.ecr.outputs.registry }}
           VERSION: ${{ github.event.inputs.version }}
           LATEST: ${{ github.event.inputs.latest }}
+          MINOR_TAG: ${{ steps.url.outputs.minor_tag }}
         run: |
           set -euo pipefail
           if [ -z "$REGISTRY" ]; then
@@ -272,6 +315,14 @@ jobs:
           T="$REGISTRY/$ECR_REPOSITORY:${VERSION}"
           if [ "$LATEST" = "true" ]; then
             T="$T"$'\n'"$REGISTRY/$ECR_REPOSITORY:latest"
+          fi
+          if [ -n "$MINOR_TAG" ]; then
+            # Last-gate re-check: it must be the <major>.<minor> of this very version.
+            if [ "$MINOR_TAG" != "${VERSION%.*}" ]; then
+              echo "::error::refusing to move floating tag '$MINOR_TAG' from '$VERSION'." >&2
+              exit 1
+            fi
+            T="$T"$'\n'"$REGISTRY/$ECR_REPOSITORY:${MINOR_TAG}"
           fi
           { echo "list<<EOF"; echo "$T"; echo "EOF"; } >> "$GITHUB_OUTPUT"
 
@@ -297,11 +348,16 @@ jobs:
         if: github.event.inputs.push == 'true'
         env:
           VERSION: ${{ github.event.inputs.version }}
+          MINOR_TAG: ${{ steps.url.outputs.minor_tag }}
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           {
             echo "### $VERSION (standard/Rocky, private ECR)"
             echo
+            if [ -n "$MINOR_TAG" ]; then
+              echo "Also tagged \`$MINOR_TAG\`."
+              echo
+            fi
             echo "Digest: \`$DIGEST\`"
             echo
             echo "Tags are mutable; pin by digest for an immutable reference."

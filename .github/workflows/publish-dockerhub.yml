@@ -2,7 +2,8 @@
 #
 # Publishes the default Rocky image (Dockerfile) to the public innovarhealthcare/bridgelink
 # repository on Docker Hub, tagged `<version><tag_suffix>` (+ optional `latest`, which only an
-# unqualified publish may move). This replaces the old manual
+# unqualified publish may move, + the floating `<major>.<minor>` tag when this is the newest patch
+# of its minor on Docker Hub, decided automatically). This replaces the old manual
 # "docker build && docker push" Rocky release step with a repeatable, multi-arch CI job — the
 # public-registry counterpart to publish-ecr.yml.
 #
@@ -76,6 +77,13 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${{ github.event.inputs.version }}"
+
+          # The floating minor tag is cut from the version, and a two-part version such as "26.6"
+          # would publish its version tag straight over the 26.6 floating tag.
+          if ! [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::version must be a plain <major>.<minor>.<patch> (e.g. 26.6.1, no leading zeros), got '$VERSION'." >&2
+            exit 1
+          fi
 
           # Resolve the JDK from MAINTAINED_VERSIONS — the same source of truth the weekly rebuild
           # uses — so a manual publish can never move an already-released tag onto a different JDK.
@@ -159,12 +167,54 @@ jobs:
             VERSION_US="${VERSION//./_}"
             BINARY_URL="https://bridgelink-downloads.s3.us-east-2.amazonaws.com/bridgelink-server/${VERSION}/linux/BridgeLink_unix_${VERSION_US}.tar.gz"
           fi
+
+          # Floating minor tag: <major>.<minor> follows the newest patch of that minor, so users
+          # can take patches without also taking the next minor (which `latest` would).
+          # Rocky publishes do not go through MAINTAINED_VERSIONS, so the only record of which
+          # Rocky patches exist is this registry itself: move the tag only if no tag already here
+          # names a newer patch. `>=`, not `>`, so republishing the newest patch is harmless.
+          # A qualified build never moves it — the minor tag follows each release's primary JDK.
+          # Decided here, before the long build, so a failed lookup costs nothing; it fails the
+          # job rather than skipping, because a skipped move leaves the tag stale with no signal.
+          # Not guarded against two concurrent publishes of different patches in one minor
+          # (concurrency is keyed per version); publishes are manual, so run them one at a time.
+          MINOR="${VERSION%.*}"
+          MINOR_TAG=""
+          if [ -z "$SUFFIX" ]; then
+            # The whole tag list, not a `name=` filtered one: the filtering below does not depend on
+            # what Hub's filter means, and an empty listing is treated as an error rather than as
+            # "no newer patch", because the second reading would move the tag.
+            TAGS_JSON="$(mktemp)"
+            PAGE="https://hub.docker.com/v2/namespaces/innovarhealthcare/repositories/bridgelink/tags?page_size=100"
+            while [ -n "$PAGE" ] && [ "$PAGE" != "null" ]; do
+              if ! RESP="$(curl -fsS --retry 3 "$PAGE")" \
+                 || ! jq -ce '[.results[].name]' <<<"$RESP" >> "$TAGS_JSON" 2>/dev/null; then
+                echo "::error::could not list Docker Hub tags to decide whether $VERSION is the newest $MINOR patch." >&2
+                exit 1
+              fi
+              PAGE="$(jq -r '.next' <<<"$RESP")"
+            done
+            if [ "$(jq -s 'add // [] | length' "$TAGS_JSON")" -eq 0 ]; then
+              echo "::error::Docker Hub returned no tags for innovarhealthcare/bridgelink; refusing to decide the $MINOR tag from an empty listing." >&2
+              exit 1
+            fi
+            NEWER="$(jq -rs --arg v "$VERSION" --arg m "$MINOR" '
+              add // [] | map(select(startswith($m + ".")) | ltrimstr($m + ".") | select(test("^[0-9]+$")) | tonumber)
+              | map(select(. > ($v | split(".")[2] | tonumber))) | max // empty | "\($m).\(.)"' "$TAGS_JSON")"
+            if [ -z "$NEWER" ]; then
+              MINOR_TAG="$MINOR"
+              echo "$VERSION is the newest $MINOR patch on Docker Hub; the $MINOR tag moves to it."
+            else
+              echo "$NEWER is already on Docker Hub; the $MINOR tag stays where it is."
+            fi
+          fi
           {
             echo "binary_url=$BINARY_URL"
             echo "java=$JAVA"
             echo "suffix=$SUFFIX"
+            echo "minor_tag=$MINOR_TAG"
           } >> "$GITHUB_OUTPUT"
-          echo "Using BINARY_URL=$BINARY_URL JAVA_MAJOR=$JAVA TAG_SUFFIX=${SUFFIX:-(none)}"
+          echo "Using BINARY_URL=$BINARY_URL JAVA_MAJOR=$JAVA TAG_SUFFIX=${SUFFIX:-(none)} MINOR_TAG=${MINOR_TAG:-(none)}"
 
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
@@ -253,6 +303,7 @@ jobs:
           VERSION: ${{ github.event.inputs.version }}
           SUFFIX: ${{ steps.url.outputs.suffix }}
           LATEST: ${{ github.event.inputs.latest }}
+          MINOR_TAG: ${{ steps.url.outputs.minor_tag }}
           JAVA_RESOLVED: ${{ steps.url.outputs.java }}
           PUSH_INPUT: ${{ github.event.inputs.push }}
         run: |
@@ -270,6 +321,15 @@ jobs:
           if [ "$LATEST" = "true" ]; then
             # Only reachable for an unqualified publish; the JDK step refuses the combination.
             T="$T"$'\n'"${{ env.IMAGE }}:latest"
+          fi
+          if [ -n "$MINOR_TAG" ]; then
+            # Same last-gate re-check: only an unqualified publish may move it, and it must be the
+            # <major>.<minor> of this very version.
+            if [ -n "$SUFFIX" ] || [ "$MINOR_TAG" != "${VERSION%.*}" ]; then
+              echo "::error::refusing to move floating tag '$MINOR_TAG' from '$VERSION$SUFFIX'." >&2
+              exit 1
+            fi
+            T="$T"$'\n'"${{ env.IMAGE }}:${MINOR_TAG}"
           fi
           { echo "list<<EOF"; echo "$T"; echo "EOF"; } >> "$GITHUB_OUTPUT"
           # Print the exact references before the publish step runs, so a dry run is readable and a
@@ -308,6 +368,7 @@ jobs:
         env:
           VERSION: ${{ github.event.inputs.version }}
           SUFFIX: ${{ steps.url.outputs.suffix }}
+          MINOR_TAG: ${{ steps.url.outputs.minor_tag }}
           JAVA_RESOLVED: ${{ steps.url.outputs.java }}
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
@@ -316,7 +377,7 @@ jobs:
             echo
             echo "| tag | java | digest |"
             echo "| --- | --- | --- |"
-            echo "| ${VERSION}${SUFFIX} | $JAVA_RESOLVED | $DIGEST |"
+            echo "| ${VERSION}${SUFFIX}${MINOR_TAG:+, $MINOR_TAG} | $JAVA_RESOLVED | $DIGEST |"
             echo
             echo "Tags are mutable; pin by digest for an immutable reference."
           } >> "$GITHUB_STEP_SUMMARY"
