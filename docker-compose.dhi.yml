@@ -5,10 +5,6 @@
 # `healthcheck:` block is needed — it probes GET /api/server/status and reports healthy only once the
 # engine is running and the startup channel deploy has finished, not merely once port 8443 answers.
 #
-# NOTE the tag pinned below predates that change. Until an image carrying the probe is published,
-# `condition: service_healthy` against it fails with "has no healthcheck configured" — bump the tag
-# to a release built from this commit, or keep your own `healthcheck:` block, before relying on it.
-#
 # A container that must not start until BridgeLink is genuinely ready then gates on it:
 #
 #   my-config-loader:
@@ -18,6 +14,14 @@
 #         restart: true
 #
 # To opt out of the image's healthcheck for a service, add `healthcheck: {disable: true}`.
+#
+# WebAdmin (the browser-based administrator) is optional and off by default. To run it alongside:
+#
+#   BL_ACCEPT_LICENSE=1 docker compose -f docker-compose.dhi.yml --profile webadmin up
+#
+# then open https://localhost:8444. A plain `docker compose -f docker-compose.dhi.yml up` does not
+# start it. If WebAdmin is your only admin client, you can switch the `bl` image to the matching
+# `-slim` tag, which drops the bundled Swing Administrator.
 services:
   bl:
     image: innovarhealthcare/bridgelink:26.6.1-dhi
@@ -50,3 +54,30 @@ services:
       POSTGRES_PASSWORD: bridgelinktest
       POSTGRES_USER: bridgelinktest
       POSTGRES_DB: bridgelinkdb
+
+  # Started only with `--profile webadmin`. It waits for BridgeLink to report healthy, not merely for
+  # port 8443 to open, so the first login does not race the startup channel deploy.
+  webadmin:
+    # WebAdmin is released separately from BridgeLink; 26.6.0 is the newest WebAdmin release for the
+    # 26.6 line. Bump this together with the `bl` tag above.
+    image: innovarhealthcare/bridgelink-webadmin:26.6.0
+    profiles: [webadmin]
+    ports:
+      - "8444:8444"
+    environment:
+      BRIDGELINK_SERVER_URL: https://bl:8443
+      # 8444 is WebAdmin's documented default port. The image's built-in config still says 3000, so
+      # set it here.
+      PORT: "8444"
+      # WebAdmin is licensed under the Business Source License 1.1 and the BridgeLink WebAdmin
+      # Supplemental Terms. Read them without starting WebAdmin:
+      #   docker run --rm --entrypoint cat innovarhealthcare/bridgelink-webadmin:26.6.0 \
+      #     /app/LICENSE /app/SUPPLEMENTAL-TERMS.md
+      # Accepting them is your decision, so this file does not do it for you: with this unset the
+      # container prints a notice and exits. Set BL_ACCEPT_LICENSE=1 in your shell or in a .env file.
+      BL_ACCEPT_LICENSE: ${BL_ACCEPT_LICENSE:-}
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      bl:
+        condition: service_healthy
