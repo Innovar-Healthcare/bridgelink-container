@@ -4,7 +4,7 @@
 * [Supported tags and respective Dockerfile links](#supported-tags)
 * [Supported Architectures](#supported-architectures)
 * [Quick Reference](#quick-reference)
-* [What is BridgeLink (formerly Mirth Connect)](#what-is-connect)
+* [What is BridgeLink](#what-is-BridgeLink)
 * [Hardened (DHI) image](#hardened-dhi-image)
   * [Running WebAdmin alongside](#running-webadmin)
 * [Image security scanning](#image-security-scanning)
@@ -105,9 +105,9 @@ docker pull --platform linux/arm64 innovarhealthcare/bridgelink:latest
 <a name="what-is-BridgeLink"></a>
 # What is BridgeLink [↑](#top)
 
-An open-source message integration engine focused on healthcare. For more information please visit our [GitHub page](https://github.com/Innovar-Healthcare/BridgeLink/tree/bridgelink_development).
+BridgeLink is Innovar Healthcare's open-source healthcare integration platform. For more information please visit our [GitHub page](https://github.com/Innovar-Healthcare/BridgeLink/tree/bridgelink_development).
 
-<img src="https://raw.githubusercontent.com/Innovar-Healthcare/BridgeLink/bridgelink_development/server/public_html/images/MirthConnect_Logo_WordMark_Big.png"/>
+<img src="https://innovar-userdocuments.s3.us-east-2.amazonaws.com/Images/bridgelink-logo.svg" alt="BridgeLink" width="400"/>
 
 ------------
 
@@ -510,7 +510,7 @@ docker run --env-file=myenvfile.txt -p 8443:8443 innovarhealthcare/bridgelink
 <a name="env-database"></a>
 #### `MP_DATABASE`
 
-The database type to use for the BridgeLink Integration Engine backend database. Options:
+The database type to use for BridgeLink's backend database. Options:
 
 * derby — *not available on the `26.6.1-…-jdk17` tags; see [Java version](#java-version)*
 * mysql
