@@ -29,8 +29,8 @@ The Corretto 17 tags of the same image
     dhi.io/amazoncorretto:17-debian13       (runtime)
     dhi.io/amazoncorretto:17-debian13-dev   (build stage)
 
-are used for BridgeLink releases before 26.6.1, and for the Java 17 build of
-26.6.1 published as the -jdk17 tags.
+are used for BridgeLink releases before 26.6.1, and for the Java 17 builds of
+26.6.1 and later published as the -jdk17 tags.
 
 - Docker's DHI build definitions, patches, and scripts are licensed under the
   Apache License 2.0, which permits building and redistributing derivative
