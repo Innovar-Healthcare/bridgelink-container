@@ -12,8 +12,8 @@ bridgelink:
     # -- BridgeLink container image repository
     repository: innovarhealthcare/bridgelink
     # -- BridgeLink container image tag. Defaults to the Rocky image. For the hardened (DHI) image
-    # set `tag: 26.6.1-dhi` and `runAsUser: 65532` / `runAsGroup: 65532` (see below).
-    tag: 26.6.1
+    # set `tag: 26.9.0-dhi` and `runAsUser: 65532` / `runAsGroup: 65532` (see below).
+    tag: 26.9.0
     # -- Image pull policy
     pullPolicy: IfNotPresent
 
@@ -214,9 +214,9 @@ webadmin:
   image:
     # -- WebAdmin container image repository
     repository: innovarhealthcare/bridgelink-webadmin
-    # -- WebAdmin container image tag. WebAdmin is released separately from BridgeLink, and 26.6.0 is
-    # the newest WebAdmin release for the 26.6 line. Bump it together with `bridgelink.image.tag`.
-    tag: "26.6.0"
+    # -- WebAdmin container image tag. WebAdmin is released separately from BridgeLink, and 26.9.0 is
+    # the newest WebAdmin release for the 26.9 line. Bump it together with `bridgelink.image.tag`.
+    tag: "26.9.0"
     # -- Image pull policy
     pullPolicy: IfNotPresent
 

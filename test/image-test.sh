@@ -26,8 +26,8 @@
 #
 # Usage:
 #   # DHI (defaults):
-#   BINARY_URL="https://.../BridgeLink_unix_26_6_1.tar.gz" test/image-test.sh
-#   IMAGE=innovarhealthcare/bridgelink:26.6.1-dhi SKIP_BUILD=1 test/image-test.sh
+#   BINARY_URL="https://.../BridgeLink_unix_26_9_0.tar.gz" test/image-test.sh
+#   IMAGE=innovarhealthcare/bridgelink:26.9.0-dhi SKIP_BUILD=1 test/image-test.sh
 #   # Rocky:
 #   BINARY_URL="https://.../..." IMAGE=innovarhealthcare/bridgelink:rocky-test \
 #     DOCKERFILE=Dockerfile EXPECTED_UID=1000 CHECK_NO_SHELL=0 test/image-test.sh
@@ -35,7 +35,7 @@
 #   IMAGE=innovarhealthcare/bridgelink:26.3.1-dhi SKIP_BUILD=1 EXPECTED_JAVA=17 test/image-test.sh
 #   BINARY_URL="https://.../BridgeLink_unix_26_3_1.tar.gz" JAVA_MAJOR=17 EXPECTED_JAVA=17 test/image-test.sh
 #   # A 26.6.1-or-later release built on Java 17 (no usable embedded Derby):
-#   IMAGE=innovarhealthcare/bridgelink:26.6.1-dhi-jdk17 SKIP_BUILD=1 EXPECTED_JAVA=17 \
+#   IMAGE=innovarhealthcare/bridgelink:26.9.0-dhi-jdk17 SKIP_BUILD=1 EXPECTED_JAVA=17 \
 #     DEFAULT_DB=postgres EXPECT_DERBY_EXIT=1 test/image-test.sh
 #
 # Requires: docker (with buildx), python3, curl. Building the DHI image needs `docker login dhi.io`.

@@ -31,9 +31,9 @@ BridgeLink 26.6.1 and later run on **Java 21** (the embedded Derby database they
 Every earlier release runs on **Java 17** and stays there: a rebuild of an older tag keeps the
 JDK it was released with.
 
-For deployments that cannot move to Java 21 yet, 26.6.1 is also published on Java 17 — as
-`26.6.1-jdk17` (Rocky) and `26.6.1-dhi-jdk17` (hardened). **Those images require an external
-database** — see [Java version](#java-version) before using one.
+For deployments that cannot move to Java 21 yet, 26.9.0 and 26.6.1 are also published on Java 17
+— as `<version>-jdk17` (Rocky) and `<version>-dhi-jdk17` (hardened). **Those images require an
+external database** — see [Java version](#java-version) before using one.
 
 **Minor-version tags** such as `26.6`, `26.6-dhi` and `26.6-dhi-slim` follow the newest patch of
 that release line. Use one to pick up patch releases without also moving to the next minor
@@ -44,10 +44,12 @@ to be deliberate, pin by digest (see [Tag stability](#tag-stability)).
 
 ##### Rockylinux9 OpenJDK 21
 
-* [26.6.1, 26.6, latest](https://github.com/Innovar-Healthcare/bridgelink-container/blob/bl_26.6.1/)
+* [26.9.0, 26.9, latest](https://github.com/Innovar-Healthcare/bridgelink-container/blob/bl_26.9.0/)
+* [26.6.1, 26.6](https://github.com/Innovar-Healthcare/bridgelink-container/blob/bl_26.6.1/)
 
 ##### Rockylinux9 OpenJDK 17
 
+* [26.9.0-jdk17](https://github.com/Innovar-Healthcare/bridgelink-container/blob/bl_26.9.0/) — requires an external database ([why](#java-version))
 * [26.6.1-jdk17](https://github.com/Innovar-Healthcare/bridgelink-container/blob/bl_26.6.1/) — requires an external database ([why](#java-version))
 * [26.6.0](https://github.com/Innovar-Healthcare/bridgelink-container/blob/bl_26.6.0/)
 * [26.3.1, 26.3](https://github.com/Innovar-Healthcare/bridgelink-container/blob/bl_26.3.1/)
@@ -59,11 +61,15 @@ to be deliberate, pin by digest (see [Tag stability](#tag-stability)).
 
 ##### Amazon Corretto 21 Debian 13 — Docker Hardened Image (DHI)
 
-* [26.6.1-dhi, 26.6-dhi, latest-dhi](https://github.com/Innovar-Healthcare/bridgelink-container/blob/main/Dockerfile.dhi)
-* [26.6.1-dhi-slim, 26.6-dhi-slim, latest-dhi-slim](https://github.com/Innovar-Healthcare/bridgelink-container/blob/main/Dockerfile.dhi) — WebAdmin-only (no bundled Swing Administrator)
+* [26.9.0-dhi, 26.9-dhi, latest-dhi](https://github.com/Innovar-Healthcare/bridgelink-container/blob/main/Dockerfile.dhi)
+* [26.9.0-dhi-slim, 26.9-dhi-slim, latest-dhi-slim](https://github.com/Innovar-Healthcare/bridgelink-container/blob/main/Dockerfile.dhi) — WebAdmin-only (no bundled Swing Administrator)
+* [26.6.1-dhi, 26.6-dhi](https://github.com/Innovar-Healthcare/bridgelink-container/blob/main/Dockerfile.dhi)
+* [26.6.1-dhi-slim, 26.6-dhi-slim](https://github.com/Innovar-Healthcare/bridgelink-container/blob/main/Dockerfile.dhi) — WebAdmin-only (no bundled Swing Administrator)
 
 ##### Amazon Corretto 17 Debian 13 — Docker Hardened Image (DHI)
 
+* [26.9.0-dhi-jdk17](https://github.com/Innovar-Healthcare/bridgelink-container/blob/main/Dockerfile.dhi) — requires an external database ([why](#java-version))
+* [26.9.0-dhi-slim-jdk17](https://github.com/Innovar-Healthcare/bridgelink-container/blob/main/Dockerfile.dhi) — WebAdmin-only (no bundled Swing Administrator); requires an external database
 * [26.6.1-dhi-jdk17](https://github.com/Innovar-Healthcare/bridgelink-container/blob/main/Dockerfile.dhi) — requires an external database ([why](#java-version))
 * [26.6.1-dhi-slim-jdk17](https://github.com/Innovar-Healthcare/bridgelink-container/blob/main/Dockerfile.dhi) — WebAdmin-only (no bundled Swing Administrator); requires an external database
 * [26.6.0-dhi](https://github.com/Innovar-Healthcare/bridgelink-container/blob/main/Dockerfile.dhi)
@@ -126,20 +132,20 @@ Key differences from the Rocky image:
 
 | | Rocky image (`Dockerfile`) | Hardened image (`Dockerfile.dhi`) |
 |---|---|---|
-| Base | Rocky Linux 9 + OpenJDK 21 (17 for releases before 26.6.1) | Amazon Corretto 21 / Debian 13 DHI (Corretto 17 for releases before 26.6.1, and for the 26.6.1 `-jdk17` tags) |
+| Base | Rocky Linux 9 + OpenJDK 21 (17 for releases before 26.6.1) | Amazon Corretto 21 / Debian 13 DHI (Corretto 17 for releases before 26.6.1, and for the `-jdk17` tags) |
 | Non-root UID | 1000 | **65532** |
 | Shell / package manager | present | **none** (runtime) |
 | Image tag suffix | *(none)* | `-dhi` |
 
 **Published tags.** The hardened image lives in the **same** `innovarhealthcare/bridgelink`
-repository — it's just additional tags: `26.6.1-dhi` (version-pinned) and `latest-dhi` (rolling),
-sitting alongside the Rocky tags (`26.6.1`, `latest`). You choose the base by tag —
-`…/bridgelink:26.6.1` for Rocky, `…/bridgelink:26.6.1-dhi` for hardened. Both are multi-arch
+repository — it's just additional tags: `26.9.0-dhi` (version-pinned) and `latest-dhi` (rolling),
+sitting alongside the Rocky tags (`26.9.0`, `latest`). You choose the base by tag —
+`…/bridgelink:26.9.0` for Rocky, `…/bridgelink:26.9.0-dhi` for hardened. Both are multi-arch
 (amd64 + arm64). The two images are the same BridgeLink release and behave identically; only the
 base OS/runtime and the non-root UID differ.
 
 A tag may also carry a **JDK qualifier** when one release is published on two Java versions:
-`26.6.1-dhi` is the Java 21 build and `26.6.1-dhi-jdk17` the Java 17 one. An unqualified tag always
+`26.9.0-dhi` is the Java 21 build and `26.9.0-dhi-jdk17` the Java 17 one. An unqualified tag always
 means that release's primary JDK, so existing references keep pointing where they did.
 
 <a name="tag-stability"></a>
@@ -166,8 +172,8 @@ it a new JDK, without warning. Pin by digest if that is not acceptable.
 
 ```
 docker build -f Dockerfile.dhi \
-  --build-arg BINARY_URL="https://.../BridgeLink_unix_26_6_1.tar.gz" \
-  -t innovarhealthcare/bridgelink:26.6.1-dhi .
+  --build-arg BINARY_URL="https://.../BridgeLink_unix_26_9_0.tar.gz" \
+  -t innovarhealthcare/bridgelink:26.9.0-dhi .
 ```
 
 Only if you pull the tarball from a **private `s3://`** bucket (internal Innovar builds), also pass
@@ -175,7 +181,7 @@ AWS credentials as a build secret — the build reads it via `aws s3 cp`. It is 
 public `https://` URL:
 
 ```
-  --build-arg BINARY_URL="s3://your-bucket/BridgeLink_unix_26_6_1.tar.gz" \
+  --build-arg BINARY_URL="s3://your-bucket/BridgeLink_unix_26_9_0.tar.gz" \
   --secret id=aws_credentials,src=$HOME/.aws/credentials
 ```
 
@@ -186,19 +192,19 @@ published on Java 17, and the weekly `-dhi` rebuild passes the same argument so 
 the JDK it shipped with. The acceptance suite checks the runtime's Java version when
 `EXPECTED_JAVA` is set (see **Test** below).
 
-**Java 17 build of 26.6.1 (`-jdk17` tags).** For deployments that must stay on Java 17, 26.6.1 is
-also published as `26.6.1-jdk17` (Rocky) and, on the Corretto 17 hardened base,
-`26.6.1-dhi-jdk17` and `26.6.1-dhi-slim-jdk17`.
+**Java 17 builds (`-jdk17` tags).** For deployments that must stay on Java 17, 26.9.0 and 26.6.1
+are also published as `<version>-jdk17` (Rocky) and, on the Corretto 17 hardened base,
+`<version>-dhi-jdk17` and `<version>-dhi-slim-jdk17`.
 
 Only the hardened tags are rebuilt weekly against a repatched base. The Rocky image is built once
 per release, as it always has been, so its OS packages age until the next release — that is the
 same trade the unqualified Rocky tags carry, and it is the reason to prefer a `-dhi` tag if you
 want ongoing base patching.
 
-> **These images require an external database.** The Derby database bundled with 26.6.1 is built for
-> Java 21 and cannot be loaded on 17, so the server refuses to start rather than fail later in a way
-> that is harder to diagnose. The image ships the stock default (`database = derby`), so a container
-> started with no database configuration logs
+> **These images require an external database.** The Derby database bundled with 26.6.1 and later
+> is built for Java 21 and cannot be loaded on 17, so the server refuses to start rather than fail
+> later in a way that is harder to diagnose. The image ships the stock default
+> (`database = derby`), so a container started with no database configuration logs
 >
 > ```
 > embedded Derby requires Java 21+ as of 26.6.1; upgrade Java or switch to an external database
@@ -206,7 +212,7 @@ want ongoing base patching.
 >
 > and exits with status 1.
 
-This applies to the Rocky `26.6.1-jdk17` tag exactly as it does to the hardened ones: the
+This applies to the Rocky `-jdk17` tags exactly as it does to the hardened ones: the
 constraint is the bundled Derby, which is the same in both images.
 
 Set `MP_DATABASE` (`postgres`, `mysql`, `oracle` or `sqlserver`) together with `MP_DATABASE_URL`,
@@ -220,14 +226,14 @@ docker run -d -p 8443:8443 \
   -e MP_DATABASE=postgres \
   -e MP_DATABASE_URL=jdbc:postgresql://db:5432/bridgelinkdb \
   -e MP_DATABASE_USERNAME=bridgelink -e MP_DATABASE_PASSWORD=... \
-  innovarhealthcare/bridgelink:26.6.1-dhi-jdk17
+  innovarhealthcare/bridgelink:26.9.0-dhi-jdk17
 ```
 
 `docker-compose.dhi.yml` in this repo is a working two-service example (BridgeLink + Postgres);
 point its `image:` at the `-jdk17` tag to use it with this variant.
 
-Nothing else about the image differs from `26.6.1-dhi`. Prefer the Java 21 tags unless a Java 17
-runtime is a requirement you cannot change.
+Nothing else about the image differs from the same release's unqualified `-dhi` tag. Prefer the
+Java 21 tags unless a Java 17 runtime is a requirement you cannot change.
 
 **WebAdmin-only (slim) variant.** The new web-based BridgeLink Administrator (WebAdmin) replaces the
 legacy Swing desktop client. For deployments that use WebAdmin, the `INCLUDE_ADMIN_CLIENT` build-arg
@@ -241,15 +247,15 @@ strips the Swing Administrator from the image:
   landing page are dropped (they return `404`). Manage the instance with WebAdmin (its own
   container) or the standalone WebAdmin download instead.
 
-CI publishes this variant for the DHI image as `26.6.1-dhi-slim` / `latest-dhi-slim`, alongside the
+CI publishes this variant for the DHI image as `26.9.0-dhi-slim` / `latest-dhi-slim`, alongside the
 full `-dhi` tags. The build-arg works on **both** Dockerfiles; the Rocky slim image is built the same
 way (its publish is handled by the Rocky release process):
 
 ```
 docker build \
-  --build-arg BINARY_URL="https://.../BridgeLink_unix_26_6_1.tar.gz" \
+  --build-arg BINARY_URL="https://.../BridgeLink_unix_26_9_0.tar.gz" \
   --build-arg INCLUDE_ADMIN_CLIENT=false \
-  -t innovarhealthcare/bridgelink:26.6.1-slim .
+  -t innovarhealthcare/bridgelink:26.9.0-slim .
 ```
 
 > Note: this image contains BridgeLink **Core** without the Swing client — it does **not** bundle the
@@ -318,19 +324,19 @@ shutdown, persistence) with the acceptance suite `test/image-test.sh` — the sa
 BINARY_URL="<release tarball>" test/image-test.sh              # builds, then tests
 # Also assert the runtime JDK (CI always does; 17 for releases before 26.6.1, 21 after):
 IMAGE=innovarhealthcare/bridgelink:26.3.1-dhi SKIP_BUILD=1 EXPECTED_JAVA=17 test/image-test.sh
-IMAGE=innovarhealthcare/bridgelink:26.6.1-dhi SKIP_BUILD=1 test/image-test.sh   # test an existing image
+IMAGE=innovarhealthcare/bridgelink:26.9.0-dhi SKIP_BUILD=1 test/image-test.sh   # test an existing image
 
 # Rocky image (UID 1000, shell present -> no-shell check skipped):
-BINARY_URL="<release tarball>" IMAGE=innovarhealthcare/bridgelink:26.6.1 \
+BINARY_URL="<release tarball>" IMAGE=innovarhealthcare/bridgelink:26.9.0 \
   DOCKERFILE=Dockerfile EXPECTED_UID=1000 CHECK_NO_SHELL=0 test/image-test.sh
 
 # WebAdmin-only (slim) image — also assert the Swing Administrator was stripped:
-IMAGE=innovarhealthcare/bridgelink:26.6.1-dhi-slim SKIP_BUILD=1 \
+IMAGE=innovarhealthcare/bridgelink:26.9.0-dhi-slim SKIP_BUILD=1 \
   EXPECT_NO_ADMIN_CLIENT=1 test/image-test.sh
 
-# A 26.6.1 image built on Java 17: its bundled Derby cannot run there, so point every
+# A 26.9.0 image built on Java 17: its bundled Derby cannot run there, so point every
 # default-backend container at an external database and assert the Derby default is refused:
-IMAGE=innovarhealthcare/bridgelink:26.6.1-dhi-jdk17 SKIP_BUILD=1 EXPECTED_JAVA=17 \
+IMAGE=innovarhealthcare/bridgelink:26.9.0-dhi-jdk17 SKIP_BUILD=1 EXPECTED_JAVA=17 \
   DEFAULT_DB=postgres EXPECT_DERBY_EXIT=1 test/image-test.sh
 ```
 
@@ -360,8 +366,8 @@ Both images are scanned for OS and library vulnerabilities with [Trivy](https://
 ### Scan locally
 
 ```
-trivy image innovarhealthcare/bridgelink:26.6.1          # Rocky — full report (OS + library)
-trivy image innovarhealthcare/bridgelink:26.6.1-dhi      # DHI
+trivy image innovarhealthcare/bridgelink:26.9.0          # Rocky — full report (OS + library)
+trivy image innovarhealthcare/bridgelink:26.9.0-dhi      # DHI
 # Reproduce the CI gate exactly (OS packages only):
 trivy image --severity HIGH,CRITICAL --ignore-unfixed --pkg-types os --exit-code 1 <image>
 ```
@@ -404,13 +410,13 @@ docker run --name mybridgelink -d -p 8443:8443 innovarhealthcare/bridgelink
 To run a specific version of Connect, specify a tag at the end:
 
 ```bash
-docker run --name mybridgelink -d -p 8443:8443 innovarhealthcare/bridgelink:26.6.1
+docker run --name mybridgelink -d -p 8443:8443 innovarhealthcare/bridgelink:26.9.0
 ```
 
 To run using a specific architecture, specify it using the `--platform` argument:
 
 ```bash
-docker run --name mybridgelink -d -p 8443:8443 --platform linux/arm64 innovarhealthcare/bridgelink:26.6.1
+docker run --name mybridgelink -d -p 8443:8443 --platform linux/arm64 innovarhealthcare/bridgelink:26.9.0
 ```
 
 Look at the [Environment Variables](#environment-variables) section for more available configuration options.
@@ -436,7 +442,7 @@ Here's an example `stack.yml` file you can use:
 version: "3.1"
 services:
   mc:
-    image: innovarhealthcare/bridgelink:26.6.1
+    image: innovarhealthcare/bridgelink:26.9.0
     platform: linux/amd64
     environment:
         - MP_DATABASE=postgres
@@ -512,7 +518,7 @@ docker run --env-file=myenvfile.txt -p 8443:8443 innovarhealthcare/bridgelink
 
 The database type to use for BridgeLink's backend database. Options:
 
-* derby — *not available on the `26.6.1-…-jdk17` tags; see [Java version](#java-version)*
+* derby — *not available on the `-jdk17` tags; see [Java version](#java-version)*
 * mysql
 * postgres
 * oracle
@@ -694,7 +700,7 @@ To enable it, add a `security_opt` block to your docker-compose service:
 ```yaml
 services:
   bl:
-    image: innovarhealthcare/bridgelink:26.6.1
+    image: innovarhealthcare/bridgelink:26.9.0
     security_opt:
       - no-new-privileges:true
 ```
