@@ -493,7 +493,7 @@
               "title": "repository"
             },
             "tag": {
-              "default": "26.6.0",
+              "default": "26.9.0",
               "description": "WebAdmin container image tag",
               "required": [],
               "title": "tag"

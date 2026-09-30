@@ -221,7 +221,7 @@ not apply.
 | webadmin.env | object | `{}` | Extra environment variables for WebAdmin, e.g. `BRIDGELINK_PUBLIC_HOST` or `COOKIE_SECURE`. `BRIDGELINK_SERVER_URL`, `PORT` and `BL_ACCEPT_LICENSE` are set by the chart and ignored here. |
 | webadmin.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy |
 | webadmin.image.repository | string | `"innovarhealthcare/bridgelink-webadmin"` | WebAdmin container image repository |
-| webadmin.image.tag | string | `"26.6.0"` | WebAdmin container image tag. WebAdmin is released separately from BridgeLink, and 26.6.0 is the newest WebAdmin release for the 26.6 line. Bump it together with `bridgelink.image.tag`. |
+| webadmin.image.tag | string | `"26.9.0"` | WebAdmin container image tag. WebAdmin is released separately from BridgeLink, and 26.9.0 is the newest WebAdmin release for the 26.9 line. Bump it together with `bridgelink.image.tag`. |
 | webadmin.livenessProbe | object | `{"failureThreshold":3,"periodSeconds":20,"tcpSocket":{"port":"https"},"timeoutSeconds":5}` | Liveness probe for WebAdmin. The image has no health endpoint, so this checks the port. |
 | webadmin.nodeSelector | object | `{}` | Node selector for WebAdmin pods |
 | webadmin.readinessProbe | object | `{"failureThreshold":3,"initialDelaySeconds":5,"periodSeconds":10,"tcpSocket":{"port":"https"},"timeoutSeconds":5}` | Readiness probe for WebAdmin. The image has no health endpoint, so this checks the port. |

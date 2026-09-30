@@ -56,9 +56,9 @@ services:
   # Started only with `--profile webadmin`. It waits for BridgeLink to report healthy, not merely for
   # port 8443 to open, so the first login does not race the startup channel deploy.
   webadmin:
-    # WebAdmin is released separately from BridgeLink; 26.6.0 is the newest WebAdmin release for the
-    # 26.6 line. Bump this together with the `bl` tag above.
-    image: innovarhealthcare/bridgelink-webadmin:26.6.0
+    # WebAdmin is released separately from BridgeLink; 26.9.0 is the newest WebAdmin release for the
+    # 26.9 line. Bump this together with the `bl` tag above.
+    image: innovarhealthcare/bridgelink-webadmin:26.9.0
     profiles: [webadmin]
     ports:
       - "8444:8444"
@@ -69,7 +69,7 @@ services:
       PORT: "8444"
       # WebAdmin is licensed under the Business Source License 1.1 and the BridgeLink WebAdmin
       # Supplemental Terms. Read them without starting WebAdmin:
-      #   docker run --rm --entrypoint cat innovarhealthcare/bridgelink-webadmin:26.6.0 \
+      #   docker run --rm --entrypoint cat innovarhealthcare/bridgelink-webadmin:26.9.0 \
       #     /app/LICENSE /app/SUPPLEMENTAL-TERMS.md
       # Accepting them is your decision, so this file does not do it for you: with this unset the
       # container prints a notice and exits. Set BL_ACCEPT_LICENSE=1 in your shell or in a .env file.
