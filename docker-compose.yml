@@ -22,7 +22,7 @@
 # docker-compose.dhi.yml, whose image has a published `-dhi-slim` tag.
 services:
   bl:
-    image: innovarhealthcare/bridgelink:26.6.1
+    image: innovarhealthcare/bridgelink:26.9.0
     stdin_open: true
     tty: true
     user: 1000:1000

@@ -24,7 +24,7 @@
 # `-slim` tag, which drops the bundled Swing Administrator.
 services:
   bl:
-    image: innovarhealthcare/bridgelink:26.6.1-dhi
+    image: innovarhealthcare/bridgelink:26.9.0-dhi
     stdin_open: true
     tty: true
     user: 65532:65532
