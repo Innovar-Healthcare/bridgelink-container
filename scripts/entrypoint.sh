@@ -269,6 +269,116 @@ if [ -f /run/secrets/blserver_vmoptions ]; then
     (cat /run/secrets/blserver_vmoptions ; echo "") >> /opt/bridgelink/blserver.vmoptions
 fi
 
+# ---- Keystore passwords -----------------------------------------------------------------------
+# On first start the server replaces the default keystore passwords with random ones and saves them
+# in conf/mirth.properties. conf/ is in the container's writable layer, but the keystore is in
+# appdata, which is a volume -- so a recreated container (`docker compose up` after pulling a new
+# image, --force-recreate) is back on the defaults, cannot open its own keystore, and runs without
+# its web server while still logging "server successfully started". `docker restart` keeps conf/,
+# which is why it only shows up on recreate.
+#
+# So the passwords are generated here instead, saved next to the keystore, and applied on every
+# start; the server never sees the defaults and never generates its own. "Default" means exactly
+# what it means to the server (DefaultConfigurationController): the storepass/keypass PAIR matches
+# one of these. Anything else was configured by the user -- MP_KEYSTORE_*, CUSTOM_PROPERTIES or the
+# mirth_properties secret, even just one of the two -- and is left alone.
+# Must stay in step with BridgeLinkBootstrap.manageKeystorePasswords().
+KEYSTORE_PASSWORDS_FILE="$APPDATA_DIR/keystore-passwords.properties"
+DEFAULT_KEYSTORE_PASSWORD_PAIRS="81uWxplDtB:81uWxplDtB nfHbaNFacIhQ:tdW6edezNbmd"
+
+get_property() {  # <file> <key> -> the last value for key, surrounding whitespace trimmed
+  grep -E "^[[:space:]]*${2//./\\.}[[:space:]]*=" "$1" 2>/dev/null | tail -1 \
+    | sed -E 's/^[^=]*=[[:space:]]*//; s/[[:space:]]*$//'
+}
+
+is_default_keystore_pair() {  # <storepass> <keypass>
+  local pair
+  for pair in $DEFAULT_KEYSTORE_PASSWORD_PAIRS; do
+    [ "$1:$2" = "$pair" ] && return 0
+  done
+  return 1
+}
+
+random_password() { LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 24; }
+
+print_lost_keystore_password_help() {
+  cat >&2 <<EOF
+ERROR: $KEYSTORE_FILE exists, but its passwords are not known, so the server
+cannot open it and would start without its web server.
+
+The keystore was most likely created by a container from an earlier image. Those images let the
+server keep the keystore's random passwords inside the container rather than in appdata, so they
+were lost when the container was recreated.
+
+To recover, do one of the following:
+  * If the old container still exists (docker ps -a), copy out its settings with
+      docker cp <old-container>:/opt/bridgelink/conf/mirth.properties ./old-mirth.properties
+    and set MP_KEYSTORE_STOREPASS and MP_KEYSTORE_KEYPASS to the keystore.storepass and
+    keystore.keypass values in that file.
+  * If nothing encrypted needs to be kept, delete appdata/keystore.jks and start again. A new
+    keystore is created and its passwords are saved in appdata/keystore-passwords.properties.
+    The keystore holds the server's TLS certificate and data-encryption key, so anything encrypted
+    with the old key cannot be read afterwards.
+EOF
+}
+
+manage_keystore_passwords() {
+  local storepass keypass keystore_type
+  storepass="$(get_property "$PROPERTIES_FILE" keystore.storepass)"
+  keypass="$(get_property "$PROPERTIES_FILE" keystore.keypass)"
+  is_default_keystore_pair "$storepass" "$keypass" || return 0
+
+  # Only the stock location is managed: anything else was placed by the user, who owns its passwords.
+  # The single-quoted ${dir.appdata} is the literal text the stock mirth.properties carries.
+  # shellcheck disable=SC2016
+  if [ "$(get_property "$PROPERTIES_FILE" keystore.path)" != '${dir.appdata}/keystore.jks' ] \
+     || [ "$(get_property "$PROPERTIES_FILE" dir.appdata)" != "appdata" ]; then
+    echo "keystore.path or dir.appdata has been changed; not managing the keystore passwords."
+    return 0
+  fi
+
+  if [ -f "$KEYSTORE_PASSWORDS_FILE" ]; then
+    storepass="$(get_property "$KEYSTORE_PASSWORDS_FILE" keystore.storepass)"
+    keypass="$(get_property "$KEYSTORE_PASSWORDS_FILE" keystore.keypass)"
+    if [ -z "$storepass" ] || [ -z "$keypass" ]; then
+      echo "ERROR: $KEYSTORE_PASSWORDS_FILE does not contain both keystore.storepass and keystore.keypass." >&2
+      exit 1
+    fi
+    echo "Using the keystore passwords saved in $KEYSTORE_PASSWORDS_FILE."
+  elif [ ! -e "$KEYSTORE_FILE" ]; then
+    storepass="$(random_password)"
+    keypass="$(random_password)"
+    # Written whole and then renamed, so an interrupted first start cannot leave a half-written file
+    # that a later start would trust.
+    if ! ( umask 077 && printf '%s\n' \
+             "# Passwords for keystore.jks in this directory, generated on the container's first start." \
+             "# Keep this file with keystore.jks: the keystore cannot be opened without it." \
+             "keystore.storepass=$storepass" "keystore.keypass=$keypass" \
+             > "$KEYSTORE_PASSWORDS_FILE.tmp" ) \
+       || ! mv -f "$KEYSTORE_PASSWORDS_FILE.tmp" "$KEYSTORE_PASSWORDS_FILE"; then
+      echo "ERROR: could not save the keystore passwords to $KEYSTORE_PASSWORDS_FILE." >&2
+      exit 1
+    fi
+    echo "Generated keystore passwords and saved them to $KEYSTORE_PASSWORDS_FILE."
+  else
+    # A keystore that opens with the default password (for example one supplied through
+    # KEYSTORE_DOWNLOAD) works on every start as it is.
+    keystore_type="$(get_property "$PROPERTIES_FILE" keystore.type)"
+    if keytool -list -storetype "${keystore_type:-JCEKS}" -storepass "$storepass" \
+         -keystore "$KEYSTORE_FILE" >/dev/null 2>&1; then
+      echo "$KEYSTORE_FILE opens with the default password; leaving its passwords as they are."
+      return 0
+    fi
+    print_lost_keystore_password_help
+    exit 1
+  fi
+
+  update_property "$PROPERTIES_FILE" keystore.storepass "$storepass"
+  update_property "$PROPERTIES_FILE" keystore.keypass "$keypass"
+}
+
+manage_keystore_passwords
+
 # Enable nullglob so *.zip returns empty if no matches
 shopt -s nullglob
 zip_files=("/opt/bridgelink/custom-extensions"/*.zip)

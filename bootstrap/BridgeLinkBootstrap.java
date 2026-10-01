@@ -21,6 +21,7 @@
  * this replaces.
  */
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -31,11 +32,14 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.PosixFilePermissions;
+import java.security.KeyStore;
 import java.security.SecureRandom;
 import java.security.cert.X509Certificate;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Properties;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 import javax.net.ssl.SSLContext;
@@ -92,6 +96,7 @@ public final class BridgeLinkBootstrap {
         downloadKeystore();
         mergeSecretProperties();
         appendSecretVmoptions();
+        manageKeystorePasswords();
         extractCustomExtensionZips();
         launchServer();
     }
@@ -292,7 +297,151 @@ public final class BridgeLinkBootstrap {
         writeLines(VMOPTIONS_FILE, lines);
     }
 
-    // ---- 7. Volume-mounted custom-extensions/*.zip ------------------------------------------
+    // ---- 7. Keystore passwords --------------------------------------------------------------
+    /*
+     * On first start the server replaces the default keystore passwords with random ones and saves
+     * them in conf/mirth.properties. conf/ is in the container's writable layer, but the keystore
+     * is in appdata, which is a volume -- so a recreated container (`docker compose up` after
+     * pulling a new image, --force-recreate) is back on the defaults, cannot open its own keystore,
+     * and runs without its web server while still logging "server successfully started".
+     * `docker restart` keeps conf/, which is why it only shows up on recreate.
+     *
+     * So the passwords are generated here instead, saved next to the keystore, and applied on
+     * every start; the server never sees the defaults and never generates its own. "Default" means
+     * exactly what it means to the server (DefaultConfigurationController): the storepass/keypass
+     * PAIR matches one of these. Anything else was configured by the user -- MP_KEYSTORE_*,
+     * CUSTOM_PROPERTIES or the mirth_properties secret, even just one of the two -- and is left
+     * alone. Must stay in step with manage_keystore_passwords in scripts/entrypoint.sh.
+     */
+    static final Path KEYSTORE_PASSWORDS_FILE = Paths.get(HOME, "appdata", "keystore-passwords.properties");
+    static final String[][] DEFAULT_KEYSTORE_PASSWORD_PAIRS = {
+        {"81uWxplDtB",   "81uWxplDtB"},
+        {"nfHbaNFacIhQ", "tdW6edezNbmd"},
+    };
+
+    static void manageKeystorePasswords() throws IOException {
+        Properties config = loadProperties(PROPERTIES_FILE);
+        String storepass = property(config, "keystore.storepass");
+        String keypass = property(config, "keystore.keypass");
+        if (!isDefaultKeystorePair(storepass, keypass)) return;
+
+        // Only the stock location is managed: anything else was placed by the user, who owns its
+        // passwords.
+        if (!"${dir.appdata}/keystore.jks".equals(property(config, "keystore.path"))
+                || !"appdata".equals(property(config, "dir.appdata"))) {
+            System.out.println("keystore.path or dir.appdata has been changed; not managing the keystore passwords.");
+            return;
+        }
+
+        if (Files.isRegularFile(KEYSTORE_PASSWORDS_FILE)) {
+            Properties saved = loadProperties(KEYSTORE_PASSWORDS_FILE);
+            storepass = property(saved, "keystore.storepass");
+            keypass = property(saved, "keystore.keypass");
+            if (storepass.isEmpty() || keypass.isEmpty()) {
+                System.err.println("ERROR: " + KEYSTORE_PASSWORDS_FILE
+                        + " does not contain both keystore.storepass and keystore.keypass.");
+                System.exit(1);
+            }
+            System.out.println("Using the keystore passwords saved in " + KEYSTORE_PASSWORDS_FILE + ".");
+        } else if (!Files.exists(KEYSTORE_FILE)) {
+            storepass = randomPassword();
+            keypass = randomPassword();
+            saveKeystorePasswords(storepass, keypass);
+            System.out.println("Generated keystore passwords and saved them to " + KEYSTORE_PASSWORDS_FILE + ".");
+        } else {
+            // A keystore that opens with the default password (for example one supplied through
+            // KEYSTORE_DOWNLOAD) works on every start as it is.
+            String type = property(config, "keystore.type");
+            if (keystoreOpens(type.isEmpty() ? "JCEKS" : type, storepass)) {
+                System.out.println(KEYSTORE_FILE + " opens with the default password; leaving its passwords as they are.");
+                return;
+            }
+            System.err.println(lostKeystorePasswordHelp());
+            System.exit(1);
+        }
+
+        updateProperty(PROPERTIES_FILE, "keystore.storepass", storepass);
+        updateProperty(PROPERTIES_FILE, "keystore.keypass", keypass);
+    }
+
+    static boolean isDefaultKeystorePair(String storepass, String keypass) {
+        for (String[] pair : DEFAULT_KEYSTORE_PASSWORD_PAIRS) {
+            if (pair[0].equals(storepass) && pair[1].equals(keypass)) return true;
+        }
+        return false;
+    }
+
+    static String randomPassword() {
+        String alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+        SecureRandom random = new SecureRandom();
+        StringBuilder sb = new StringBuilder(24);
+        for (int i = 0; i < 24; i++) sb.append(alphabet.charAt(random.nextInt(alphabet.length())));
+        return sb.toString();
+    }
+
+    /** Written whole and then renamed, so an interrupted first start cannot leave a half-written
+     *  file that a later start would trust. Owner-only where the filesystem supports it. */
+    static void saveKeystorePasswords(String storepass, String keypass) throws IOException {
+        Path tmp = KEYSTORE_PASSWORDS_FILE.resolveSibling(KEYSTORE_PASSWORDS_FILE.getFileName() + ".tmp");
+        List<String> lines = List.of(
+                "# Passwords for keystore.jks in this directory, generated on the container's first start.",
+                "# Keep this file with keystore.jks: the keystore cannot be opened without it.",
+                "keystore.storepass=" + storepass,
+                "keystore.keypass=" + keypass);
+        Files.deleteIfExists(tmp);
+        try {
+            Files.createFile(tmp, PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")));
+        } catch (UnsupportedOperationException e) {
+            Files.createFile(tmp);
+        }
+        Files.write(tmp, lines, StandardCharsets.ISO_8859_1);
+        Files.move(tmp, KEYSTORE_PASSWORDS_FILE, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+    }
+
+    static boolean keystoreOpens(String type, String storepass) {
+        try (InputStream in = Files.newInputStream(KEYSTORE_FILE)) {
+            KeyStore.getInstance(type).load(in, storepass.toCharArray());
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    static String lostKeystorePasswordHelp() {
+        return String.join(System.lineSeparator(),
+            "ERROR: " + KEYSTORE_FILE + " exists, but its passwords are not known, so the server",
+            "cannot open it and would start without its web server.",
+            "",
+            "The keystore was most likely created by a container from an earlier image. Those images let the",
+            "server keep the keystore's random passwords inside the container rather than in appdata, so they",
+            "were lost when the container was recreated.",
+            "",
+            "To recover, do one of the following:",
+            "  * If the old container still exists (docker ps -a), copy out its settings with",
+            "      docker cp <old-container>:/opt/bridgelink/conf/mirth.properties ./old-mirth.properties",
+            "    and set MP_KEYSTORE_STOREPASS and MP_KEYSTORE_KEYPASS to the keystore.storepass and",
+            "    keystore.keypass values in that file.",
+            "  * If nothing encrypted needs to be kept, delete appdata/keystore.jks and start again. A new",
+            "    keystore is created and its passwords are saved in appdata/keystore-passwords.properties.",
+            "    The keystore holds the server's TLS certificate and data-encryption key, so anything encrypted",
+            "    with the old key cannot be read afterwards.");
+    }
+
+    static Properties loadProperties(Path file) throws IOException {
+        Properties p = new Properties();
+        if (Files.isRegularFile(file)) {
+            try (InputStream in = Files.newInputStream(file)) {
+                p.load(in);   // ISO-8859-1, the same charset everything else here uses
+            }
+        }
+        return p;
+    }
+
+    static String property(Properties p, String key) {
+        return p.getProperty(key, "").strip();
+    }
+
+    // ---- 8. Volume-mounted custom-extensions/*.zip ------------------------------------------
     static void extractCustomExtensionZips() throws IOException {
         if (!Files.isDirectory(CUSTOM_EXT_DIR)) return;
         Files.createDirectories(EXTENSIONS_DIR);
@@ -304,7 +453,7 @@ public final class BridgeLinkBootstrap {
         }
     }
 
-    // ---- 8. Launch the server (replaces `exec ./blserver`) ----------------------------------
+    // ---- 9. Launch the server (replaces `exec ./blserver`) ----------------------------------
     static void launchServer() throws IOException, InterruptedException {
         String javaBin = Paths.get(System.getProperty("java.home"), "bin", "java").toString();
 

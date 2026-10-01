@@ -558,7 +558,7 @@ The amount of time (in milliseconds) to wait between database connection attempt
 <a name="env-keystore-storepass"></a>
 #### `MP_KEYSTORE_STOREPASS`
 
-The password for the keystore file itself. If you don't want to use an environment variable to store sensitive information like this, look at the [Using Docker Secrets](#using-docker-secrets) section below.
+The password for the keystore file itself. If you don't want to use an environment variable to store sensitive information like this, look at the [Using Docker Secrets](#using-docker-secrets) section below. If neither keystore password is set, the container generates both on first start and saves them in appdata; see [Keystore passwords](#keystore-passwords).
 
 <a name="env-keystore-keypass"></a>
 #### `MP_KEYSTORE_KEYPASS`
@@ -733,6 +733,43 @@ services:
     volumes:
       - ~/Documents/appdata:/opt/bridgelink/appdata
 ```
+
+Both images declare appdata as a volume, so Docker keeps it even when you do not mount one:
+`docker compose` reattaches the same volume when it recreates the container, for example after
+you pull a new image.
+
+<a name="keystore-passwords"></a>
+**Keystore passwords.** The keystore in appdata (`keystore.jks`) is protected by two passwords,
+`keystore.storepass` and `keystore.keypass`. If you do not set them, the container generates
+random ones on its first start and saves them next to the keystore, in
+`appdata/keystore-passwords.properties`. They are applied on every start, so a new container on
+the same appdata can still open the keystore. Keep the two files together and back them up
+together: the keystore cannot be opened without its passwords.
+
+To choose your own, set [`MP_KEYSTORE_STOREPASS`](#env-keystore-storepass) and
+[`MP_KEYSTORE_KEYPASS`](#env-keystore-keypass), or set them through
+[Docker Secrets](#using-docker-secrets), before the first start. The container then leaves both
+passwords to you and saves no password file. Do not remove or change them later: changing the
+setting does not re-encrypt an existing keystore, it only stops it from opening.
+
+<a name="upgrading-keystore"></a>
+**Upgrading from an earlier image.** Earlier images let the server keep its generated keystore
+passwords inside the container rather than in appdata, so they were lost whenever the container was
+recreated, and the new container started without its web server. If your current container is still
+running, copy its settings out **before** you upgrade:
+
+```bash
+docker cp <container>:/opt/bridgelink/conf/mirth.properties ./old-mirth.properties
+```
+
+Then set `MP_KEYSTORE_STOREPASS` and `MP_KEYSTORE_KEYPASS` to the `keystore.storepass` and
+`keystore.keypass` values in that file. The upgraded container opens the existing keystore with them.
+
+If the passwords are already lost, the container stops at startup and its log says the keystore
+"exists, but its passwords are not known", followed by the same recovery steps. If nothing
+encrypted needs to be kept, delete `appdata/keystore.jks` and start again: a new keystore is created
+and its passwords are saved. The keystore holds the server's TLS certificate and its
+data-encryption key, so anything encrypted with the old key cannot be read afterwards.
 
 ------------
 

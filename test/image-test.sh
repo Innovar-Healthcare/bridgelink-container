@@ -387,6 +387,13 @@ if wait_for_log bl-boot; then
   grep -q '11111111-2222-3333-4444-555555555555' "$WORK/sid" && ok "SERVER_ID written" || bad "SERVER_ID missing"
   docker cp bl-boot:/opt/bridgelink/conf/mirth.properties "$WORK/mp" >/dev/null 2>&1
   grep -q '^keystore.storepass = testStorePass123' "$WORK/mp" && ok "MP_ injected" || bad "MP_ not injected"
+  # A user-set keystore password -- here only one of the pair, which is still user-configured to
+  # the server -- is the user's to manage: the container must not generate or save its own.
+  if docker cp bl-boot:/opt/bridgelink/appdata/keystore-passwords.properties "$WORK/kpw-boot" >/dev/null 2>&1; then
+    bad "keystore-passwords.properties written although MP_KEYSTORE_STOREPASS was set"
+  else
+    ok "user-set keystore password left alone (no keystore-passwords.properties)"
+  fi
   vmopt_has bl-boot '-Xmx512m' && ok "MP_VMOPTIONS -Xmx applied" || bad "MP_VMOPTIONS not applied"
   # add-opens must appear exactly once (dedup)
   N="$(vmopt_count bl-boot 'add-opens=java.base/java.util=ALL-UNNAMED')"
@@ -883,26 +890,67 @@ docker logs bl-boot 2>&1 | grep -qi 'shutting down' \
   || echo "  NOTE: server shutdown log line absent (known logger-teardown race; graceful shutdown is" \
           "asserted above on exit code and backend-appropriate evidence, not on this line)"
 
-# ---- 8. appdata persistence across restart ----------------------------------------------------
-# Backend-independent: both assertions compare files in the appdata VOLUME (server.id, the
-# generated keystore) across a restart, not database rows. In postgres mode the container also
+# ---- 8. appdata persistence across a recreated container --------------------------------------
+# Backend-independent: the assertions compare files in the appdata VOLUME (server.id, the generated
+# keystore) and the web server's answer, not database rows. In postgres mode the container also
 # reattaches to the same database, because run() derives the name from the container name.
-info "8. Persistence across restart"
+#
+# The second container is REMOVED AND RE-CREATED on the same volume, not `docker restart`ed. That is
+# what `docker compose up` does after pulling a new image, and it is the case that broke: the server
+# kept the keystore's generated passwords in conf/, which a restart keeps and a recreate loses, so
+# every recreated container came up without its web server. A restart-only test passed throughout.
+# The API check matters as much as the file comparison: "server successfully started" is logged
+# even when the web server failed, so wait_for_log alone proves nothing here.
+info "8. Persistence across a recreated container"
 docker volume create bl-dhi-appdata >/dev/null
-run bl-persist -p 8443 -v bl-dhi-appdata:/opt/bridgelink/appdata \
-  -e SERVER_ID=abcdef00-0000-0000-0000-000000000000
+PERSIST_ARGS=(-p 8443 -v bl-dhi-appdata:/opt/bridgelink/appdata -e SERVER_ID=abcdef00-0000-0000-0000-000000000000)
+run bl-persist "${PERSIST_ARGS[@]}"
 if wait_for_log bl-persist; then
   docker cp bl-persist:/opt/bridgelink/appdata/server.id "$WORK/sidA" >/dev/null 2>&1
   docker cp bl-persist:/opt/bridgelink/appdata/keystore.jks "$WORK/ksA" >/dev/null 2>&1
-  docker restart bl-persist >/dev/null
+  docker cp bl-persist:/opt/bridgelink/appdata/keystore-passwords.properties "$WORK/kpwA" >/dev/null 2>&1 \
+    && ok "keystore passwords saved in appdata" || bad "appdata/keystore-passwords.properties not written"
+  docker rm -f bl-persist >/dev/null
+  run bl-persist "${PERSIST_ARGS[@]}"
   if wait_for_log bl-persist; then
     docker cp bl-persist:/opt/bridgelink/appdata/server.id "$WORK/sidB" >/dev/null 2>&1
     docker cp bl-persist:/opt/bridgelink/appdata/keystore.jks "$WORK/ksB" >/dev/null 2>&1
     cmp -s "$WORK/sidA" "$WORK/sidB" && ok "server.id persisted" || bad "server.id changed"
     cmp -s "$WORK/ksA" "$WORK/ksB" && ok "keystore persisted" || bad "keystore changed"
+    if docker logs bl-persist 2>&1 | grep -q 'Keystore was tampered with'; then
+      bad "recreated container could not open its keystore"
+    else
+      ok "recreated container opened its keystore"
+    fi
+    [ "$(api_code "$(https_port bl-persist)")" = "200" ] && ok "web server up after recreate" \
+      || bad "web server not answering after recreate"
   else
-    bad "did not restart"
+    bad "recreated container did not start"
   fi
+
+  # 8b. A keystore whose passwords are unknown -- what every install made by an earlier image looks
+  # like the first time it is recreated -- must stop the container with the recovery steps, not
+  # come up looking healthy with no web server. Staged by removing the saved passwords. The image
+  # may have no shell, so the deletion runs in a postgres fixture image the suite already pulls.
+  info "8b. Unknown keystore passwords stop the container with recovery steps"
+  docker rm -f bl-persist >/dev/null
+  docker run --rm -v bl-dhi-appdata:/a --entrypoint rm postgres:16-alpine -f /a/keystore-passwords.properties
+  run bl-persist "${PERSIST_ARGS[@]}"
+  if wait_for_log bl-persist 'passwords are not known' 30; then
+    ok "unknown keystore passwords explained in the log"
+  else
+    bad "no explanation for unknown keystore passwords"; docker logs bl-persist 2>&1 | tail -20
+  fi
+  # Polled rather than `timeout docker wait`: macOS has no timeout(1), and this suite runs there.
+  EXIT_CODE="still running"
+  for _ in $(seq 1 30); do
+    if [ "$(docker inspect -f '{{.State.Running}}' bl-persist 2>/dev/null)" = "false" ]; then
+      EXIT_CODE="$(docker inspect -f '{{.State.ExitCode}}' bl-persist)"; break
+    fi
+    sleep 1
+  done
+  [ "$EXIT_CODE" = "1" ] && ok "container exited 1 instead of running without a web server" \
+    || bad "container did not exit 1 (got: $EXIT_CODE)"
 else
   bad "server did not start (persist)"
 fi
