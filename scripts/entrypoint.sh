@@ -43,9 +43,12 @@ update_property() {
         echo "-Xmx${value_escaped}" >> "$file"
       fi
     else
-      # Handle other properties as usual
-      if grep -q "^${property} =" "$file"; then
-        sed -i "s|^${property} =.*|${property} = ${value_escaped}|" "$file"
+      # Handle other properties as usual. Matches "key=value" as well as "key = value": appending a
+      # second line instead would leave the server reading the first, because it takes the FIRST of
+      # duplicate keys, while everything here reads the last.
+      local key_re="${property//./\\.}"
+      if grep -q "^[[:space:]]*${key_re}[[:space:]]*=" "$file"; then
+        sed -i "s|^[[:space:]]*${key_re}[[:space:]]*=.*|${property} = ${value_escaped}|" "$file"
       else
         echo "${property} = ${value_escaped}" >>"$file"
       fi
@@ -303,18 +306,20 @@ random_password() { LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 24; }
 
 print_lost_keystore_password_help() {
   cat >&2 <<EOF
-ERROR: $KEYSTORE_FILE exists, but its passwords are not known, so the server
+ERROR: $KEYSTORE_FILE exists, but no known password opens it, so the server
 cannot open it and would start without its web server.
 
-The keystore was most likely created by a container from an earlier image. Those images let the
-server keep the keystore's random passwords inside the container rather than in appdata, so they
-were lost when the container was recreated.
+Usually the keystore was created by a container from an earlier image, which kept the keystore's
+random passwords inside the container rather than in appdata, so they were lost when the container
+was recreated. It can also be a keystore supplied through KEYSTORE_DOWNLOAD or restored from a
+backup while MP_KEYSTORE_STOREPASS and MP_KEYSTORE_KEYPASS are not set, or one whose passwords were
+changed from the Administrator, which saves the new passwords inside the container only.
 
 To recover, do one of the following:
-  * If the old container still exists (docker ps -a), copy out its settings with
+  * Set MP_KEYSTORE_STOREPASS and MP_KEYSTORE_KEYPASS to the keystore's passwords. To read them
+    from an old container that still exists (docker ps -a), copy out its settings with
       docker cp <old-container>:/opt/bridgelink/conf/mirth.properties ./old-mirth.properties
-    and set MP_KEYSTORE_STOREPASS and MP_KEYSTORE_KEYPASS to the keystore.storepass and
-    keystore.keypass values in that file.
+    and use the keystore.storepass and keystore.keypass values in that file.
   * If nothing encrypted needs to be kept, delete appdata/keystore.jks and start again. A new
     keystore is created and its passwords are saved in appdata/keystore-passwords.properties.
     The keystore holds the server's TLS certificate and data-encryption key, so anything encrypted
@@ -322,8 +327,13 @@ To recover, do one of the following:
 EOF
 }
 
+keystore_opens() {  # <type> <storepass>; the password goes through the environment, not argv
+  KEYSTORE_CHECK_PASS="$2" keytool -list -storetype "$1" -storepass:env KEYSTORE_CHECK_PASS \
+    -keystore "$KEYSTORE_FILE" >/dev/null 2>&1
+}
+
 manage_keystore_passwords() {
-  local storepass keypass keystore_type
+  local storepass keypass keystore_type saved_storepass="" saved_keypass="" have_saved=0
   storepass="$(get_property "$PROPERTIES_FILE" keystore.storepass)"
   keypass="$(get_property "$PROPERTIES_FILE" keystore.keypass)"
   is_default_keystore_pair "$storepass" "$keypass" || return 0
@@ -337,19 +347,48 @@ manage_keystore_passwords() {
     return 0
   fi
 
-  if [ -f "$KEYSTORE_PASSWORDS_FILE" ]; then
-    storepass="$(get_property "$KEYSTORE_PASSWORDS_FILE" keystore.storepass)"
-    keypass="$(get_property "$KEYSTORE_PASSWORDS_FILE" keystore.keypass)"
-    if [ -z "$storepass" ] || [ -z "$keypass" ]; then
+  if [ -e "$KEYSTORE_PASSWORDS_FILE" ]; then
+    if [ ! -r "$KEYSTORE_PASSWORDS_FILE" ]; then
+      echo "ERROR: $KEYSTORE_PASSWORDS_FILE cannot be read by this container (UID $(id -u))." \
+           "appdata must be owned by the user the image runs as." >&2
+      exit 1
+    fi
+    saved_storepass="$(get_property "$KEYSTORE_PASSWORDS_FILE" keystore.storepass)"
+    saved_keypass="$(get_property "$KEYSTORE_PASSWORDS_FILE" keystore.keypass)"
+    if [ -z "$saved_storepass" ] || [ -z "$saved_keypass" ]; then
       echo "ERROR: $KEYSTORE_PASSWORDS_FILE does not contain both keystore.storepass and keystore.keypass." >&2
       exit 1
     fi
-    echo "Using the keystore passwords saved in $KEYSTORE_PASSWORDS_FILE."
-  elif [ ! -e "$KEYSTORE_FILE" ]; then
+    have_saved=1
+  fi
+
+  if [ -e "$KEYSTORE_FILE" ]; then
+    # Nothing is applied unless it actually opens this keystore: the saved passwords can be stale (a
+    # keystore later supplied through KEYSTORE_DOWNLOAD, or restored without its password file), and
+    # applying them blind would bring back the very failure this exists to prevent.
+    keystore_type="$(get_property "$PROPERTIES_FILE" keystore.type)"
+    keystore_type="${keystore_type:-JCEKS}"
+    if [ "$have_saved" = "1" ] && keystore_opens "$keystore_type" "$saved_storepass"; then
+      echo "Using the keystore passwords saved in $KEYSTORE_PASSWORDS_FILE."
+      storepass="$saved_storepass"
+      keypass="$saved_keypass"
+    elif keystore_opens "$keystore_type" "$storepass"; then
+      echo "$KEYSTORE_FILE opens with the default password; leaving its passwords as they are."
+      return 0
+    else
+      print_lost_keystore_password_help
+      exit 1
+    fi
+  elif [ "$have_saved" = "1" ]; then
+    echo "Using the keystore passwords saved in $KEYSTORE_PASSWORDS_FILE for a new keystore."
+    storepass="$saved_storepass"
+    keypass="$saved_keypass"
+  else
     storepass="$(random_password)"
     keypass="$(random_password)"
     # Written whole and then renamed, so an interrupted first start cannot leave a half-written file
     # that a later start would trust.
+    rm -f "$KEYSTORE_PASSWORDS_FILE.tmp"
     if ! ( umask 077 && printf '%s\n' \
              "# Passwords for keystore.jks in this directory, generated on the container's first start." \
              "# Keep this file with keystore.jks: the keystore cannot be opened without it." \
@@ -360,17 +399,6 @@ manage_keystore_passwords() {
       exit 1
     fi
     echo "Generated keystore passwords and saved them to $KEYSTORE_PASSWORDS_FILE."
-  else
-    # A keystore that opens with the default password (for example one supplied through
-    # KEYSTORE_DOWNLOAD) works on every start as it is.
-    keystore_type="$(get_property "$PROPERTIES_FILE" keystore.type)"
-    if keytool -list -storetype "${keystore_type:-JCEKS}" -storepass "$storepass" \
-         -keystore "$KEYSTORE_FILE" >/dev/null 2>&1; then
-      echo "$KEYSTORE_FILE opens with the default password; leaving its passwords as they are."
-      return 0
-    fi
-    print_lost_keystore_password_help
-    exit 1
   fi
 
   update_property "$PROPERTIES_FILE" keystore.storepass "$storepass"

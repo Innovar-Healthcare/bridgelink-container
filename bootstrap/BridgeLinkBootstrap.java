@@ -209,22 +209,29 @@ public final class BridgeLinkBootstrap {
         lines.add("-Xmx" + value);
     }
 
-    /** Line-based update mirroring entrypoint.sh: replace "^property =.*" else append. Preserves
-     *  file ordering/comments/spacing (java.util.Properties.store would reformat the whole file). */
+    /** Line-based update mirroring entrypoint.sh: replace every "property = ..." line (any spacing
+     *  around '=') else append. Preserves file ordering/comments/spacing (java.util.Properties.store
+     *  would reformat the whole file). Every matching line, not just the first: the server takes the
+     *  FIRST of duplicate keys while java.util.Properties takes the last, so a stale duplicate left
+     *  behind would mean the two read different values. */
     static void updateProperty(Path file, String property, String value) throws IOException {
         if (!isSet(value)) return;
         List<String> lines = readLines(file);
-        String prefix = property + " =";
         boolean found = false;
         for (int i = 0; i < lines.size(); i++) {
-            if (lines.get(i).startsWith(prefix)) {
+            if (isPropertyLine(lines.get(i), property)) {
                 lines.set(i, property + " = " + value);
                 found = true;
-                break;
             }
         }
         if (!found) lines.add(property + " = " + value);
         writeLines(file, lines);
+    }
+
+    /** True if the line assigns key with '=', whatever whitespace surrounds the key and the '='. */
+    static boolean isPropertyLine(String line, String key) {
+        String s = line.stripLeading();
+        return s.startsWith(key) && s.substring(key.length()).stripLeading().startsWith("=");
     }
 
     // ---- 4. EXTENSIONS_DOWNLOAD / CUSTOM_JARS_DOWNLOAD: download + extract -------------------
@@ -275,13 +282,11 @@ public final class BridgeLinkBootstrap {
             String key = line.substring(0, eq).strip();
             String value = line.substring(eq + 1).strip();
             if (key.isEmpty() || key.startsWith("#")) continue;
-            String prefix = key + " =";
             boolean found = false;
             for (int i = 0; i < target.size(); i++) {
-                if (target.get(i).strip().startsWith(prefix) || target.get(i).strip().startsWith(key + "=")) {
+                if (isPropertyLine(target.get(i), key)) {
                     target.set(i, key + " = " + value);
                     found = true;
-                    break;
                 }
             }
             if (!found) target.add(key + " = " + value);
@@ -333,31 +338,53 @@ public final class BridgeLinkBootstrap {
             return;
         }
 
-        if (Files.isRegularFile(KEYSTORE_PASSWORDS_FILE)) {
+        String savedStorepass = "";
+        String savedKeypass = "";
+        boolean haveSaved = false;
+        if (Files.exists(KEYSTORE_PASSWORDS_FILE)) {
+            if (!Files.isReadable(KEYSTORE_PASSWORDS_FILE)) {
+                System.err.println("ERROR: " + KEYSTORE_PASSWORDS_FILE + " cannot be read by this container."
+                        + " appdata must be owned by the user the image runs as.");
+                System.exit(1);
+            }
             Properties saved = loadProperties(KEYSTORE_PASSWORDS_FILE);
-            storepass = property(saved, "keystore.storepass");
-            keypass = property(saved, "keystore.keypass");
-            if (storepass.isEmpty() || keypass.isEmpty()) {
+            savedStorepass = property(saved, "keystore.storepass");
+            savedKeypass = property(saved, "keystore.keypass");
+            if (savedStorepass.isEmpty() || savedKeypass.isEmpty()) {
                 System.err.println("ERROR: " + KEYSTORE_PASSWORDS_FILE
                         + " does not contain both keystore.storepass and keystore.keypass.");
                 System.exit(1);
             }
-            System.out.println("Using the keystore passwords saved in " + KEYSTORE_PASSWORDS_FILE + ".");
-        } else if (!Files.exists(KEYSTORE_FILE)) {
+            haveSaved = true;
+        }
+
+        if (Files.exists(KEYSTORE_FILE)) {
+            // Nothing is applied unless it actually opens this keystore: the saved passwords can be
+            // stale (a keystore later supplied through KEYSTORE_DOWNLOAD, or restored without its
+            // password file), and applying them blind would bring back the very failure this exists
+            // to prevent.
+            String type = property(config, "keystore.type");
+            if (type.isEmpty()) type = "JCEKS";
+            if (haveSaved && keystoreOpens(type, savedStorepass)) {
+                System.out.println("Using the keystore passwords saved in " + KEYSTORE_PASSWORDS_FILE + ".");
+                storepass = savedStorepass;
+                keypass = savedKeypass;
+            } else if (keystoreOpens(type, storepass)) {
+                System.out.println(KEYSTORE_FILE + " opens with the default password; leaving its passwords as they are.");
+                return;
+            } else {
+                System.err.println(lostKeystorePasswordHelp());
+                System.exit(1);
+            }
+        } else if (haveSaved) {
+            System.out.println("Using the keystore passwords saved in " + KEYSTORE_PASSWORDS_FILE + " for a new keystore.");
+            storepass = savedStorepass;
+            keypass = savedKeypass;
+        } else {
             storepass = randomPassword();
             keypass = randomPassword();
             saveKeystorePasswords(storepass, keypass);
             System.out.println("Generated keystore passwords and saved them to " + KEYSTORE_PASSWORDS_FILE + ".");
-        } else {
-            // A keystore that opens with the default password (for example one supplied through
-            // KEYSTORE_DOWNLOAD) works on every start as it is.
-            String type = property(config, "keystore.type");
-            if (keystoreOpens(type.isEmpty() ? "JCEKS" : type, storepass)) {
-                System.out.println(KEYSTORE_FILE + " opens with the default password; leaving its passwords as they are.");
-                return;
-            }
-            System.err.println(lostKeystorePasswordHelp());
-            System.exit(1);
         }
 
         updateProperty(PROPERTIES_FILE, "keystore.storepass", storepass);
@@ -409,18 +436,20 @@ public final class BridgeLinkBootstrap {
 
     static String lostKeystorePasswordHelp() {
         return String.join(System.lineSeparator(),
-            "ERROR: " + KEYSTORE_FILE + " exists, but its passwords are not known, so the server",
+            "ERROR: " + KEYSTORE_FILE + " exists, but no known password opens it, so the server",
             "cannot open it and would start without its web server.",
             "",
-            "The keystore was most likely created by a container from an earlier image. Those images let the",
-            "server keep the keystore's random passwords inside the container rather than in appdata, so they",
-            "were lost when the container was recreated.",
+            "Usually the keystore was created by a container from an earlier image, which kept the keystore's",
+            "random passwords inside the container rather than in appdata, so they were lost when the container",
+            "was recreated. It can also be a keystore supplied through KEYSTORE_DOWNLOAD or restored from a",
+            "backup while MP_KEYSTORE_STOREPASS and MP_KEYSTORE_KEYPASS are not set, or one whose passwords were",
+            "changed from the Administrator, which saves the new passwords inside the container only.",
             "",
             "To recover, do one of the following:",
-            "  * If the old container still exists (docker ps -a), copy out its settings with",
+            "  * Set MP_KEYSTORE_STOREPASS and MP_KEYSTORE_KEYPASS to the keystore's passwords. To read them",
+            "    from an old container that still exists (docker ps -a), copy out its settings with",
             "      docker cp <old-container>:/opt/bridgelink/conf/mirth.properties ./old-mirth.properties",
-            "    and set MP_KEYSTORE_STOREPASS and MP_KEYSTORE_KEYPASS to the keystore.storepass and",
-            "    keystore.keypass values in that file.",
+            "    and use the keystore.storepass and keystore.keypass values in that file.",
             "  * If nothing encrypted needs to be kept, delete appdata/keystore.jks and start again. A new",
             "    keystore is created and its passwords are saved in appdata/keystore-passwords.properties.",
             "    The keystore holds the server's TLS certificate and data-encryption key, so anything encrypted",

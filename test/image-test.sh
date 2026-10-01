@@ -936,7 +936,7 @@ if wait_for_log bl-persist; then
   docker rm -f bl-persist >/dev/null
   docker run --rm -v bl-dhi-appdata:/a --entrypoint rm postgres:16-alpine -f /a/keystore-passwords.properties
   run bl-persist "${PERSIST_ARGS[@]}"
-  if wait_for_log bl-persist 'passwords are not known' 30; then
+  if wait_for_log bl-persist 'no known password opens it' 30; then
     ok "unknown keystore passwords explained in the log"
   else
     bad "no explanation for unknown keystore passwords"; docker logs bl-persist 2>&1 | tail -20
@@ -951,6 +951,36 @@ if wait_for_log bl-persist; then
   done
   [ "$EXIT_CODE" = "1" ] && ok "container exited 1 instead of running without a web server" \
     || bad "container did not exit 1 (got: $EXIT_CODE)"
+
+  # 8c. Saved passwords that do not open the keystore must not be applied. Staged as a keystore
+  # built with the stock default password (what a KEYSTORE_DOWNLOAD user may supply) next to a
+  # stale password file from the first container. Applying the file blind is the original failure
+  # again -- no web server -- with a "using the saved passwords" line on top. keytool runs from the
+  # image under test as the image's user, so the new keystore has the ownership the server expects.
+  info "8c. Stale saved passwords are not applied to a keystore they do not open"
+  docker rm -f bl-persist >/dev/null
+  docker run --rm -v bl-dhi-appdata:/a --entrypoint rm postgres:16-alpine -f /a/keystore.jks
+  docker run --rm -v bl-dhi-appdata:/opt/bridgelink/appdata --entrypoint keytool "$IMAGE" \
+    -genkeypair -alias test -keyalg RSA -keysize 2048 -dname CN=test -validity 30 \
+    -storetype JCEKS -storepass 81uWxplDtB -keypass 81uWxplDtB \
+    -keystore /opt/bridgelink/appdata/keystore.jks >/dev/null 2>&1
+  docker run --rm -v bl-dhi-appdata:/a -v "$WORK:/w:ro" --entrypoint sh postgres:16-alpine \
+    -c 'cp /w/kpwA /a/keystore-passwords.properties && chmod 644 /a/keystore-passwords.properties'
+  run bl-persist "${PERSIST_ARGS[@]}"
+  if wait_for_log bl-persist; then
+    docker logs bl-persist 2>&1 | grep -q 'opens with the default password' \
+      && ok "default-password keystore detected despite a saved password file" \
+      || bad "default-password keystore not detected"
+    if docker logs bl-persist 2>&1 | grep -q 'Keystore was tampered with'; then
+      bad "stale saved passwords were applied"
+    else
+      ok "stale saved passwords not applied"
+    fi
+    [ "$(api_code "$(https_port bl-persist)")" = "200" ] && ok "web server up with a default-password keystore" \
+      || bad "web server not answering with a default-password keystore"
+  else
+    bad "did not start with a default-password keystore"; docker logs bl-persist 2>&1 | tail -20
+  fi
 else
   bad "server did not start (persist)"
 fi

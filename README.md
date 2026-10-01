@@ -734,9 +734,10 @@ services:
       - ~/Documents/appdata:/opt/bridgelink/appdata
 ```
 
-Both images declare appdata as a volume, so Docker keeps it even when you do not mount one:
-`docker compose` reattaches the same volume when it recreates the container, for example after
-you pull a new image.
+Both images declare appdata as a volume, so Docker creates one even when you do not mount it.
+`docker compose up` reattaches that volume when it recreates a container in place, for example
+after you pull a new image, but not after `docker compose down`, and `docker rm` followed by
+`docker run` starts with an empty one. Mount a folder or a named volume to keep appdata reliably.
 
 <a name="keystore-passwords"></a>
 **Keystore passwords.** The keystore in appdata (`keystore.jks`) is protected by two passwords,
@@ -752,6 +753,10 @@ To choose your own, set [`MP_KEYSTORE_STOREPASS`](#env-keystore-storepass) and
 passwords to you and saves no password file. Do not remove or change them later: changing the
 setting does not re-encrypt an existing keystore, it only stops it from opening.
 
+Changing the keystore password from the Administrator saves the new passwords inside the container
+only. If you do, copy them out (see below) and set them as `MP_KEYSTORE_STOREPASS` and
+`MP_KEYSTORE_KEYPASS` before the container is next recreated.
+
 <a name="upgrading-keystore"></a>
 **Upgrading from an earlier image.** Earlier images let the server keep its generated keystore
 passwords inside the container rather than in appdata, so they were lost whenever the container was
@@ -766,7 +771,7 @@ Then set `MP_KEYSTORE_STOREPASS` and `MP_KEYSTORE_KEYPASS` to the `keystore.stor
 `keystore.keypass` values in that file. The upgraded container opens the existing keystore with them.
 
 If the passwords are already lost, the container stops at startup and its log says the keystore
-"exists, but its passwords are not known", followed by the same recovery steps. If nothing
+"exists, but no known password opens it", followed by the same recovery steps. If nothing
 encrypted needs to be kept, delete `appdata/keystore.jks` and start again: a new keystore is created
 and its passwords are saved. The keystore holds the server's TLS certificate and its
 data-encryption key, so anything encrypted with the old key cannot be read afterwards.
