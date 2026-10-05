@@ -223,8 +223,8 @@ if [ ! -z "$EXTERNAL_IP" ]; then
     echo -e "HTTPS: ${GREEN}https://$EXTERNAL_IP:8443${NC}"
 else
     echo -e "\n${YELLOW}External IP not yet assigned. You can still access BridgeLink using port-forward:${NC}"
-    echo -e "HTTP:  ${YELLOW}kubectl port-forward svc/bridgelink-bl -n bridgelink 8080:8080${NC}"
-    echo -e "HTTPS: ${YELLOW}kubectl port-forward svc/bridgelink-bl -n bridgelink 8443:8443${NC}"
+    echo -e "HTTP:  ${YELLOW}kubectl port-forward svc/${RELEASE_NAME}-bl -n ${NAMESPACE} 8080:8080${NC}"
+    echo -e "HTTPS: ${YELLOW}kubectl port-forward svc/${RELEASE_NAME}-bl -n ${NAMESPACE} 8443:8443${NC}"
     echo -e "\nThen access at:"
     echo -e "HTTP:  ${GREEN}http://localhost:8080${NC}"
     echo -e "HTTPS: ${GREEN}https://localhost:8443${NC}"
