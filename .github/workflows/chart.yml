@@ -419,6 +419,94 @@ jobs:
           print('appdata persists by default; emptyDir, existingClaim and Secret modes render as documented')
           PY
 
+      - name: Values accept the standard Kubernetes options
+        run: |
+          set -euo pipefail
+          # The schema used to reject these outright (affinity and nodeSelector allowed no keys at
+          # all), so customers could not pin pods to an EKS node pool, use IRSA or a private registry,
+          # or set BridgeLink variables beyond eight fixed ones.
+          cat > /tmp/options.yaml <<'EOF'
+          imagePullSecrets: [{name: ecr-pull}]
+          serviceAccount:
+            create: true
+            annotations: {eks.amazonaws.com/role-arn: "arn:aws:iam::123456789012:role/bl"}
+          bridgelink:
+            podAnnotations: {example.com/a: b}
+            podLabels: {team: integration, app: ignored}
+            environment: {MP_DATABASE_MAX__CONNECTIONS: "30", BL_HEALTH_ALWAYS_STATUS: "true"}
+            extraEnv:
+              - name: MP_DATABASE_PASSWORD
+                valueFrom: {secretKeyRef: {name: db, key: password}}
+            extraVolumes: [{name: files, persistentVolumeClaim: {claimName: efs-files}}]
+            extraVolumeMounts: [{name: files, mountPath: /data}]
+            nodeSelector: {karpenter.sh/nodepool: bridgelink}
+            affinity: {nodeAffinity: {requiredDuringSchedulingIgnoredDuringExecution: {nodeSelectorTerms: [{matchExpressions: [{key: topology.kubernetes.io/zone, operator: In, values: [us-east-1a]}]}]}}}
+            tolerations: [{key: dedicated, operator: Equal, value: bridgelink, effect: NoSchedule}]
+            resources: {requests: {ephemeral-storage: 1Gi}}
+          webadmin: {enabled: true, acceptLicense: true}
+          EOF
+          helm template bl charts/bridgelink -f /tmp/options.yaml > /tmp/options-out.yaml
+          python3 - <<'PY'
+          import yaml
+          docs = [d for d in yaml.safe_load_all(open('/tmp/options-out.yaml')) if d]
+          deps = {d['metadata']['name']: d for d in docs if d['kind'] == 'Deployment'}
+          spec = deps['bl-bridgelink-bl']['spec']['template']['spec']
+          meta = deps['bl-bridgelink-bl']['spec']['template']['metadata']
+          c = spec['containers'][0]
+          sa = [d for d in docs if d['kind'] == 'ServiceAccount']
+          assert len(sa) == 1 and sa[0]['metadata']['annotations']['eks.amazonaws.com/role-arn'].endswith(':role/bl')
+          assert spec['serviceAccountName'] == sa[0]['metadata']['name']
+          for name, d in deps.items():
+              assert d['spec']['template']['spec'].get('imagePullSecrets') == [{'name': 'ecr-pull'}], f'{name}: no pull secret'
+          assert meta['labels']['team'] == 'integration' and meta['labels']['app'] == 'bl', \
+              'podLabels must add labels without changing the selector labels'
+          assert meta['annotations']['example.com/a'] == 'b'
+          names = [e['name'] for e in c['env']]
+          assert len(names) == len(set(names)), f'duplicate env names: {names}'
+          env = {e['name']: e for e in c['env']}
+          assert env['MP_DATABASE_MAX__CONNECTIONS']['value'] == '30', 'environment must accept any key'
+          assert 'valueFrom' in env['MP_DATABASE_PASSWORD'], 'extraEnv must replace the chart-set variable'
+          assert {'name': 'files', 'mountPath': '/data'} in c['volumeMounts']
+          assert any(v['name'] == 'files' for v in spec['volumes'])
+          assert spec['nodeSelector'] and spec['affinity'] and spec['tolerations']
+          assert c['resources']['requests']['ephemeral-storage'] == '1Gi'
+          print('every option renders')
+          PY
+          # Open where Kubernetes defines the shape, strict where the chart does: a misspelt chart
+          # key must still fail the install rather than be silently ignored.
+          for bad in bridgelink.persistance.enabled=true serviceAccount.crate=true bridgelink.image.tagg=x; do
+            if helm template bl charts/bridgelink --set "$bad" > /tmp/typo.txt 2>&1; then
+              echo "::error::the schema accepted the misspelt key in $bad"; exit 1
+            fi
+          done
+          echo "misspelt chart keys are still rejected"
+          # Helm renders an unquoted large number as 3e+06, which BridgeLink would read verbatim.
+          if helm template bl charts/bridgelink --set bridgelink.environment.MP_X=3000000 > /tmp/num.txt 2>&1; then
+            echo "::error::an unquoted number in bridgelink.environment was accepted"; exit 1
+          fi
+          echo "unquoted numbers in environment are rejected"
+          # An external URL from a Secret alone, with nothing in environment: the URL helper must not
+          # fail the render for a variable extraEnv already supplies.
+          helm template bl charts/bridgelink --set postgres.enabled=false --set-json \
+            'bridgelink.extraEnv=[{"name":"MP_DATABASE_URL","valueFrom":{"secretKeyRef":{"name":"db","key":"url"}}}]' \
+            > /tmp/url-secret.yaml
+          grep -q "key: url" /tmp/url-secret.yaml && [ "$(grep -c 'name: MP_DATABASE_URL' /tmp/url-secret.yaml)" = 1 ] \
+            || { echo "::error::MP_DATABASE_URL from extraEnv did not render exactly once"; exit 1; }
+          echo "an external URL can come from extraEnv alone"
+          # With none of these set, the pod template must not change, or every existing release
+          # restarts on upgrade for nothing.
+          python3 - <<'PY'
+          import yaml
+          docs = [d for d in yaml.safe_load_all(open('/tmp/rendered.yaml')) if d]
+          assert not [d for d in docs if d['kind'] == 'ServiceAccount'], 'a ServiceAccount is created by default'
+          for d in docs:
+              if d['kind'] == 'Deployment':
+                  s = d['spec']['template']['spec']
+                  for k in ('serviceAccountName', 'imagePullSecrets'):
+                      assert k not in s, f"{d['metadata']['name']}: {k} rendered by default"
+          print('defaults leave the pod templates unchanged')
+          PY
+
       - name: WebAdmin is off by default
         run: |
           set -euo pipefail

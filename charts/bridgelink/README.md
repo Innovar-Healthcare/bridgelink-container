@@ -1,6 +1,6 @@
 # bridgelink
 
-![Version: 0.6.0](https://img.shields.io/badge/Version-0.6.0-informational?style=flat-square)
+![Version: 0.7.0](https://img.shields.io/badge/Version-0.7.0-informational?style=flat-square)
 ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square)
 ![AppVersion: 26.9.0](https://img.shields.io/badge/AppVersion-26.9.0-informational?style=flat-square)
 
@@ -149,6 +149,21 @@ bridgelink:
     MP_DATABASE_PASSWORD: "<password>"
 ```
 
+To keep the password, or the whole URL, out of values, read it from a Secret with `extraEnv`. An
+`extraEnv` entry replaces the variable of the same name the chart would set:
+
+```yaml
+bridgelink:
+  extraEnv:
+    - name: MP_DATABASE_PASSWORD
+      valueFrom:
+        secretKeyRef: {name: bridgelink-db, key: password}
+```
+
+`bridgelink.environment` accepts any variable the image reads, not only the ones listed in
+`values.yaml`. An `MP_` variable sets the matching `mirth.properties` key (`MP_FOO_BAR` sets
+`foo.bar`). Quote numbers.
+
 With `postgres.enabled: false` and no `MP_DATABASE_URL`, the install fails with a message saying so.
 For the embedded Derby database instead, set `MP_DATABASE: derby` and `postgres.enabled: false`.
 
@@ -294,6 +309,9 @@ not apply.
 | bridgelink.environment.MP_KEYSTORE_KEYPASS | string | `"bridgelinkKeystore"` | Keystore key password |
 | bridgelink.environment.MP_KEYSTORE_STOREPASS | string | `"bridgelinkKeypass"` | Keystore store password |
 | bridgelink.environment.SERVER_ID | string | `"7d760af2-680a-4a19-b9a2-c4685df61ebc"` | Unique server identifier |
+| bridgelink.extraEnv | list | `[]` | Extra environment variables for the BridgeLink container, as Kubernetes EnvVar entries, so `valueFrom` works (for example a password from a Secret). An entry here replaces any variable of the same name the chart sets, including `environment` and the database settings. |
+| bridgelink.extraVolumeMounts | list | `[]` | Extra volume mounts for the BridgeLink container |
+| bridgelink.extraVolumes | list | `[]` | Extra volumes for the BridgeLink pod, e.g. an EFS claim for file-based channels |
 | bridgelink.helperImage.pullPolicy | string | `"IfNotPresent"` | Helper image pull policy |
 | bridgelink.helperImage.repository | string | `"busybox"` | Helper image repository. Needs `/bin/sh`, `cp` and `mv`. |
 | bridgelink.helperImage.tag | string | `"1.37.0"` | Helper image tag. Pinned: a moving tag would change what runs without a chart change. |
@@ -308,6 +326,8 @@ not apply.
 | bridgelink.persistence.existingClaim | string | `""` | Use this existing PersistentVolumeClaim instead of creating one, e.g. one bound to a statically provisioned EFS volume. Used only while `enabled` is true. |
 | bridgelink.persistence.size | string | `"1Gi"` | Size of the claim. The keystore is small; the embedded Derby database (`MP_DATABASE: derby`) also lives in appdata and needs more. |
 | bridgelink.persistence.storageClass | string | `""` | Storage class for the claim. Empty uses the cluster default (EBS on EKS). For EFS, name an EFS storage class whose `uid` and `gid` match `runAsUser` and `runAsGroup`, since EFS ignores `fsGroup`. |
+| bridgelink.podAnnotations | object | `{}` | Extra annotations for the BridgeLink pod |
+| bridgelink.podLabels | object | `{}` | Extra labels for the BridgeLink pod. The chart's selector labels (`app`, `app.kubernetes.io/name`, `app.kubernetes.io/instance`) cannot be changed and are ignored here. |
 | bridgelink.podSecurityContext | object | `{"fsGroupChangePolicy":"OnRootMismatch","runAsNonRoot":true,"seccompProfile":{"type":"RuntimeDefault"}}` | Pod security context. `runAsUser`, `runAsGroup` and `fsGroup` default to the two values above and can be overridden here. The defaults meet the Kubernetes "restricted" Pod Security Standard; set one of the keys below to `null` to remove it. |
 | bridgelink.readinessProbe | string | `nil` | Readiness probe. Disabled by default for the same reason as startupProbe; see above. Note that until you enable it, a pod is considered Ready as soon as its container is running, which means Service traffic can reach BridgeLink while the engine is still deploying channels. |
 | bridgelink.replicaCount | int | `1` | Number of BridgeLink pods: 0 or 1. The schema rejects anything higher, because more than one active node needs the Channel Coordinator plugin and a server ID per pod, which this chart does not set up. Upgrades stop the old pod before starting the new one (`strategy: Recreate`). |
@@ -323,6 +343,7 @@ not apply.
 | bridgelink.startupProbe | string | `nil` | Startup probe. Disabled by default because it needs an image carrying the probe binary — see the block above for the values to paste in once it does. |
 | bridgelink.tolerations | list | `[]` | Pod tolerations for BridgeLink |
 | fullnameOverride | string | `""` | Provide a name to substitute for the full names of resources |
+| imagePullSecrets | list | `[]` | Image pull secrets for every pod the chart creates (BridgeLink, WebAdmin, PostgreSQL), as a list of `{name: <secret>}`, e.g. for a private registry mirror. |
 | nameOverride | string | `""` | Override the name of the chart |
 | postgres.credentials.database | string | `"bridgelinkdb"` | PostgreSQL database name |
 | postgres.credentials.password | string | `"bridgelinktest"` | PostgreSQL password |
@@ -339,6 +360,9 @@ not apply.
 | postgres.resources.requests.cpu | string | `"200m"` | PostgreSQL CPU request |
 | postgres.resources.requests.memory | string | `"256Mi"` | PostgreSQL memory request |
 | postgres.service.port | int | `5432` | PostgreSQL port number |
+| serviceAccount.annotations | object | `{}` | Annotations for the created ServiceAccount, e.g. `eks.amazonaws.com/role-arn` to give BridgeLink an IAM role through IRSA. |
+| serviceAccount.create | bool | `false` | Create a ServiceAccount for the BridgeLink pod. With `create: false` and no `name`, the pod uses the namespace's default ServiceAccount. |
+| serviceAccount.name | string | `""` | ServiceAccount for the BridgeLink pod: the name to create, or an existing one to use. Empty with `create: true` uses the release's full name. |
 | webadmin.acceptLicense | bool | `false` | Accept the WebAdmin license: the Business Source License 1.1 plus the BridgeLink WebAdmin Supplemental Terms. Read them with `docker run --rm --entrypoint cat <image> /app/LICENSE /app/SUPPLEMENTAL-TERMS.md`, using the image set under `image:` below; the install error prints the exact command. The chart never accepts them for you: with `enabled: true` and this left false, `helm install` fails with an explanation instead of starting a container that would exit without running. |
 | webadmin.affinity | object | `{}` | Pod affinity for WebAdmin |
 | webadmin.containerPort | int | `8444` | Port WebAdmin listens on (HTTPS). 8444 is WebAdmin's documented default. It is passed to the container as `PORT`, because the image's built-in config still says 3000. |

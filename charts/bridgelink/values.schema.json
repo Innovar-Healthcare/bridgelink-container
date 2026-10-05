@@ -7,14 +7,19 @@
       "description": "BridgeLink Helm chart configuration @section Global Settings",
       "properties": {
         "affinity": {
-          "additionalProperties": false,
           "default": "`{}`",
           "description": "Affinity for pod assignment",
           "required": [],
-          "title": "affinity"
+          "title": "affinity",
+          "type": "object"
         },
         "environment": {
-          "additionalProperties": false,
+          "additionalProperties": {
+            "type": [
+              "string",
+              "boolean"
+            ]
+          },
           "default": "See below",
           "description": "Environment variables for BridgeLink configuration",
           "properties": {
@@ -97,11 +102,14 @@
           "type": "object"
         },
         "nodeSelector": {
-          "additionalProperties": false,
           "default": "`{}`",
           "description": "Node labels for pod assignment",
           "required": [],
-          "title": "nodeSelector"
+          "title": "nodeSelector",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
         },
         "replicaCount": {
           "default": "1",
@@ -130,7 +138,6 @@
           "description": "Resource limits and requests for the BridgeLink container",
           "properties": {
             "limits": {
-              "additionalProperties": false,
               "properties": {
                 "cpu": {
                   "default": "2000m",
@@ -150,7 +157,6 @@
               "type": "object"
             },
             "requests": {
-              "additionalProperties": false,
               "properties": {
                 "cpu": {
                   "default": "500m",
@@ -362,6 +368,84 @@
             "object",
             "null"
           ]
+        },
+        "podAnnotations": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": "`{}`",
+          "description": "Extra annotations for the BridgeLink pod",
+          "required": [],
+          "title": "podAnnotations",
+          "type": "object"
+        },
+        "podLabels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": "`{}`",
+          "description": "Extra labels for the BridgeLink pod",
+          "required": [],
+          "title": "podLabels",
+          "type": "object"
+        },
+        "extraEnv": {
+          "default": "`[]`",
+          "description": "Extra EnvVar entries for the BridgeLink container; they replace chart-set variables of the same name",
+          "items": {
+            "properties": {
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name"
+            ],
+            "type": "object"
+          },
+          "required": [],
+          "title": "extraEnv",
+          "type": "array"
+        },
+        "extraVolumes": {
+          "default": "`[]`",
+          "description": "Extra volumes for the BridgeLink pod",
+          "items": {
+            "properties": {
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name"
+            ],
+            "type": "object"
+          },
+          "required": [],
+          "title": "extraVolumes",
+          "type": "array"
+        },
+        "extraVolumeMounts": {
+          "default": "`[]`",
+          "description": "Extra volume mounts for the BridgeLink container",
+          "items": {
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "mountPath": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "mountPath"
+            ],
+            "type": "object"
+          },
+          "required": [],
+          "title": "extraVolumeMounts",
+          "type": "array"
         }
       },
       "required": [
@@ -480,7 +564,6 @@
           "description": "Resource limits and requests for PostgreSQL container",
           "properties": {
             "limits": {
-              "additionalProperties": false,
               "properties": {
                 "cpu": {
                   "default": "1000m",
@@ -500,7 +583,6 @@
               "type": "object"
             },
             "requests": {
-              "additionalProperties": false,
               "properties": {
                 "cpu": {
                   "default": "200m",
@@ -705,6 +787,57 @@
       "required": [],
       "title": "webadmin",
       "type": "object"
+    },
+    "imagePullSecrets": {
+      "default": "`[]`",
+      "description": "Image pull secrets for every pod the chart creates",
+      "items": {
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "required": [],
+      "title": "imagePullSecrets",
+      "type": "array"
+    },
+    "serviceAccount": {
+      "additionalProperties": false,
+      "description": "ServiceAccount for the BridgeLink pod",
+      "required": [],
+      "title": "serviceAccount",
+      "type": "object",
+      "properties": {
+        "create": {
+          "default": false,
+          "description": "Create a ServiceAccount",
+          "required": [],
+          "title": "create",
+          "type": "boolean"
+        },
+        "name": {
+          "default": "",
+          "description": "Name of the ServiceAccount to create or use",
+          "required": [],
+          "title": "name",
+          "type": "string"
+        },
+        "annotations": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": "`{}`",
+          "description": "Annotations for the created ServiceAccount",
+          "required": [],
+          "title": "annotations",
+          "type": "object"
+        }
+      }
     }
   },
   "required": [

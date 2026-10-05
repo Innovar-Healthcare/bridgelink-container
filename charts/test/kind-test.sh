@@ -5,8 +5,9 @@
 # it: that BridgeLink becomes ready, that an upgrade never runs two BridgeLink pods at once, that a
 # message stored encrypted stays readable after the pod is replaced (keystore on the claim, then from
 # a Secret), that the bundled PostgreSQL really runs the config the chart ships, and that BridgeLink,
-# with WebAdmin, runs in a namespace enforcing the "restricted" Pod Security Standard against an
-# external database.
+# with WebAdmin and the standard Kubernetes options set (service account, pull secret, extra env from a
+# Secret, extra volume), runs in a namespace enforcing the "restricted" Pod Security Standard against
+# an external database.
 #
 # Lives under charts/ rather than test/ on purpose: build-images.yml runs the full multi-arch image
 # build for any change under test/**, and a chart-only change should not pay for that.
@@ -443,17 +444,38 @@ k rollout status deploy/rds-standin --timeout=3m >/dev/null || { bad "stand-in d
 # Installed in the restricted namespace with every pod shape the chart has: the keystore init
 # container (keystore.existingSecret), the appdata claim, and WebAdmin. The bundled PostgreSQL is not
 # restricted-compliant and is documented as such. The test accepts the WebAdmin license for itself.
+# It also carries the standard Kubernetes options. The database password in `environment` is wrong
+# on purpose: only the extraEnv entry from the Secret is right, so a working database connection
+# proves extraEnv replaced it. The pull secret names a registry no image comes from, so it is never
+# used for a pull.
+kr create secret generic ext-db --from-literal=password="p@ss,w0rd #1" >/dev/null
+kr create secret docker-registry ext-pull --docker-server=registry.example.com \
+  --docker-username=unused --docker-password=unused >/dev/null
 cat > "$WORK/external.yaml" <<EOF
 postgres:
   enabled: false
+imagePullSecrets: [{name: ext-pull}]
+serviceAccount:
+  create: true
+  annotations: {eks.amazonaws.com/role-arn: "arn:aws:iam::123456789012:role/kind-test"}
 bridgelink:
   keystore:
     existingSecret: bl-keystore
+  podLabels: {team: kind-test}
+  podAnnotations: {example.com/test: "true"}
+  extraEnv:
+    - name: MP_DATABASE_PASSWORD
+      valueFrom: {secretKeyRef: {name: ext-db, key: password}}
+  extraVolumes: [{name: scratch, emptyDir: {}}]
+  extraVolumeMounts: [{name: scratch, mountPath: /opt/bridgelink/scratch}]
+  nodeSelector: {kubernetes.io/os: linux}
+  tolerations: [{key: example.com/dedicated, operator: Exists, effect: NoSchedule}]
   environment:
     MP_DATABASE: postgres
     MP_DATABASE_URL: "jdbc:postgresql://rds-standin.$NS.svc:5432/blext?ApplicationName=bl-chart-test"
     MP_DATABASE_USERNAME: blext
-    MP_DATABASE_PASSWORD: "p@ss,w0rd #1"
+    MP_DATABASE_PASSWORD: "wrong-on-purpose"
+    MP_DATABASE_MAX__CONNECTIONS: "15"
 webadmin:
   enabled: true
   acceptLicense: true
@@ -473,12 +495,21 @@ else
 fi
 UIDS="$(kr get pods -o jsonpath='{range .items[*]}{.metadata.labels.app}={.spec.securityContext.runAsUser} {end}')"
 echo "  pods running as: $UIDS"
+EXT_POD="$(kr get pods -l app=bl,app.kubernetes.io/instance=ext -o jsonpath='{.items[0].metadata.name}')"
+GOT="$(kr get pod "$EXT_POD" -o jsonpath='{.spec.serviceAccountName}|{.metadata.labels.team}|{.spec.imagePullSecrets[0].name}|{.spec.nodeSelector.kubernetes\.io/os}')"
+[ "$GOT" = "ext-bridgelink|kind-test|ext-pull|linux" ] \
+  && ok "service account, pod labels, pull secret and node selector reached the pod" \
+  || bad "pod options did not all reach the pod: $GOT"
+MOUNTED="$(kr get pod "$EXT_POD" -o jsonpath='{.spec.containers[0].volumeMounts[?(@.name=="scratch")].mountPath}')"
+[ "$MOUNTED" = "/opt/bridgelink/scratch" ] && ok "extra volume mounted at $MOUNTED" \
+  || bad "extra volume not mounted: '$MOUNTED'"
 PG_OBJS="$(kr get deploy,svc,pvc,configmap -l app.kubernetes.io/instance=ext -o name | grep -c postgres)"
 [ "$PG_OBJS" = "0" ] && ok "no bundled PostgreSQL deployed with postgres.enabled=false" \
   || bad "$PG_OBJS bundled PostgreSQL objects deployed with postgres.enabled=false"
 SQL() { k exec deploy/rds-standin -- psql -U blext -d blext -tAc "$1" 2>&1; }
+# The schema exists only if BridgeLink logged in, which only the extraEnv password from the Secret allows.
 TABLES="$(SQL "select count(*) from information_schema.tables where table_schema='public'")"
-[ "${TABLES:-0}" -gt 0 ] 2>/dev/null && ok "BridgeLink created its schema in the external database ($TABLES tables)" \
+[ "${TABLES:-0}" -gt 0 ] 2>/dev/null && ok "BridgeLink logged in with the extraEnv password and created its schema ($TABLES tables)" \
   || bad "no BridgeLink tables in the external database: $TABLES"
 APPS="$(SQL "select count(*) from pg_stat_activity where application_name='bl-chart-test'")"
 [ "${APPS:-0}" -gt 0 ] 2>/dev/null && ok "URL parameters reached the driver unchanged ($APPS connections named bl-chart-test)" \
