@@ -9,8 +9,9 @@
 # standard Kubernetes options set (service account, pull secret, extra env from a Secret, extra
 # volume), runs in a namespace enforcing the "restricted" Pod Security Standard against an external
 # database, that the Services survive type changes on upgrade and print their load balancer
-# hostname in the install notes, and that a new install without a server ID is refused while an
-# upgraded server keeps the ID it had.
+# hostname in the install notes, that a new install without a server ID is refused while an
+# upgraded server keeps the ID it had, and that a plugin installs both from a download URL
+# (EXTENSIONS_DOWNLOAD) and from a claim mounted at custom-extensions.
 #
 # Lives under charts/ rather than test/ on purpose: build-images.yml runs the full multi-arch image
 # build for any change under test/**, and a chart-only change should not pay for that.
@@ -34,7 +35,7 @@
 #   UPGRADE_FROM=origin/main charts/test/kind-test.sh
 #   IMAGE_TAG=26.9.0-dhi RUN_AS_UID=65532 charts/test/kind-test.sh
 #
-# Requires: docker, kind, kubectl, helm, git. Needs about 4 GB of memory for Docker.
+# Requires: docker, kind, kubectl, helm, git, zip. Needs about 4 GB of memory for Docker.
 set -u
 
 CLUSTER="${KIND_CLUSTER:-bl-chart-test}"
@@ -92,10 +93,10 @@ dump() {
 
 # ---- BridgeLink REST API, through a port-forward to the release's Service ----------------------
 # A port-forward follows one pod, so it is restarted after every pod replacement.
-forward() {   # <release>; sets API
+forward() {   # <release> [namespace]; sets API
   local port="" i
   [ -n "${PF_PID:-}" ] && { kill "$PF_PID" 2>/dev/null; wait "$PF_PID" 2>/dev/null; }
-  k port-forward "svc/$1-bridgelink-bl" :8443 > "$WORK/pf.log" 2>&1 &
+  kubectl --context "kind-$CLUSTER" -n "${2:-$NS}" port-forward "svc/$1-bridgelink-bl" :8443 > "$WORK/pf.log" 2>&1 &
   PF_PID=$!
   for i in $(seq 1 30); do
     port="$(sed -n 's/^Forwarding from 127\.0\.0\.1:\([0-9]*\) .*/\1/p' "$WORK/pf.log" | head -1)"
@@ -183,7 +184,29 @@ client() {   # <command...>
   k exec pgclient -- "$@" 2>&1
 }
 
-for tool in docker kind kubectl helm git; do
+# A plugin with metadata only: BridgeLink lists it in /api/extensions/plugins once installed, with no
+# code to run. BridgeLink loads a plugin only when its mirthVersion is the server's own version, so
+# it is built for the server under test.
+plugin_zip() {   # <server version> <path> <name>; writes $WORK/plugins/<path>.zip
+  mkdir -p "$WORK/plugins/$2"
+  cat > "$WORK/plugins/$2/plugin.xml" <<EOF
+<pluginMetaData path="$2">
+  <name>$3</name>
+  <author>chart test</author>
+  <mirthVersion>$(echo "$1" | cut -d. -f1-3)</mirthVersion>
+  <pluginVersion>1.0.0</pluginVersion>
+  <url></url>
+  <description>Metadata-only plugin used to test plugin installation.</description>
+  <serverClasses/>
+  <clientClasses/>
+  <libraries/>
+  <apiProviders/>
+</pluginMetaData>
+EOF
+  (cd "$WORK/plugins" && rm -f "$2.zip" && zip -qr "$2.zip" "$2")
+}
+
+for tool in docker kind kubectl helm git zip; do
   command -v "$tool" >/dev/null || { echo "missing required tool: $tool"; exit 2; }
 done
 
@@ -544,6 +567,44 @@ k rollout status deploy/rds-standin --timeout=3m >/dev/null || { bad "stand-in d
 kr create secret generic ext-db --from-literal=password="p@ss,w0rd #1" >/dev/null
 kr create secret docker-registry ext-pull --docker-server=registry.example.com \
   --docker-username=unused --docker-password=unused >/dev/null
+# Plugins, both ways the README documents, one plugin each so the API shows which way worked.
+# Download: a web server in the cluster stands in for S3, so the test needs no outside host. The URL
+# carries a presigned URL's query string: the Rocky image names the downloaded file after the URL.
+# Claim: loaded with the README's commands, then mounted read-only at custom-extensions. Keep the
+# two in step: this is what tests the documented commands.
+plugin_zip "$VERSION" kind-test-download "Kind Test Download"
+plugin_zip "$VERSION" kind-test-claim "Kind Test Claim"
+kr create configmap ext-download --from-file="$WORK/plugins/kind-test-download.zip" >/dev/null
+kr run ext-web --image="$HELPER_IMAGE" --restart=Never --labels=app=ext-web --overrides='{"spec":{
+  "securityContext":{"runAsNonRoot":true,"runAsUser":1000,"seccompProfile":{"type":"RuntimeDefault"}},
+  "volumes":[{"name":"www","configMap":{"name":"ext-download"}}],
+  "containers":[{"name":"ext-web","image":"'"$HELPER_IMAGE"'","command":["httpd","-f","-p","8080","-h","/www"],
+    "securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}},
+    "volumeMounts":[{"name":"www","mountPath":"/www"}]}]}}' >/dev/null
+kr expose pod ext-web --port=8080 >/dev/null
+cat <<'EOF' | kr apply -f - >/dev/null
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: bridgelink-plugins}
+spec:
+  accessModes: [ReadWriteOnce]
+  resources: {requests: {storage: 1Gi}}
+EOF
+NODE="$(kubectl --context "kind-$CLUSTER" get nodes -o jsonpath='{.items[0].metadata.name}')"
+# nodeSelector, not nodeName: nodeName skips the scheduler, and a storage class that waits for the
+# first pod (kind's, and EBS on EKS) then never creates the volume.
+kr run plugin-copy --image="$HELPER_IMAGE" --restart=Never --overrides='{"spec":{
+  "nodeSelector":{"kubernetes.io/hostname":"'"$NODE"'"},
+  "securityContext":{"runAsNonRoot":true,"runAsUser":'"${RUN_AS_UID:-1000}"',"fsGroup":'"${RUN_AS_UID:-1000}"',"seccompProfile":{"type":"RuntimeDefault"}},
+  "volumes":[{"name":"plugins","persistentVolumeClaim":{"claimName":"bridgelink-plugins"}}],
+  "containers":[{"name":"copy","image":"'"$HELPER_IMAGE"'","command":["sleep","300"],
+    "securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}},
+    "volumeMounts":[{"name":"plugins","mountPath":"/plugins"}]}]}}' >/dev/null
+kr wait --for=condition=Ready pod/plugin-copy --timeout=2m >/dev/null \
+  && kr cp "$WORK/plugins/kind-test-claim.zip" plugin-copy:/plugins/kind-test-claim.zip \
+  || bad "could not copy the plugin onto claim bridgelink-plugins"
+kr delete pod plugin-copy --wait=false >/dev/null
+kr wait --for=condition=Ready pod/ext-web --timeout=2m >/dev/null || bad "the in-cluster web server for the download is not ready"
 cat > "$WORK/external.yaml" <<EOF
 postgres:
   enabled: false
@@ -559,8 +620,8 @@ bridgelink:
   extraEnv:
     - name: MP_DATABASE_PASSWORD
       valueFrom: {secretKeyRef: {name: ext-db, key: password}}
-  extraVolumes: [{name: scratch, emptyDir: {}}]
-  extraVolumeMounts: [{name: scratch, mountPath: /opt/bridgelink/scratch}]
+  extraVolumes: [{name: plugins, persistentVolumeClaim: {claimName: bridgelink-plugins, readOnly: true}}]
+  extraVolumeMounts: [{name: plugins, mountPath: /opt/bridgelink/custom-extensions, readOnly: true}]
   nodeSelector: {kubernetes.io/os: linux}
   tolerations: [{key: example.com/dedicated, operator: Exists, effect: NoSchedule}]
   environment:
@@ -569,6 +630,7 @@ bridgelink:
     MP_DATABASE_USERNAME: blext
     MP_DATABASE_PASSWORD: "wrong-on-purpose"
     MP_DATABASE_MAX__CONNECTIONS: "15"
+    EXTENSIONS_DOWNLOAD: "http://ext-web:8080/kind-test-download.zip?X-Amz-Expires=300&X-Amz-Signature=ab%2Fcd"
 webadmin:
   enabled: true
   acceptLicense: true
@@ -594,8 +656,8 @@ GOT="$(kr get pod "$EXT_POD" -o jsonpath='{.spec.serviceAccountName}|{.metadata.
 [ "$GOT" = "ext-bridgelink|kind-test|ext-pull|linux" ] \
   && ok "service account, pod labels, pull secret and node selector reached the pod" \
   || bad "pod options did not all reach the pod: $GOT"
-MOUNTED="$(kr get pod "$EXT_POD" -o jsonpath='{.spec.containers[0].volumeMounts[?(@.name=="scratch")].mountPath}')"
-[ "$MOUNTED" = "/opt/bridgelink/scratch" ] && ok "extra volume mounted at $MOUNTED" \
+MOUNTED="$(kr get pod "$EXT_POD" -o jsonpath='{.spec.containers[0].volumeMounts[?(@.name=="plugins")].mountPath}')"
+[ "$MOUNTED" = "/opt/bridgelink/custom-extensions" ] && ok "extra volume mounted at $MOUNTED" \
   || bad "extra volume not mounted: '$MOUNTED'"
 PG_OBJS="$(kr get deploy,svc,pvc,configmap -l app.kubernetes.io/instance=ext -o name | grep -c postgres)"
 [ "$PG_OBJS" = "0" ] && ok "no bundled PostgreSQL deployed with postgres.enabled=false" \
@@ -608,6 +670,18 @@ TABLES="$(SQL "select count(*) from information_schema.tables where table_schema
 APPS="$(SQL "select count(*) from pg_stat_activity where application_name='bl-chart-test'")"
 [ "${APPS:-0}" -gt 0 ] 2>/dev/null && ok "URL parameters reached the driver unchanged ($APPS connections named bl-chart-test)" \
   || bad "no connections carry the ApplicationName from the URL: $APPS"
+# Installed as the restricted policy requires: non-root, all capabilities dropped, claim read-only.
+forward ext "$NS_R"
+CODE="$(login)"
+[ "$CODE" = "200" ] || bad "API login to release ext returned HTTP $CODE"
+api GET /extensions/plugins -H 'Accept: application/json' > "$WORK/plugins.json"
+PLUGIN_FAIL=0
+grep -q '"name":"Kind Test Download"' "$WORK/plugins.json" && ok "the plugin from EXTENSIONS_DOWNLOAD is loaded" \
+  || { bad "the plugin from EXTENSIONS_DOWNLOAD is not in /api/extensions/plugins"; PLUGIN_FAIL=1; }
+grep -q '"name":"Kind Test Claim"' "$WORK/plugins.json" && ok "the plugin from the claim at custom-extensions is loaded" \
+  || { bad "the plugin from the claim at custom-extensions is not in /api/extensions/plugins"; PLUGIN_FAIL=1; }
+[ "$PLUGIN_FAIL" = "1" ] && kr logs "$EXT_POD" -c bridgelink 2>&1 | grep -iE "kind-test|custom extension|Problem with|not compatible"
+kill "$PF_PID" 2>/dev/null; wait "$PF_PID" 2>/dev/null; PF_PID=""
 
 # ---- 8. Service types across upgrades --------------------------------------------------------
 info "8. Service type, load balancer settings and install notes across upgrades"

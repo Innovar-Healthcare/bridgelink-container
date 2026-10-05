@@ -560,6 +560,41 @@ jobs:
           print('defaults leave the pod templates unchanged')
           PY
 
+      - name: The documented plugin routes render
+        run: |
+          set -euo pipefail
+          # The README's Plugins section installs zips from a presigned URL and from a claim. A
+          # presigned URL carries &, = and %2F, and must reach the image byte for byte; the claim
+          # must be mounted read-only where the image looks for zips. charts/test/kind-test.sh
+          # proves both install a plugin on a cluster.
+          cat > /tmp/plugins.yaml <<'EOF'
+          bridgelink:
+            environment:
+              EXTENSIONS_DOWNLOAD: "https://b.s3.amazonaws.com/a.zip?X-Amz-Credential=AK%2F20261005&X-Amz-Expires=3600,https://b.s3.amazonaws.com/c.zip"
+            extraVolumes:
+              - name: plugins
+                persistentVolumeClaim: {claimName: bridgelink-plugins, readOnly: true}
+            extraVolumeMounts:
+              - name: plugins
+                mountPath: /opt/bridgelink/custom-extensions
+                readOnly: true
+          EOF
+          helm template bl charts/bridgelink $SID -f /tmp/plugins.yaml > /tmp/plugins-out.yaml
+          python3 - <<'PY'
+          import yaml
+          want = yaml.safe_load(open('/tmp/plugins.yaml'))['bridgelink']['environment']['EXTENSIONS_DOWNLOAD']
+          docs = [d for d in yaml.safe_load_all(open('/tmp/plugins-out.yaml')) if d]
+          spec = [d for d in docs if d['kind'] == 'Deployment' and d['metadata']['name'] == 'bl-bridgelink-bl'][0]['spec']['template']['spec']
+          c = spec['containers'][0]
+          env = {e['name']: e.get('value') for e in c['env']}
+          assert env.get('EXTENSIONS_DOWNLOAD') == want, f"EXTENSIONS_DOWNLOAD changed: {env.get('EXTENSIONS_DOWNLOAD')!r}"
+          mounts = [m for m in c['volumeMounts'] if m['mountPath'] == '/opt/bridgelink/custom-extensions']
+          assert len(mounts) == 1 and mounts[0].get('readOnly') is True, f'custom-extensions mount: {mounts}'
+          vol = [v for v in spec['volumes'] if v['name'] == mounts[0]['name']][0]
+          assert vol['persistentVolumeClaim'] == {'claimName': 'bridgelink-plugins', 'readOnly': True}, vol
+          print('both plugin routes render as documented')
+          PY
+
       - name: Services expose listener ports and stay inside the cluster by default
         run: |
           set -euo pipefail
@@ -804,8 +839,9 @@ jobs:
     # that encrypted messages stay readable after the pod is replaced, that a channel listener answers
     # through the listener Service, that the bundled Postgres runs the config the chart ships and
     # refuses passwordless connections, that BridgeLink and WebAdmin are admitted in a namespace
-    # enforcing "restricted", against an external database, and that the Services survive a change
-    # from LoadBalancer to ClusterIP on upgrade. A separate job because it takes several minutes, so
+    # enforcing "restricted", against an external database, that a plugin installs from a download
+    # URL and from a claim, and that the Services survive a change from LoadBalancer to ClusterIP on
+    # upgrade. A separate job because it takes several minutes, so
     # the template checks above still report in under one. charts/test/kind-test.sh has the detail.
     needs: chart
     runs-on: ubuntu-latest
