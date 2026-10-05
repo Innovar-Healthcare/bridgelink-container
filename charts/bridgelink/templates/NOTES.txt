@@ -45,7 +45,7 @@ WebAdmin (connected to this release's BridgeLink server):
 {{- if .Values.postgres.enabled }}
 
 Database connection (bundled PostgreSQL):
-  Host: {{ include "bridgelink.fullname" . }}-postgres.{{ .Release.Namespace }}.svc:5432
+  Host: {{ include "bridgelink.fullname" . }}-postgres.{{ .Release.Namespace }}.svc:{{ .Values.postgres.service.port }}
   Database: {{ .Values.postgres.credentials.database }}
   Username: {{ .Values.postgres.credentials.username }}
 

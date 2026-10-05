@@ -140,9 +140,10 @@ bridgelink:
     # -- Database type (postgres, mysql, oracle, sqlserver)
     MP_DATABASE: "postgres"
     # -- JDBC URL of the database, passed through unchanged, so any scheme, port and parameters work
-    # (for Amazon RDS, e.g. `jdbc:postgresql://<endpoint>:5432/bridgelinkdb?sslmode=require`). Leave
-    # empty to use the bundled PostgreSQL. Required when `postgres.enabled` is false, unless
-    # `MP_DATABASE` is `derby`.
+    # (for Amazon RDS, e.g. `jdbc:postgresql://<endpoint>:5432/bridgelinkdb?sslmode=require`). A value
+    # containing `{{` is rendered as a Helm template, as are the username and password below. Leave
+    # empty to use the bundled PostgreSQL. Required when `postgres.enabled` is false. For the embedded
+    # Derby database instead, set `MP_DATABASE: derby` and `postgres.enabled: false` and leave this empty.
     MP_DATABASE_URL: ""
     # -- Database username. Leave empty to use `postgres.credentials.username` with the bundled PostgreSQL.
     MP_DATABASE_USERNAME: ""

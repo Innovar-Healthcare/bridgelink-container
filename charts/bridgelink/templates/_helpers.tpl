@@ -86,11 +86,24 @@ Database connection settings. A non-empty bridgelink.environment value is passed
 an external database (for example Amazon RDS) can use any JDBC scheme, port and URL parameters. An
 empty value falls back to the bundled PostgreSQL when postgres.enabled is true. Each helper renders
 nothing when there is no value at all, and the Deployment then omits that variable.
+
+Values files copied from older chart versions carry the old defaults, which were template strings
+such as "{{ .Values.postgres.credentials.username }}" that the chart ignored. Those are rendered with
+tpl, so they resolve to what they always meant; any value without "{{" is never templated.
 */}}
+{{- define "bridgelink.databaseValue" -}}
+{{- $v := toString (index . 0) -}}
+{{- if contains "{{" $v -}}
+{{- tpl $v (index . 1) -}}
+{{- else -}}
+{{- $v -}}
+{{- end -}}
+{{- end }}
+
 {{- define "bridgelink.databaseUrl" -}}
 {{- $env := .Values.bridgelink.environment -}}
 {{- if $env.MP_DATABASE_URL -}}
-{{- $env.MP_DATABASE_URL -}}
+{{- include "bridgelink.databaseValue" (list $env.MP_DATABASE_URL $) -}}
 {{- else if .Values.postgres.enabled -}}
 {{- printf "jdbc:postgresql://%s-postgres:%v/%s" (include "bridgelink.fullname" .) .Values.postgres.service.port .Values.postgres.credentials.database -}}
 {{- else if ne (lower (toString (default "" $env.MP_DATABASE))) "derby" -}}
@@ -100,7 +113,7 @@ nothing when there is no value at all, and the Deployment then omits that variab
 
 {{- define "bridgelink.databaseUsername" -}}
 {{- if .Values.bridgelink.environment.MP_DATABASE_USERNAME -}}
-{{- .Values.bridgelink.environment.MP_DATABASE_USERNAME -}}
+{{- include "bridgelink.databaseValue" (list .Values.bridgelink.environment.MP_DATABASE_USERNAME $) -}}
 {{- else if .Values.postgres.enabled -}}
 {{- .Values.postgres.credentials.username -}}
 {{- end -}}
@@ -108,7 +121,7 @@ nothing when there is no value at all, and the Deployment then omits that variab
 
 {{- define "bridgelink.databasePassword" -}}
 {{- if .Values.bridgelink.environment.MP_DATABASE_PASSWORD -}}
-{{- .Values.bridgelink.environment.MP_DATABASE_PASSWORD -}}
+{{- include "bridgelink.databaseValue" (list .Values.bridgelink.environment.MP_DATABASE_PASSWORD $) -}}
 {{- else if .Values.postgres.enabled -}}
 {{- .Values.postgres.credentials.password -}}
 {{- end -}}

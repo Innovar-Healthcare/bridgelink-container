@@ -31,11 +31,11 @@ spec:
               protocol: TCP
           env:
             - name: POSTGRES_PASSWORD
-              value: {{ .Values.postgres.credentials.password }}
+              value: {{ .Values.postgres.credentials.password | quote }}
             - name: POSTGRES_USER
-              value: {{ .Values.postgres.credentials.username }}
+              value: {{ .Values.postgres.credentials.username | quote }}
             - name: POSTGRES_DB
-              value: {{ .Values.postgres.credentials.database }}
+              value: {{ .Values.postgres.credentials.database | quote }}
             - name: PGDATA
               value: /var/lib/postgresql/data/pgdata
           resources:

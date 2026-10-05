@@ -191,6 +191,34 @@ jobs:
             || { echo "::error::the failure does not name MP_DATABASE_URL"; cat /tmp/nourl.txt; exit 1; }
           echo "missing external URL is refused"
 
+          # Embedded Derby needs no URL: it must render, with no database variables injected.
+          helm template bl charts/bridgelink --set postgres.enabled=false \
+            --set bridgelink.environment.MP_DATABASE=derby > /tmp/derby.yaml
+          # Values files copied from older chart versions carry the old placeholder defaults. They
+          # must keep resolving to the bundled database, not reach the container as literal text.
+          cat > /tmp/legacy-db.yaml <<'EOF'
+          bridgelink:
+            environment:
+              MP_DATABASE_URL: "jdbc:postgresql://{{ include \"bridgelink.fullname\" . }}-postgres:5432/{{ .Values.postgres.credentials.database }}"
+              MP_DATABASE_USERNAME: "{{ .Values.postgres.credentials.username }}"
+              MP_DATABASE_PASSWORD: "{{ .Values.postgres.credentials.password }}"
+          EOF
+          helm template bl charts/bridgelink -f /tmp/legacy-db.yaml > /tmp/legacy.yaml
+          python3 - <<'PY'
+          import yaml
+          def bl_env(path):
+              docs = [d for d in yaml.safe_load_all(open(path)) if d]
+              dep = [d for d in docs if d['kind'] == 'Deployment' and d['metadata']['name'].endswith('-bl')][0]
+              c = [x for x in dep['spec']['template']['spec']['containers'] if x['name'] == 'bridgelink'][0]
+              return {e['name']: e.get('value') for e in c['env']}
+          env = bl_env('/tmp/derby.yaml')
+          leaked = [k for k in ('MP_DATABASE_URL', 'MP_DATABASE_USERNAME', 'MP_DATABASE_PASSWORD') if k in env]
+          assert not leaked, f'derby with postgres.enabled=false still injected {leaked}'
+          assert bl_env('/tmp/legacy.yaml') == bl_env('/tmp/rendered.yaml'), \
+              'old placeholder defaults no longer render the same as the current defaults'
+          print('derby renders without database variables; old placeholder defaults still resolve')
+          PY
+
       - name: Bundled PostgreSQL requires a password over TCP
         run: |
           set -euo pipefail
@@ -207,6 +235,25 @@ jobs:
           bad = [' '.join(r) for r in host if r[-1] != 'scram-sha-256']
           assert not bad, f'host rules not using scram-sha-256: {bad}'
           print(f'{len(host)} host rules, all scram-sha-256')
+          PY
+          # With a password required, Postgres and BridgeLink must receive the same credentials. An
+          # unquoted env value would turn "#" into a YAML comment and initialise a different password.
+          helm template bl charts/bridgelink --set-string 'postgres.credentials.password=s3cret #1' \
+            --set-string postgres.credentials.username=yes --set-string postgres.credentials.database=0755 \
+            > /tmp/pgcreds.yaml
+          python3 - <<'PY'
+          import yaml
+          docs = [d for d in yaml.safe_load_all(open('/tmp/pgcreds.yaml')) if d]
+          def env(suffix):
+              dep = [d for d in docs if d['kind'] == 'Deployment' and d['metadata']['name'].endswith(suffix)][0]
+              return {e['name']: e.get('value') for e in dep['spec']['template']['spec']['containers'][0]['env']}
+          pg, bl = env('-postgres'), env('-bl')
+          want = {'POSTGRES_PASSWORD': 's3cret #1', 'POSTGRES_USER': 'yes', 'POSTGRES_DB': '0755'}
+          for k, v in want.items():
+              assert pg.get(k) == v, f'{k} rendered as {pg.get(k)!r}, want {v!r} (missing | quote?)'
+          assert bl['MP_DATABASE_PASSWORD'] == pg['POSTGRES_PASSWORD'], 'BridgeLink and Postgres passwords differ'
+          assert bl['MP_DATABASE_USERNAME'] == pg['POSTGRES_USER'], 'BridgeLink and Postgres usernames differ'
+          print('Postgres and BridgeLink receive identical credentials')
           PY
 
       - name: WebAdmin is off by default

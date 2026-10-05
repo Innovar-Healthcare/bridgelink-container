@@ -1,6 +1,6 @@
 # bridgelink
 
-![Version: 0.4.0](https://img.shields.io/badge/Version-0.4.0-informational?style=flat-square)
+![Version: 0.5.0](https://img.shields.io/badge/Version-0.5.0-informational?style=flat-square)
 ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square)
 ![AppVersion: 26.9.0](https://img.shields.io/badge/AppVersion-26.9.0-informational?style=flat-square)
 
@@ -129,9 +129,7 @@ stops the old pod before starting the new one. Expect a short outage during an u
 deliberate: a rolling update would briefly run two engines against the same database, and polling
 channels (File, Database and SFTP readers) could process the same work twice.
 
-## Persistence
-
-The chart supports different types of persistence:
+## Database
 
 The bundled PostgreSQL (`postgres.enabled: true`, the default) is for **evaluation only**. It runs as a
 single pod on one zone-bound volume with no backups. For production, set `postgres.enabled: false` and
@@ -140,7 +138,7 @@ connection (`scram-sha-256`).
 
 To use an external database, disable the bundled one and set the connection under
 `bridgelink.environment`. The URL is passed to BridgeLink unchanged, so any JDBC scheme, port and
-parameters work:
+parameters work. The one exception is a value containing `{{`, which is rendered as a Helm template:
 
 ```yaml
 postgres:
@@ -154,6 +152,11 @@ bridgelink:
 ```
 
 With `postgres.enabled: false` and no `MP_DATABASE_URL`, the install fails with a message saying so.
+For the embedded Derby database instead, set `MP_DATABASE: derby` and `postgres.enabled: false`.
+
+## Persistence
+
+The chart supports different types of persistence:
 
 1. **PostgreSQL Data**:
    ```yaml
@@ -174,6 +177,25 @@ With `postgres.enabled: false` and no `MP_DATABASE_URL`, the install fails with 
 
 ## Upgrading
 
+**Chart 0.5.0** changes four things an existing release can notice:
+
+- **Database settings in `bridgelink.environment` are now used.** Earlier versions ignored
+  `MP_DATABASE_URL`, `MP_DATABASE_USERNAME` and `MP_DATABASE_PASSWORD` and always connected to the
+  bundled PostgreSQL. If you set them to an external database, BridgeLink now connects there on
+  upgrade, and the bundled PostgreSQL holding your existing data keeps running untouched. Remove the
+  three keys to stay on the bundled database. A values file copied from an older `values.yaml` still
+  carries the old `{{ ... }}` placeholder defaults; those keep resolving to the bundled
+  database, but you can delete them.
+- **The bundled PostgreSQL requires a password for TCP connections.** PostgreSQL applies
+  `postgres.credentials.password` only when it first creates its data volume. If you changed that
+  value after installing, the database still has the original password, and BridgeLink is now refused.
+  Set the database password to match your values (the local socket needs no password):
+  `kubectl exec $(kubectl get pod -l app=postgres,app.kubernetes.io/instance=<release> -o name) -- psql -U <username> -d <database> -c "ALTER USER <username> PASSWORD '<password>'"`
+- **`bridgelink.replicaCount` must be the integer `0` or `1`.** Higher values, and quoted strings such
+  as `"1"`, are rejected by the schema.
+- **Upgrades use `strategy: Recreate`**, so expect a short outage while the old pod stops and the new
+  one starts.
+
 **Bundled PostgreSQL default moved from `14-alpine` to `16-alpine` (chart 0.2.0).** PostgreSQL does
 not upgrade its on-disk data directory across major versions automatically, so an existing release
 that used the bundled PostgreSQL 14 will **crash-loop** if simply upgraded to the 16 image against the
@@ -193,7 +215,7 @@ not apply.
 | bridgelink.environment.MP_CONFIGURATIONMAP_LOCATION | string | `"database"` | Configuration map location |
 | bridgelink.environment.MP_DATABASE | string | `"postgres"` | Database type (postgres, mysql, oracle, sqlserver) |
 | bridgelink.environment.MP_DATABASE_PASSWORD | string | `""` | Database password. Leave empty to use `postgres.credentials.password` with the bundled PostgreSQL. |
-| bridgelink.environment.MP_DATABASE_URL | string | `""` | JDBC URL of the database, passed through unchanged, so any scheme, port and parameters work (for Amazon RDS, e.g. `jdbc:postgresql://<endpoint>:5432/bridgelinkdb?sslmode=require`). Leave empty to use the bundled PostgreSQL. Required when `postgres.enabled` is false, unless `MP_DATABASE` is `derby`. |
+| bridgelink.environment.MP_DATABASE_URL | string | `""` | JDBC URL of the database, passed through unchanged, so any scheme, port and parameters work (for Amazon RDS, e.g. `jdbc:postgresql://<endpoint>:5432/bridgelinkdb?sslmode=require`). A value containing `{{` is rendered as a Helm template, as are the username and password below. Leave empty to use the bundled PostgreSQL. Required when `postgres.enabled` is false. For the embedded Derby database instead, set `MP_DATABASE: derby` and `postgres.enabled: false` and leave this empty. |
 | bridgelink.environment.MP_DATABASE_USERNAME | string | `""` | Database username. Leave empty to use `postgres.credentials.username` with the bundled PostgreSQL. |
 | bridgelink.environment.MP_KEYSTORE_KEYPASS | string | `"bridgelinkKeystore"` | Keystore key password |
 | bridgelink.environment.MP_KEYSTORE_STOREPASS | string | `"bridgelinkKeypass"` | Keystore store password |

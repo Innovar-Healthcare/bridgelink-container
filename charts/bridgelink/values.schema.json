@@ -38,7 +38,7 @@
             },
             "MP_DATABASE_URL": {
               "default": "",
-              "description": "JDBC URL of the database, passed through unchanged. Leave empty to use the bundled PostgreSQL; required when postgres.enabled is false unless MP_DATABASE is derby",
+              "description": "JDBC URL of the database, passed through unchanged (a value containing {{ is rendered as a Helm template). Leave empty to use the bundled PostgreSQL; required when postgres.enabled is false. For embedded Derby set MP_DATABASE to derby and postgres.enabled to false, and leave this empty",
               "required": [],
               "title": "MP_DATABASE_URL"
             },
