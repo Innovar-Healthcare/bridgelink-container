@@ -1,0 +1,22 @@
+{{- if and .Values.bridgelink.persistence.enabled (not .Values.bridgelink.persistence.existingClaim) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "bridgelink.fullname" . }}-appdata
+  labels:
+    {{- include "bridgelink.labels" . | nindent 4 }}
+  annotations:
+    # Kept on `helm uninstall`. It holds the data-encryption key, and the database (often external,
+    # such as RDS) outlives the release: deleting the key would leave its encrypted content
+    # unreadable. A reinstall under the same release name picks the claim up again.
+    helm.sh/resource-policy: keep
+spec:
+  accessModes:
+    {{- toYaml .Values.bridgelink.persistence.accessModes | nindent 4 }}
+  {{- with .Values.bridgelink.persistence.storageClass }}
+  storageClassName: {{ . }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.bridgelink.persistence.size }}
+{{- end }}

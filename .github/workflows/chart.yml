@@ -315,6 +315,110 @@ jobs:
           print('Postgres resources labelled app=postgres; selector unchanged')
           PY
 
+      - name: Pods meet the restricted Pod Security Standard
+        run: |
+          set -euo pipefail
+          # Namespaces on EKS commonly enforce "restricted" (or a Kyverno/OPA equivalent), which
+          # rejects a pod over any one of these fields. Checked for every pod shape the chart has:
+          # default, keystore from a Secret (adds the init container), DHI UID, and WebAdmin. The
+          # bundled Postgres is excluded: the official image starts as root, and it is documented as
+          # evaluation-only. charts/test/kind-test.sh proves real admission on a cluster.
+          WA="--set webadmin.enabled=true --set webadmin.acceptLicense=true"
+          helm template bl charts/bridgelink $WA > /tmp/psa-default.yaml
+          helm template bl charts/bridgelink $WA --set bridgelink.keystore.existingSecret=ks \
+            --set bridgelink.runAsUser=65532 --set bridgelink.runAsGroup=65532 > /tmp/psa-secret.yaml
+          python3 - <<'PY'
+          import yaml
+          for path in ('/tmp/psa-default.yaml', '/tmp/psa-secret.yaml'):
+              docs = [d for d in yaml.safe_load_all(open(path)) if d]
+              deps = [d for d in docs if d['kind'] == 'Deployment' and not d['metadata']['name'].endswith('-postgres')]
+              assert len(deps) == 2, f'{path}: expected BridgeLink and WebAdmin, got {[d["metadata"]["name"] for d in deps]}'
+              for d in deps:
+                  name, spec = d['metadata']['name'], d['spec']['template']['spec']
+                  psc = spec.get('securityContext') or {}
+                  assert psc.get('runAsNonRoot') is True, f'{name}: pod runAsNonRoot must be true'
+                  assert psc.get('runAsUser') not in (None, 0), f'{name}: pod runAsUser must be a non-root UID'
+                  assert (psc.get('seccompProfile') or {}).get('type') in ('RuntimeDefault', 'Localhost'), \
+                      f'{name}: pod seccompProfile must be RuntimeDefault'
+                  for key in ('hostNetwork', 'hostPID', 'hostIPC'):
+                      assert not spec.get(key), f'{name}: {key} is set'
+                  assert not [v for v in spec.get('volumes', []) if 'hostPath' in v], f'{name}: hostPath volume'
+                  for c in spec.get('initContainers', []) + spec['containers']:
+                      where, sc = f"{name}/{c['name']}", c.get('securityContext') or {}
+                      assert sc.get('allowPrivilegeEscalation') is False, f'{where}: allowPrivilegeEscalation must be false'
+                      caps = sc.get('capabilities') or {}
+                      assert 'ALL' in (caps.get('drop') or []), f'{where}: capabilities must drop ALL'
+                      assert set(caps.get('add') or []) <= {'NET_BIND_SERVICE'}, f'{where}: adds {caps.get("add")}'
+                      assert not sc.get('privileged'), f'{where}: privileged'
+                      assert sc.get('runAsUser', 1) != 0, f'{where}: runs as root'
+                      image = c['image']
+                      assert ':' in image.rsplit('/', 1)[-1] and not image.endswith(':latest'), \
+                          f'{where}: image {image} is not pinned to a tag'
+              print(f'{path}: {len(deps)} Deployments meet restricted')
+          PY
+
+      - name: appdata keeps the keystore across pod replacements
+        run: |
+          set -euo pipefail
+          # The data-encryption key lives only in appdata/keystore.jks. On an emptyDir, or wiped by an
+          # init container, every replaced pod generates a new key and earlier encrypted content can
+          # no longer be read.
+          helm template bl charts/bridgelink > /tmp/ad-default.yaml
+          helm template bl charts/bridgelink --set bridgelink.persistence.enabled=false > /tmp/ad-off.yaml
+          helm template bl charts/bridgelink --set bridgelink.persistence.existingClaim=mine > /tmp/ad-claim.yaml
+          helm template bl charts/bridgelink --set bridgelink.keystore.existingSecret=ks \
+            --set bridgelink.persistence.enabled=false \
+            --set bridgelink.helperImage.repository=123456789012.dkr.ecr.us-east-1.amazonaws.com/busybox \
+            --set bridgelink.helperImage.tag=1.36.1 \
+            --set bridgelink.podSecurityContext.runAsUser=2000 \
+            --set bridgelink.containerSecurityContext.readOnlyRootFilesystem=true > /tmp/ad-secret.yaml
+          python3 - <<'PY'
+          import yaml
+          def load(path):
+              docs = [d for d in yaml.safe_load_all(open(path)) if d]
+              dep = [d for d in docs if d['kind'] == 'Deployment' and d['metadata']['name'].endswith('-bl')][0]
+              spec = dep['spec']['template']['spec']
+              vols = {v['name']: v for v in spec['volumes']}
+              pvcs = [d for d in docs if d['kind'] == 'PersistentVolumeClaim' and d['metadata']['name'].endswith('-appdata')]
+              return spec, vols, pvcs
+
+          spec, vols, pvcs = load('/tmp/ad-default.yaml')
+          assert vols['appdata'].get('persistentVolumeClaim', {}).get('claimName') == 'bl-bridgelink-appdata', \
+              f"appdata is not on the chart's claim by default: {vols['appdata']}"
+          assert len(pvcs) == 1, 'no appdata PersistentVolumeClaim rendered by default'
+          assert pvcs[0]['metadata']['annotations'].get('helm.sh/resource-policy') == 'keep', \
+              'the appdata claim must survive helm uninstall: it holds the data-encryption key'
+          assert not spec.get('initContainers'), 'the default pod must not have an init container'
+          assert spec['securityContext'].get('fsGroup') == spec['securityContext']['runAsGroup'], \
+              'fsGroup must default to runAsGroup so appdata is writable without a root init container'
+
+          spec, vols, pvcs = load('/tmp/ad-off.yaml')
+          assert 'emptyDir' in vols['appdata'] and not pvcs, 'persistence.enabled=false must use an emptyDir'
+          spec, vols, pvcs = load('/tmp/ad-claim.yaml')
+          assert vols['appdata']['persistentVolumeClaim']['claimName'] == 'mine' and not pvcs, \
+              'existingClaim must be used and no claim created'
+
+          spec, vols, pvcs = load('/tmp/ad-secret.yaml')
+          inits = spec.get('initContainers') or []
+          assert len(inits) == 1, f'keystore.existingSecret must add one init container, got {len(inits)}'
+          init = inits[0]
+          assert init['image'] == '123456789012.dkr.ecr.us-east-1.amazonaws.com/busybox:1.36.1', \
+              f"helperImage repository and tag must be settable, got {init['image']}"
+          script = ' '.join(init.get('command', []) + init.get('args', []))
+          assert 'rm ' not in script, 'the init container must never delete anything in appdata'
+          assert vols['keystore']['secret']['secretName'] == 'ks'
+          env = {e['name']: e for e in spec['containers'][0]['env']}
+          names = [e['name'] for e in spec['containers'][0]['env']]
+          assert len(names) == len(set(names)), f'duplicate env names: {names}'
+          for k, key in (('MP_KEYSTORE_STOREPASS', 'keystore.storepass'), ('MP_KEYSTORE_KEYPASS', 'keystore.keypass')):
+              ref = env[k].get('valueFrom', {}).get('secretKeyRef', {})
+              assert ref == {'name': 'ks', 'key': key}, f'{k} must come from the Secret, got {env[k]}'
+          assert spec['securityContext']['runAsUser'] == 2000, 'podSecurityContext must override runAsUser'
+          assert spec['containers'][0]['securityContext'].get('readOnlyRootFilesystem') is True, \
+              'containerSecurityContext must be overridable'
+          print('appdata persists by default; emptyDir, existingClaim and Secret modes render as documented')
+          PY
+
       - name: WebAdmin is off by default
         run: |
           set -euo pipefail
@@ -416,8 +520,9 @@ jobs:
   kind:
     # Installs the chart on a real cluster (kind, Kubernetes in Docker) and checks what `helm
     # template` cannot: that BridgeLink becomes Ready, that an upgrade never runs two BridgeLink pods,
-    # that the bundled Postgres runs the config the chart ships and refuses passwordless connections,
-    # and that an external database works. A separate job because it takes several minutes, so the
+    # that encrypted messages stay readable after the pod is replaced, that the bundled Postgres runs
+    # the config the chart ships and refuses passwordless connections, and that BridgeLink and
+    # WebAdmin are admitted in a namespace enforcing "restricted", against an external database. A separate job because it takes several minutes, so the
     # template checks above still report in under one. charts/test/kind-test.sh has the detail.
     needs: chart
     runs-on: ubuntu-latest

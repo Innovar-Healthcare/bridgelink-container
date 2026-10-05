@@ -27,52 +27,45 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
     spec:
+      # Restricted Pod Security Standard by default. fsGroup makes appdata writable by the BridgeLink
+      # user on volumes that support it (emptyDir, EBS), which is what used to need a root init
+      # container. See bridgelink.podSecurityContext in values.yaml.
       securityContext:
-        runAsUser: {{ .Values.bridgelink.runAsUser }}
-        runAsGroup: {{ .Values.bridgelink.runAsGroup }}
+        {{- toYaml (merge (deepCopy (.Values.bridgelink.podSecurityContext | default dict)) (dict "runAsUser" .Values.bridgelink.runAsUser "runAsGroup" .Values.bridgelink.runAsGroup "fsGroup" .Values.bridgelink.runAsGroup)) | nindent 8 }}
+      {{- if .Values.bridgelink.keystore.existingSecret }}
       initContainers:
-        - name: init-appdata
-          image: busybox
-          command: ["/bin/sh"]
+        # Copies the keystore from the Secret into appdata on every start, so the Secret is the source
+        # of truth. Copied rather than mounted because the server rewrites keystore.jks at startup,
+        # which a read-only Secret mount would make fail.
+        - name: keystore
+          image: "{{ .Values.bridgelink.helperImage.repository }}:{{ .Values.bridgelink.helperImage.tag }}"
+          imagePullPolicy: {{ .Values.bridgelink.helperImage.pullPolicy }}
+          command: ["/bin/sh", "-ec"]
           args:
-            - -xec
             - |
-              echo "Setting up workspace..."
-              cd /
-              rm -rf /appdata/*
-              mkdir -p /appdata/temp
-              cd /appdata
-              
-              echo "Creating config files..."
-              echo "$SERVER_ID" > server.id
-              cat server.id
-              
-              echo "Copying configuration..."
-              if [ -d "/tmp/appdata" ]; then
-                cd /tmp/appdata
-                for f in *; do
-                  if [ "$f" != "server.id" ]; then
-                    cp -Lrv "$f" "/appdata/$f"
-                  fi
-                done
-              fi
-              
-              chmod -R 755 /appdata
-              chown -R {{ .Values.bridgelink.runAsUser }}:{{ .Values.bridgelink.runAsGroup }} /appdata
-          env:
-            - name: SERVER_ID
-              value: {{ .Values.bridgelink.environment.SERVER_ID | quote }}
+              umask 077
+              cp /keystore/keystore.jks /appdata/.keystore.jks.tmp
+              mv -f /appdata/.keystore.jks.tmp /appdata/keystore.jks
+              echo "Copied keystore.jks from Secret {{ .Values.bridgelink.keystore.existingSecret }} into appdata."
+          {{- with .Values.bridgelink.containerSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           volumeMounts:
-            - name: appdata-config
-              mountPath: /tmp/appdata
+            - name: keystore
+              mountPath: /keystore
+              readOnly: true
             - name: appdata
               mountPath: /appdata
-          securityContext:
-            runAsUser: 0
+      {{- end }}
       containers:
         - name: {{ .Chart.Name }}
           image: "{{ .Values.bridgelink.image.repository }}:{{ .Values.bridgelink.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.bridgelink.image.pullPolicy }}
+          {{- with .Values.bridgelink.containerSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           ports:
             - name: https
               containerPort: 8443
@@ -99,9 +92,23 @@ spec:
             - name: MP_DATABASE_PASSWORD
               value: {{ . | quote }}
             {{- end }}
-            {{- /* The three database keys are resolved above, so the loop skips them to avoid duplicates. */}}
+            {{- $skip := list "MP_DATABASE_URL" "MP_DATABASE_USERNAME" "MP_DATABASE_PASSWORD" }}
+            {{- with .Values.bridgelink.keystore.existingSecret }}
+            {{- $skip = concat $skip (list "MP_KEYSTORE_STOREPASS" "MP_KEYSTORE_KEYPASS") }}
+            - name: MP_KEYSTORE_STOREPASS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ . }}
+                  key: keystore.storepass
+            - name: MP_KEYSTORE_KEYPASS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ . }}
+                  key: keystore.keypass
+            {{- end }}
+            {{- /* Keys resolved above are skipped here to avoid duplicates. */}}
             {{- range $key, $value := .Values.bridgelink.environment }}
-            {{- if not (or (eq $key "MP_DATABASE_URL") (eq $key "MP_DATABASE_USERNAME") (eq $key "MP_DATABASE_PASSWORD")) }}
+            {{- if not (has $key $skip) }}
             - name: {{ $key }}
               value: {{ $value | quote }}
             {{- end }}
@@ -123,11 +130,23 @@ spec:
             {{- toYaml .Values.bridgelink.readinessProbe | nindent 12 }}
           {{- end }}
       volumes:
-        - name: appdata-config
-          configMap:
-            name: {{ include "bridgelink.fullname" . }}-config
+        # appdata holds keystore.jks, which carries the data-encryption key. On an emptyDir it is lost,
+        # and with it every encrypted message, whenever the pod is replaced.
         - name: appdata
+          {{- if .Values.bridgelink.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.bridgelink.persistence.existingClaim | default (printf "%s-appdata" (include "bridgelink.fullname" .)) }}
+          {{- else }}
           emptyDir: {}
+          {{- end }}
+        {{- with .Values.bridgelink.keystore.existingSecret }}
+        - name: keystore
+          secret:
+            secretName: {{ . }}
+            items:
+              - key: keystore.jks
+                path: keystore.jks
+        {{- end }}
         - name: blserver-vmoptions
           secret:
             secretName: {{ include "bridgelink.fullname" . }}-vmoptions
