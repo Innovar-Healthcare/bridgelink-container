@@ -1,6 +1,6 @@
 # bridgelink
 
-![Version: 0.9.0](https://img.shields.io/badge/Version-0.9.0-informational?style=flat-square)
+![Version: 0.9.1](https://img.shields.io/badge/Version-0.9.1-informational?style=flat-square)
 ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square)
 ![AppVersion: 26.9.0](https://img.shields.io/badge/AppVersion-26.9.0-informational?style=flat-square)
 
@@ -337,6 +337,103 @@ kubectl create secret generic bridgelink-keystore --from-file=keystore.jks \
 
 `nodeName` places the pod next to BridgeLink, because an EBS volume attaches to one node at a time.
 
+## Plugins
+
+Plugins come as extension zips. At every start, the image unpacks the zips you give it into
+`/opt/bridgelink/extensions`. The chart has two ways to give them, both set in values, and they can
+be combined. Commercial plugins also need the License Manager plugin, installed the same way.
+Their licenses are checked against the server ID, so set it before you request a license (see
+[Server ID](#server-id)).
+
+Each zip must be built for the BridgeLink version the image runs. A zip built for another version
+unpacks, then is not loaded, and the log says
+`Extension "<name>" is not compatible with this version of BridgeLink and was not loaded`.
+
+### From a download URL
+
+List one or more URLs, separated by commas, in `EXTENSIONS_DOWNLOAD`:
+
+```yaml
+bridgelink:
+  environment:
+    EXTENSIONS_DOWNLOAD: "https://my-bucket.s3.amazonaws.com/license-manager.zip?X-Amz-...,https://my-bucket.s3.amazonaws.com/my-plugin.zip?X-Amz-..."
+```
+
+- **The pod downloads the zips again at every start.** It needs outbound access to the host. From
+  private EKS subnets, that means a NAT gateway, or an S3 VPC endpoint.
+- **A presigned S3 URL expires.** A pod that starts after that, after a node replacement for
+  example, cannot download the zip. The server still starts, without the plugin. The log line is
+  `Problem with extensions download from <url>` (Rocky image) or
+  `Problem with download/extract from <url>` (DHI image). To avoid this, serve the zips from a
+  host you control whose URLs do not expire, or use a claim.
+- `ALLOW_INSECURE: "true"` skips certificate checks for a host with a self-signed certificate. It
+  applies to every download the image makes, not just plugins.
+
+### From a claim
+
+Put the zips on a PersistentVolumeClaim and mount it read-only at
+`/opt/bridgelink/custom-extensions`:
+
+```yaml
+bridgelink:
+  extraVolumes:
+    - name: plugins
+      persistentVolumeClaim: {claimName: bridgelink-plugins, readOnly: true}
+  extraVolumeMounts:
+    - name: plugins
+      mountPath: /opt/bridgelink/custom-extensions
+      readOnly: true
+```
+
+To create the claim and copy zips onto it, use a pod that mounts it. This works with both images
+and in a namespace enforcing "restricted". Use `65532` as the user for the DHI image:
+
+```bash
+kubectl apply -f - <<'EOF'
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: bridgelink-plugins}
+spec:
+  accessModes: [ReadWriteOnce]
+  resources: {requests: {storage: 1Gi}}
+EOF
+NODE=$(kubectl get pod -l app=bl,app.kubernetes.io/instance=<release> -o jsonpath='{.items[0].spec.nodeName}')
+kubectl run plugin-copy --image=busybox:1.37.0 --restart=Never --overrides='{"spec":{
+  "nodeSelector":{"kubernetes.io/hostname":"'"$NODE"'"},
+  "securityContext":{"runAsNonRoot":true,"runAsUser":1000,"fsGroup":1000,"seccompProfile":{"type":"RuntimeDefault"}},
+  "volumes":[{"name":"plugins","persistentVolumeClaim":{"claimName":"bridgelink-plugins"}}],
+  "containers":[{"name":"copy","image":"busybox:1.37.0","command":["sleep","300"],
+    "securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}},
+    "volumeMounts":[{"name":"plugins","mountPath":"/plugins"}]}]}}'
+kubectl wait --for=condition=Ready pod/plugin-copy --timeout=3m
+kubectl cp license-manager.zip plugin-copy:/plugins/license-manager.zip
+kubectl cp my-plugin.zip plugin-copy:/plugins/my-plugin.zip
+kubectl delete pod plugin-copy
+```
+
+- **A ReadWriteOnce claim lands on one node.** On EKS the default storage class gives an EBS volume,
+  which is also tied to one availability zone. The pod can only run where both this claim and the
+  appdata claim are. `nodeSelector` makes the copy pod create the volume next to BridgeLink, in
+  appdata's zone. Use it rather than `nodeName`, which skips the scheduler, so a storage class
+  that waits for the first pod (as EBS does) never creates the volume. On a new install, with no
+  BridgeLink pod yet, leave `nodeSelector` out. The keystore copy pod above can use `nodeName`
+  because the appdata claim already exists.
+- An EFS storage class with `ReadWriteMany` avoids both limits, and lets you change the zips from
+  any node. Set its `uid` and `gid` to `bridgelink.runAsUser` and `runAsGroup`, because EFS ignores
+  `fsGroup`.
+- **After changing the zips, restart the pod:**
+  `kubectl rollout restart deployment/<release>-bridgelink-bl`. Every container starts from the
+  image, so files from a removed or older zip do not stay behind.
+
+### Checking a plugin is installed
+
+The REST API lists every plugin the server loaded:
+
+```bash
+curl -k -u admin:<password> -H 'X-Requested-With: XMLHttpRequest' -H 'Accept: application/json' \
+  https://<host>:8443/api/extensions/plugins
+```
+
 ## Pod Security
 
 The BridgeLink and WebAdmin pods meet the Kubernetes "restricted" Pod Security Standard with both
@@ -459,8 +556,8 @@ not apply.
 | bridgelink.environment.SERVER_ID | string | `""` | Server ID, a UUID. Required on a new install: the install fails without it and prints a freshly generated one to use. Record it: BridgeLink licenses are issued against it. Keep it for the life of the server, since queued messages are recovered only under the ID that stored them, and never run two servers with the same ID against one database. An upgrade that leaves it empty keeps `7d760af2-680a-4a19-b9a2-c4685df61ebc`, the ID every install shared before chart 0.9.0. See the README's "Server ID" section. |
 | bridgelink.extraEnv | list | `[]` | Extra environment variables for the BridgeLink container, as Kubernetes EnvVar entries, so `valueFrom` works (for example a password from a Secret). An entry here replaces any variable of the same name the chart sets, including `environment` and the database settings. |
 | bridgelink.extraPorts | list | `[]` | Extra ports for channel listeners (MLLP, HTTP, TCP), declared on the BridgeLink container and added to the BridgeLink Service, or to the listener Service when `listenerService.enabled`. Each entry: `name` (lowercase, at most 15 characters), `containerPort` (the port the channel listens on), and optionally `port` (the Service port, default `containerPort`) and `protocol` (default TCP). Adding, changing or removing an entry changes the pod, so BridgeLink restarts on upgrade. |
-| bridgelink.extraVolumeMounts | list | `[]` | Extra volume mounts for the BridgeLink container |
-| bridgelink.extraVolumes | list | `[]` | Extra volumes for the BridgeLink pod, e.g. an EFS claim for file-based channels |
+| bridgelink.extraVolumeMounts | list | `[]` | Extra volume mounts for the BridgeLink container. Plugin zips are installed from `/opt/bridgelink/custom-extensions` |
+| bridgelink.extraVolumes | list | `[]` | Extra volumes for the BridgeLink pod, e.g. an EFS claim for file-based channels, or a claim holding plugin zips (see Plugins in the README) |
 | bridgelink.helperImage.pullPolicy | string | `"IfNotPresent"` | Helper image pull policy |
 | bridgelink.helperImage.repository | string | `"busybox"` | Helper image repository. Needs `/bin/sh`, `cp` and `mv`. |
 | bridgelink.helperImage.tag | string | `"1.37.0"` | Helper image tag. Pinned: a moving tag would change what runs without a chart change. |
@@ -554,6 +651,7 @@ The BridgeLink application can be configured using environment variables:
 - `MP_DATABASE_USERNAME`: Database username
 - `MP_DATABASE_PASSWORD`: Database password
 - `SERVER_ID`: Server ID, required on a new install; see [Server ID](#server-id)
+- `EXTENSIONS_DOWNLOAD`: Comma-separated URLs of plugin zips to install at every start; see [Plugins](#plugins)
 
 ### Advanced Configuration
 - `JAVA_OPTS`: JVM options
