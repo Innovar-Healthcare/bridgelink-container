@@ -1,6 +1,6 @@
 # bridgelink
 
-![Version: 0.7.0](https://img.shields.io/badge/Version-0.7.0-informational?style=flat-square)
+![Version: 0.8.0](https://img.shields.io/badge/Version-0.8.0-informational?style=flat-square)
 ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square)
 ![AppVersion: 26.9.0](https://img.shields.io/badge/AppVersion-26.9.0-informational?style=flat-square)
 
@@ -74,13 +74,15 @@ helm uninstall bridgelink
 
 1. Download and install [BridgeLink Administrator Launcher](https://www.innovarhealthcare.com/bridgelink-downloads#comp-mg0zikp4)
 
-2. Once the deployment is complete, get the service URL:
+2. Once the deployment is complete, reach the server. The Service is `ClusterIP` by default, so
+   forward a local port to it (or see [Exposing BridgeLink](#exposing-bridgelink) for a load
+   balancer):
    ```bash
-   kubectl get svc -n <namespace> bridgelink-bl
+   kubectl port-forward -n <namespace> svc/bridgelink-bl 8443:8443
    ```
 
 3. Launch the BridgeLink Administrator and configure:
-   - Server URL: Use HTTPS with the external IP (e.g., https://EXTERNAL-IP:8443)
+   - Server URL: `https://127.0.0.1:8443`, or the load balancer address if you set one
    - Username: `admin` (default)
    - Password: See instructions below for obtaining the initial password
 
@@ -106,6 +108,10 @@ helm uninstall bridgelink
 3. **Pod Security**: BridgeLink and WebAdmin meet the Kubernetes "restricted" Pod Security
    Standard. See [Pod Security](#pod-security).
 
+4. **Network exposure**: the BridgeLink and WebAdmin Services are `ClusterIP` by default, so the
+   admin API is not reachable from outside the cluster until you choose how. See
+   [Exposing BridgeLink](#exposing-bridgelink).
+
 ## Architecture
 
 This chart deploys BridgeLink with the following components:
@@ -126,6 +132,72 @@ Both the BridgeLink and the bundled PostgreSQL Deployments use `strategy: Recrea
 stops the old pod before starting the new one. Expect a short outage during an upgrade. That is
 deliberate: a rolling update would briefly run two engines against the same database, and polling
 channels (File, Database and SFTP readers) could process the same work twice.
+
+## Exposing BridgeLink
+
+The BridgeLink Service (`<release>-bridgelink-bl`, ports 8443 and 8080) and the WebAdmin Service
+are `ClusterIP` by default: reachable inside the cluster and through `kubectl port-forward`, not
+from outside. A plain `type: LoadBalancer` on EKS without the AWS Load Balancer Controller creates
+an internet-facing Classic ELB, so choose the load balancer deliberately.
+
+An internal Network Load Balancer on EKS, with the
+[AWS Load Balancer Controller](https://kubernetes-sigs.github.io/aws-load-balancer-controller/)
+installed:
+
+```yaml
+bridgelink:
+  service:
+    type: LoadBalancer
+    annotations:
+      service.beta.kubernetes.io/aws-load-balancer-type: external
+      service.beta.kubernetes.io/aws-load-balancer-scheme: internal
+      service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+    loadBalancerSourceRanges: [10.0.0.0/8]
+    ports:
+      http: null   # leave plain HTTP off the load balancer
+```
+
+`loadBalancerSourceRanges` limits which client addresses may connect. `loadBalancerClass` (for
+example `service.k8s.aws/nlb`) is the other way to hand the Service to the controller. Both are used
+only when `type` is `LoadBalancer`. Kubernetes accepts `loadBalancerClass` only when the load
+balancer is created: on a Service that is already a `LoadBalancer`, adding or changing it fails the
+upgrade with `may not change once set`. Upgrade once with `type: ClusterIP`, which deletes the load
+balancer and its address, then set the class with `type: LoadBalancer`. The `webadmin.service` block takes the same settings. The
+install notes print the load balancer address; AWS reports a hostname rather than an IP.
+
+### Channel listener ports
+
+A channel that listens for inbound traffic (MLLP, HTTP, TCP) needs its port on the container and on
+a Service. List them in `bridgelink.extraPorts`:
+
+```yaml
+bridgelink:
+  extraPorts:
+    - name: mllp-adt        # lowercase, at most 15 characters
+      containerPort: 6661   # the port the channel listens on
+    - name: http-orders
+      containerPort: 8090
+      port: 80              # Service port, if different
+```
+
+They are added to the BridgeLink Service. To put them behind a different load balancer from the
+admin API, for example an internal NLB for MLLP while 8443 stays `ClusterIP`, turn on the listener
+Service. The ports then move to `<release>-bridgelink-listeners`:
+
+```yaml
+bridgelink:
+  listenerService:
+    enabled: true
+    type: LoadBalancer
+    annotations:
+      service.beta.kubernetes.io/aws-load-balancer-type: external
+      service.beta.kubernetes.io/aws-load-balancer-scheme: internal
+    loadBalancerSourceRanges: [10.20.0.0/16]
+```
+
+**Adding, changing or removing an extra port restarts BridgeLink**, because the ports are declared on
+the pod. With `strategy: Recreate` that is a short outage, so batch port changes. A port answers only
+while a deployed channel listens on it.
 
 ## Database
 
@@ -239,6 +311,19 @@ evaluation only; in a restricted namespace, use an external database.
 
 ## Upgrading
 
+**Chart 0.8.0** changes the default Service type:
+
+- **The BridgeLink and WebAdmin Services default to `ClusterIP`**, not `LoadBalancer`. If your release
+  relied on the old default, the upgrade deletes its cloud load balancer and the address goes with
+  it. To keep it, set the type before upgrading:
+  `--set bridgelink.service.type=LoadBalancer` (and `--set webadmin.service.type=LoadBalancer` if
+  WebAdmin is on). A release that already sets the type is unaffected. No pod restarts either way,
+  and the switch needs no manual step with Helm 3 or Helm 4: Kubernetes drops the node ports it had
+  allocated for the load balancer.
+- `bridgelink.service.type` and `webadmin.service.type` must be `ClusterIP`, `NodePort` or
+  `LoadBalancer`, and `bridgelink.service.ports.http` and `https` must be unquoted numbers; the
+  schema now rejects other values, such as `https: "8443"`.
+
 **Chart 0.6.0** changes how appdata is stored and how the pods run:
 
 - **appdata moves to a PersistentVolumeClaim** (`<release>-bridgelink-appdata`, 1Gi, default storage
@@ -310,6 +395,7 @@ not apply.
 | bridgelink.environment.MP_KEYSTORE_STOREPASS | string | `"bridgelinkKeypass"` | Keystore store password |
 | bridgelink.environment.SERVER_ID | string | `"7d760af2-680a-4a19-b9a2-c4685df61ebc"` | Unique server identifier |
 | bridgelink.extraEnv | list | `[]` | Extra environment variables for the BridgeLink container, as Kubernetes EnvVar entries, so `valueFrom` works (for example a password from a Secret). An entry here replaces any variable of the same name the chart sets, including `environment` and the database settings. |
+| bridgelink.extraPorts | list | `[]` | Extra ports for channel listeners (MLLP, HTTP, TCP), declared on the BridgeLink container and added to the BridgeLink Service, or to the listener Service when `listenerService.enabled`. Each entry: `name` (lowercase, at most 15 characters), `containerPort` (the port the channel listens on), and optionally `port` (the Service port, default `containerPort`) and `protocol` (default TCP). Adding, changing or removing an entry changes the pod, so BridgeLink restarts on upgrade. |
 | bridgelink.extraVolumeMounts | list | `[]` | Extra volume mounts for the BridgeLink container |
 | bridgelink.extraVolumes | list | `[]` | Extra volumes for the BridgeLink pod, e.g. an EFS claim for file-based channels |
 | bridgelink.helperImage.pullPolicy | string | `"IfNotPresent"` | Helper image pull policy |
@@ -319,6 +405,11 @@ not apply.
 | bridgelink.image.repository | string | `"innovarhealthcare/bridgelink"` | BridgeLink container image repository |
 | bridgelink.image.tag | string | `"26.9.0"` | BridgeLink container image tag. Defaults to the Rocky image. For the hardened (DHI) image set `tag: 26.9.0-dhi` and `runAsUser: 65532` / `runAsGroup: 65532` (see below). |
 | bridgelink.keystore.existingSecret | string | `""` | Name of a Secret holding a keystore and its passwords, under the keys `keystore.jks`, `keystore.storepass` and `keystore.keypass`. When set, the keystore is copied into appdata at every start (the Secret wins over what is on the volume) and the passwords replace `MP_KEYSTORE_STOREPASS` and `MP_KEYSTORE_KEYPASS`. Works with or without `persistence`. The keystore must come from a BridgeLink server's appdata, so it already holds the data-encryption key: one with only a TLS certificate gets a new key at every start. See the README. |
+| bridgelink.listenerService.annotations | object | `{}` | Annotations for the listener Service (see `service.annotations`) |
+| bridgelink.listenerService.enabled | bool | `false` | Create the `<release>-bridgelink-listeners` Service and move `extraPorts` onto it, off the BridgeLink Service. Requires at least one `extraPorts` entry. |
+| bridgelink.listenerService.loadBalancerClass | string | `""` | Load balancer class for the listener Service. Used only when `type` is LoadBalancer. |
+| bridgelink.listenerService.loadBalancerSourceRanges | list | `[]` | Client CIDRs allowed to reach the listener load balancer. Used only when `type` is LoadBalancer. |
+| bridgelink.listenerService.type | string | `"ClusterIP"` | Service type for the listener Service: ClusterIP, NodePort or LoadBalancer |
 | bridgelink.livenessProbe | object | `{"failureThreshold":3,"httpGet":{"httpHeaders":[{"name":"X-Requested-With","value":"kube-probe"}],"path":"/api/server/version","port":"https","scheme":"HTTPS"},"periodSeconds":20,"timeoutSeconds":5}` | Liveness probe. Enabled by default: it is a plain HTTPS GET and works against any image. Restarts the pod only when the API stops answering at all.  Deliberately /api/server/version, NOT /api/server/status. When the database goes away, getStatus() calls isDatabaseRunning() -> testDatabase(), which blocks on the connection pool, so /status does not return UNAVAILABLE — it HANGS (measured: no response in 10s, while /version answered 200 in 73ms on the same server; tracked as a Core defect). A liveness probe pointed at /status would therefore time out and restart the pod after failureThreshold x periodSeconds of any database outage, which is exactly what liveness must not do: a restart does not fix a database. /version reads an in-memory value and needs no authentication (@DontCheckAuthorized), so it answers iff the JVM and Jetty are actually serving.  kubelet does not verify the certificate on an HTTPS probe, so the self-signed keystore needs no configuration. The X-Requested-With header is required (server.api.require-requested-with, default true) — without it the endpoint returns HTTP 400 even though it needs no authentication. |
 | bridgelink.nodeSelector | object | `{}` | Node selector for BridgeLink pods |
 | bridgelink.persistence.accessModes | list | `["ReadWriteOnce"]` | Access modes for the claim. `ReadWriteOnce` suits EBS; EFS also allows `ReadWriteMany`. |
@@ -337,9 +428,12 @@ not apply.
 | bridgelink.resources.requests.memory | string | `"1Gi"` | Memory request for BridgeLink pods |
 | bridgelink.runAsGroup | int | `1000` | Non-root GID the container runs as (see runAsUser). 1000 for Rocky, 65532 for DHI. Also the default `fsGroup`, which makes appdata writable without a root init container. |
 | bridgelink.runAsUser | int | `1000` | Non-root UID the container runs as. Use 1000 for the Rocky image, 65532 for the hardened (DHI) image. Must match the image so mounted appdata/custom-extensions are writable. |
-| bridgelink.service.ports.http | int | `8080` | HTTP port for web interface |
-| bridgelink.service.ports.https | int | `8443` | HTTPS port for secure web interface |
-| bridgelink.service.type | string | `"LoadBalancer"` | Service type for BridgeLink (LoadBalancer, ClusterIP, NodePort) |
+| bridgelink.service.annotations | object | `{}` | Annotations for the BridgeLink Service, e.g. for the AWS Load Balancer Controller: `service.beta.kubernetes.io/aws-load-balancer-type: external`, `service.beta.kubernetes.io/aws-load-balancer-scheme: internal`, `service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip`. |
+| bridgelink.service.loadBalancerClass | string | `""` | Load balancer class, e.g. `service.k8s.aws/nlb` for the AWS Load Balancer Controller. Empty uses the cluster default. Used only when `type` is LoadBalancer. Kubernetes accepts it only when the load balancer is created; see the README to add or change it later. |
+| bridgelink.service.loadBalancerSourceRanges | list | `[]` | Client CIDRs allowed to reach the load balancer. Used only when `type` is LoadBalancer. |
+| bridgelink.service.ports.http | int | `8080` | Service port for plain HTTP. `null` leaves HTTP off the Service; the container keeps listening on 8080. |
+| bridgelink.service.ports.https | int | `8443` | Service port for HTTPS (the API and the web interface) |
+| bridgelink.service.type | string | `"ClusterIP"` | Service type for BridgeLink: ClusterIP, NodePort or LoadBalancer. ClusterIP keeps the admin API inside the cluster. A plain LoadBalancer on EKS without the AWS Load Balancer Controller is an internet-facing Classic ELB; see the README's "Exposing BridgeLink" section for an internal NLB. |
 | bridgelink.startupProbe | string | `nil` | Startup probe. Disabled by default because it needs an image carrying the probe binary — see the block above for the values to paste in once it does. |
 | bridgelink.tolerations | list | `[]` | Pod tolerations for BridgeLink |
 | fullnameOverride | string | `""` | Provide a name to substitute for the full names of resources |
@@ -380,8 +474,11 @@ not apply.
 | webadmin.resources.limits.memory | string | `"512Mi"` | Memory limit for WebAdmin pods |
 | webadmin.resources.requests.cpu | string | `"100m"` | CPU request for WebAdmin pods |
 | webadmin.resources.requests.memory | string | `"256Mi"` | Memory request for WebAdmin pods |
+| webadmin.service.annotations | object | `{}` | Annotations for the WebAdmin Service (see `bridgelink.service.annotations`) |
+| webadmin.service.loadBalancerClass | string | `""` | Load balancer class for the WebAdmin Service. Used only when `type` is LoadBalancer. |
+| webadmin.service.loadBalancerSourceRanges | list | `[]` | Client CIDRs allowed to reach the WebAdmin load balancer. Used only when `type` is LoadBalancer. |
 | webadmin.service.port | int | `8444` | Service port for WebAdmin |
-| webadmin.service.type | string | `"LoadBalancer"` | Service type for WebAdmin (LoadBalancer, ClusterIP, NodePort) |
+| webadmin.service.type | string | `"ClusterIP"` | Service type for WebAdmin: ClusterIP, NodePort or LoadBalancer |
 | webadmin.tolerations | list | `[]` | Pod tolerations for WebAdmin |
 
 ## Environment Variables

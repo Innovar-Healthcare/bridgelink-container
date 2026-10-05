@@ -102,13 +102,51 @@ bridgelink:
     pullPolicy: IfNotPresent
 
   service:
-    # -- Service type for BridgeLink (LoadBalancer, ClusterIP, NodePort)
-    type: LoadBalancer
+    # -- Service type for BridgeLink: ClusterIP, NodePort or LoadBalancer. ClusterIP keeps the admin
+    # API inside the cluster. A plain LoadBalancer on EKS without the AWS Load Balancer Controller is
+    # an internet-facing Classic ELB; see the README's "Exposing BridgeLink" section for an internal NLB.
+    type: ClusterIP
+    # -- Annotations for the BridgeLink Service, e.g. for the AWS Load Balancer Controller:
+    # `service.beta.kubernetes.io/aws-load-balancer-type: external`,
+    # `service.beta.kubernetes.io/aws-load-balancer-scheme: internal`,
+    # `service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip`.
+    annotations: {}
+    # -- Client CIDRs allowed to reach the load balancer. Used only when `type` is LoadBalancer.
+    loadBalancerSourceRanges: []
+    # -- Load balancer class, e.g. `service.k8s.aws/nlb` for the AWS Load Balancer Controller. Empty
+    # uses the cluster default. Used only when `type` is LoadBalancer. Kubernetes accepts it only when
+    # the load balancer is created; see the README to add or change it later.
+    loadBalancerClass: ""
     ports:
-      # -- HTTP port for web interface
+      # -- Service port for plain HTTP. `null` leaves HTTP off the Service; the container keeps
+      # listening on 8080.
       http: 8080
-      # -- HTTPS port for secure web interface
+      # -- Service port for HTTPS (the API and the web interface)
       https: 8443
+
+  # -- Extra ports for channel listeners (MLLP, HTTP, TCP), declared on the BridgeLink container and
+  # added to the BridgeLink Service, or to the listener Service when `listenerService.enabled`. Each
+  # entry: `name` (lowercase, at most 15 characters), `containerPort` (the port the channel listens
+  # on), and optionally `port` (the Service port, default `containerPort`) and `protocol` (default
+  # TCP). Adding, changing or removing an entry changes the pod, so BridgeLink restarts on upgrade.
+  extraPorts: []
+  #  - name: mllp-adt
+  #    containerPort: 6661
+
+  # A second Service carrying only `extraPorts`, so channel listeners can sit behind a different load
+  # balancer from the admin API (for example an internal NLB for MLLP while 8443 stays ClusterIP).
+  listenerService:
+    # -- Create the `<release>-bridgelink-listeners` Service and move `extraPorts` onto it, off the
+    # BridgeLink Service. Requires at least one `extraPorts` entry.
+    enabled: false
+    # -- Service type for the listener Service: ClusterIP, NodePort or LoadBalancer
+    type: ClusterIP
+    # -- Annotations for the listener Service (see `service.annotations`)
+    annotations: {}
+    # -- Client CIDRs allowed to reach the listener load balancer. Used only when `type` is LoadBalancer.
+    loadBalancerSourceRanges: []
+    # -- Load balancer class for the listener Service. Used only when `type` is LoadBalancer.
+    loadBalancerClass: ""
 
   resources:
     requests:
@@ -345,10 +383,16 @@ webadmin:
   containerPort: 8444
 
   service:
-    # -- Service type for WebAdmin (LoadBalancer, ClusterIP, NodePort)
-    type: LoadBalancer
+    # -- Service type for WebAdmin: ClusterIP, NodePort or LoadBalancer
+    type: ClusterIP
     # -- Service port for WebAdmin
     port: 8444
+    # -- Annotations for the WebAdmin Service (see `bridgelink.service.annotations`)
+    annotations: {}
+    # -- Client CIDRs allowed to reach the WebAdmin load balancer. Used only when `type` is LoadBalancer.
+    loadBalancerSourceRanges: []
+    # -- Load balancer class for the WebAdmin Service. Used only when `type` is LoadBalancer.
+    loadBalancerClass: ""
 
   # -- Extra environment variables for WebAdmin, e.g. `BRIDGELINK_PUBLIC_HOST` or `COOKIE_SECURE`.
   # `BRIDGELINK_SERVER_URL`, `PORT` and `BL_ACCEPT_LICENSE` are set by the chart and ignored here.

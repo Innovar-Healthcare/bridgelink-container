@@ -1,0 +1,23 @@
+{{- $svc := .Values.bridgelink.listenerService }}
+{{- if $svc.enabled }}
+{{- if not .Values.bridgelink.extraPorts }}
+{{- fail "bridgelink.listenerService.enabled=true needs at least one bridgelink.extraPorts entry: the listener Service carries only those ports" }}
+{{- end }}
+{{- /* Channel listener ports only, so they can sit behind a different load balancer from the admin API. */}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "bridgelink.fullname" . }}-listeners
+  labels:
+    {{- include "bridgelink.labels" . | nindent 4 }}
+  {{- with $svc.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- include "bridgelink.serviceSpec" $svc | nindent 2 }}
+  ports:
+    {{- include "bridgelink.extraServicePorts" .Values.bridgelink.extraPorts | trim | nindent 4 }}
+  selector:
+    {{- include "bridgelink.selectorLabels" . | nindent 4 }}
+{{- end }}

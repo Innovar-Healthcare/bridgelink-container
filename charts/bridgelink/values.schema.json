@@ -190,15 +190,24 @@
               "properties": {
                 "http": {
                   "default": "8080",
-                  "description": "HTTP port for BridgeLink web interface",
+                  "description": "HTTP Service port for BridgeLink; null leaves HTTP off the Service",
                   "required": [],
-                  "title": "http"
+                  "title": "http",
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 1,
+                  "maximum": 65535
                 },
                 "https": {
                   "default": "8443",
                   "description": "HTTPS port for BridgeLink secure web interface",
                   "required": [],
-                  "title": "https"
+                  "title": "https",
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 65535
                 }
               },
               "required": [],
@@ -206,10 +215,42 @@
               "type": "object"
             },
             "type": {
-              "default": "`LoadBalancer`",
-              "description": "Kubernetes Service type",
+              "default": "`ClusterIP`",
+              "description": "Kubernetes Service type for BridgeLink",
+              "enum": [
+                "ClusterIP",
+                "NodePort",
+                "LoadBalancer"
+              ],
               "required": [],
               "title": "type"
+            },
+            "annotations": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "default": "`{}`",
+              "description": "Annotations for the BridgeLink Service",
+              "required": [],
+              "title": "annotations",
+              "type": "object"
+            },
+            "loadBalancerSourceRanges": {
+              "default": "`[]`",
+              "description": "Client CIDRs allowed to reach the load balancer; used only when type is LoadBalancer",
+              "items": {
+                "type": "string"
+              },
+              "required": [],
+              "title": "loadBalancerSourceRanges",
+              "type": "array"
+            },
+            "loadBalancerClass": {
+              "default": "\"\"",
+              "description": "Load balancer class; used only when type is LoadBalancer",
+              "required": [],
+              "title": "loadBalancerClass",
+              "type": "string"
             }
           },
           "required": [
@@ -446,6 +487,109 @@
           "required": [],
           "title": "extraVolumeMounts",
           "type": "array"
+        },
+        "extraPorts": {
+          "default": "`[]`",
+          "description": "Extra container and Service ports for channel listeners",
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "description": "Port name: lowercase letters, digits and hyphens, at most 15 characters",
+                "maxLength": 15,
+                "not": {
+                  "enum": [
+                    "http",
+                    "https"
+                  ]
+                },
+                "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+                "type": "string"
+              },
+              "containerPort": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 65535,
+                "description": "Port the channel listens on"
+              },
+              "port": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 65535,
+                "description": "Service port; defaults to containerPort"
+              },
+              "protocol": {
+                "enum": [
+                  "TCP",
+                  "UDP",
+                  "SCTP"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "containerPort"
+            ],
+            "type": "object"
+          },
+          "required": [],
+          "title": "extraPorts",
+          "type": "array"
+        },
+        "listenerService": {
+          "additionalProperties": false,
+          "description": "Separate Service carrying only extraPorts",
+          "properties": {
+            "enabled": {
+              "default": "false",
+              "description": "Create the listener Service and move extraPorts onto it",
+              "required": [],
+              "title": "enabled",
+              "type": "boolean"
+            },
+            "type": {
+              "default": "`ClusterIP`",
+              "description": "Kubernetes Service type for the listener Service",
+              "enum": [
+                "ClusterIP",
+                "NodePort",
+                "LoadBalancer"
+              ],
+              "required": [],
+              "title": "type"
+            },
+            "annotations": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "default": "`{}`",
+              "description": "Annotations for the listener Service",
+              "required": [],
+              "title": "annotations",
+              "type": "object"
+            },
+            "loadBalancerSourceRanges": {
+              "default": "`[]`",
+              "description": "Client CIDRs allowed to reach the load balancer; used only when type is LoadBalancer",
+              "items": {
+                "type": "string"
+              },
+              "required": [],
+              "title": "loadBalancerSourceRanges",
+              "type": "array"
+            },
+            "loadBalancerClass": {
+              "default": "\"\"",
+              "description": "Load balancer class; used only when type is LoadBalancer",
+              "required": [],
+              "title": "loadBalancerClass",
+              "type": "string"
+            }
+          },
+          "required": [],
+          "title": "listenerService",
+          "type": "object"
         }
       },
       "required": [
@@ -745,10 +889,42 @@
               "type": "integer"
             },
             "type": {
-              "default": "`LoadBalancer`",
+              "default": "`ClusterIP`",
               "description": "Kubernetes Service type for WebAdmin",
+              "enum": [
+                "ClusterIP",
+                "NodePort",
+                "LoadBalancer"
+              ],
               "required": [],
               "title": "type"
+            },
+            "annotations": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "default": "`{}`",
+              "description": "Annotations for the WebAdmin Service",
+              "required": [],
+              "title": "annotations",
+              "type": "object"
+            },
+            "loadBalancerSourceRanges": {
+              "default": "`[]`",
+              "description": "Client CIDRs allowed to reach the load balancer; used only when type is LoadBalancer",
+              "items": {
+                "type": "string"
+              },
+              "required": [],
+              "title": "loadBalancerSourceRanges",
+              "type": "array"
+            },
+            "loadBalancerClass": {
+              "default": "\"\"",
+              "description": "Load balancer class; used only when type is LoadBalancer",
+              "required": [],
+              "title": "loadBalancerClass",
+              "type": "string"
             }
           },
           "required": [],
