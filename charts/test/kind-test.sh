@@ -8,8 +8,9 @@
 # bundled PostgreSQL really runs the config the chart ships, that BridgeLink, with WebAdmin and the
 # standard Kubernetes options set (service account, pull secret, extra env from a Secret, extra
 # volume), runs in a namespace enforcing the "restricted" Pod Security Standard against an external
-# database, and that the Services survive type changes on upgrade and print their load balancer
-# hostname in the install notes.
+# database, that the Services survive type changes on upgrade and print their load balancer
+# hostname in the install notes, and that a new install without a server ID is refused while an
+# upgraded server keeps the ID it had.
 #
 # Lives under charts/ rather than test/ on purpose: build-images.yml runs the full multi-arch image
 # build for any change under test/**, and a chart-only change should not pay for that.
@@ -257,8 +258,32 @@ if [ -n "$UPGRADE_FROM" ]; then
     || { echo "cannot check out UPGRADE_FROM=$UPGRADE_FROM"; exit 2; }
   FROM_CHART="$WORK/from/charts/bridgelink"
 fi
+# A chart that still ships a default server ID (before 0.9.0) is installed and upgraded with none,
+# the path an existing release takes, and the server must keep that default. A chart that requires
+# an ID gets a fixed test ID on the install and on every upgrade of release bl.
+LEGACY_ID="7d760af2-680a-4a19-b9a2-c4685df61ebc"
+if helm template bl "$FROM_CHART" -f "$WORK/common.yaml" ${SETS[@]+"${SETS[@]}"} >/dev/null 2>"$WORK/from.err"; then
+  BL_ID="$LEGACY_ID" ID_SETS=()
+elif grep -q "bridgelink.environment.SERVER_ID" "$WORK/from.err"; then
+  BL_ID="0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d" ID_SETS=(--set-string "bridgelink.environment.SERVER_ID=$BL_ID")
+else
+  echo "the chart from ${UPGRADE_FROM:-this checkout} does not render:"; cat "$WORK/from.err"; exit 2
+fi
 info "1. install ${UPGRADE_FROM:-this checkout} with the bundled PostgreSQL"
-if h install bl "$FROM_CHART" -f "$WORK/common.yaml" ${SETS[@]+"${SETS[@]}"} --wait --timeout "$TIMEOUT" >/dev/null; then
+# This checkout refuses a new release with no server ID, through `helm install` and through
+# `helm upgrade --install` alike, before anything is created.
+for cmd in install "upgrade --install"; do
+  # shellcheck disable=SC2086  # cmd is a subcommand and its flag
+  if h $cmd noid "$CHART" -f "$WORK/common.yaml" ${SETS[@]+"${SETS[@]}"} >/dev/null 2>"$WORK/noid.err"; then
+    bad "helm $cmd of a new release with no server ID succeeded"; h uninstall noid >/dev/null 2>&1
+  elif grep -q "bridgelink.environment.SERVER_ID" "$WORK/noid.err" && ! h status noid >/dev/null 2>&1; then
+    ok "helm $cmd of a new release with no server ID is refused, naming SERVER_ID, and records no release"
+  else
+    bad "helm $cmd with no server ID failed, but not as expected: $(head -c 400 "$WORK/noid.err")"
+  fi
+done
+if h install bl "$FROM_CHART" -f "$WORK/common.yaml" ${SETS[@]+"${SETS[@]}"} ${ID_SETS[@]+"${ID_SETS[@]}"} \
+     --wait --timeout "$TIMEOUT" >/dev/null; then
   ok "release installed and BridgeLink Ready (status 0)"
 else
   bad "install did not become ready"; dump; exit 1
@@ -279,7 +304,7 @@ OLD_POD="$(k get pods -l "$BL_SELECTOR" -o jsonpath='{.items[0].metadata.name}')
   done ) > "$WORK/pods.log" &
 WATCH_PID=$!
 # shellcheck disable=SC2086  # UPGRADE_ARGS is a list of flags
-if h upgrade bl "$CHART" -f "$WORK/common.yaml" ${SETS[@]+"${SETS[@]}"} $UPGRADE_ARGS \
+if h upgrade bl "$CHART" -f "$WORK/common.yaml" ${SETS[@]+"${SETS[@]}"} ${ID_SETS[@]+"${ID_SETS[@]}"} $UPGRADE_ARGS \
      --set-string bridgelink.resources.requests.cpu=251m --wait --timeout "$TIMEOUT" >/dev/null; then
   ok "upgrade completed and BridgeLink Ready"
 else
@@ -310,6 +335,11 @@ MSG_ID=""
 forward bl
 CODE="$(login)"
 [ "$CODE" = "200" ] && ok "logged in to the BridgeLink API" || bad "API login returned HTTP $CODE"
+# After the upgrade. BridgeLink sends only queued messages stamped with its own server ID, so an
+# upgrade must never change it.
+GOT_ID="$(api GET /server/id | grep -oE '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}' | head -1)"
+[ "$GOT_ID" = "$BL_ID" ] && ok "the upgraded server still reports server ID $BL_ID" \
+  || bad "the upgraded server reports server ID '$GOT_ID', want $BL_ID"
 VERSION="$(api GET /server/version)"
 channel_json "$VERSION" "$CHANNEL_ID" kind-test-encrypted > "$WORK/channel.json"
 CODE="$(api POST /channels -H 'Content-Type: application/json' --data-binary @"$WORK/channel.json" -o "$WORK/out" -w '%{http_code}')"
@@ -368,7 +398,8 @@ for ns in "$NS" "$NS_R"; do   # step 7 uses it in the restricted namespace
 done
 [ -s "$WORK/keystore.jks" ] && ok "copied the keystore off the claim into Secret bl-keystore ($(wc -c < "$WORK/keystore.jks" | tr -d ' ') bytes)" \
   || bad "could not read the keystore off the claim"
-if h upgrade bl "$CHART" -f "$WORK/common.yaml" ${SETS[@]+"${SETS[@]}"} --set-string bridgelink.resources.requests.cpu=251m \
+if h upgrade bl "$CHART" -f "$WORK/common.yaml" ${SETS[@]+"${SETS[@]}"} ${ID_SETS[@]+"${ID_SETS[@]}"} \
+     --set-string bridgelink.resources.requests.cpu=251m \
      --set bridgelink.persistence.enabled=false --set bridgelink.keystore.existingSecret=bl-keystore \
      --wait --timeout "$TIMEOUT" >/dev/null; then
   ok "upgraded to keystore.existingSecret with persistence off, and BridgeLink Ready"
@@ -401,7 +432,8 @@ info "5. a channel listener on an extra port answers through the listener Servic
 LISTENER_ID="8b3e1f5a-2c4d-4e6f-9a1b-3c5d7e9f0b2d"
 LISTEN_PORT=6661
 LISTENER_SVC="bl-bridgelink-listeners"
-if h upgrade bl "$CHART" -f "$WORK/common.yaml" ${SETS[@]+"${SETS[@]}"} --set-string bridgelink.resources.requests.cpu=251m \
+if h upgrade bl "$CHART" -f "$WORK/common.yaml" ${SETS[@]+"${SETS[@]}"} ${ID_SETS[@]+"${ID_SETS[@]}"} \
+     --set-string bridgelink.resources.requests.cpu=251m \
      --set bridgelink.persistence.enabled=false --set bridgelink.keystore.existingSecret=bl-keystore \
      --set-json "bridgelink.extraPorts=[{\"name\":\"http-listen\",\"containerPort\":$LISTEN_PORT}]" \
      --set bridgelink.listenerService.enabled=true --wait --timeout "$TIMEOUT" >/dev/null; then
@@ -544,6 +576,7 @@ webadmin:
     type: ClusterIP
 EOF
 if hr install ext "$CHART" -f "$WORK/common.yaml" -f "$WORK/external.yaml" ${SETS[@]+"${SETS[@]}"} \
+     --set-string bridgelink.environment.SERVER_ID=1b2c3d4e-5f6a-4b7c-9d8e-0f1a2b3c4d5e \
      --wait --timeout "$TIMEOUT" >/dev/null 2>"$WORK/ext.err"; then
   ok "BridgeLink and WebAdmin admitted and Ready in a namespace enforcing restricted"
 else
@@ -581,7 +614,8 @@ info "8. Service type, load balancer settings and install notes across upgrades"
 # Only the Services matter here, so the release runs no BridgeLink pod and no database. No --wait: a
 # LoadBalancer never gets an address on kind.
 SVC_SETS=(--set bridgelink.replicaCount=0 --set postgres.enabled=false --set bridgelink.environment.MP_DATABASE=derby
-  --set bridgelink.persistence.enabled=false --set webadmin.enabled=true --set webadmin.acceptLicense=true)
+  --set bridgelink.persistence.enabled=false --set webadmin.enabled=true --set webadmin.acceptLicense=true
+  --set-string bridgelink.environment.SERVER_ID=2c3d4e5f-6a7b-4c8d-ae9f-1a2b3c4d5e6f)
 svc_state() { k get svc "$1" -o jsonpath='{.spec.type} nodePorts=[{.spec.ports[*].nodePort}] etp={.spec.externalTrafficPolicy}' 2>&1; }
 # LoadBalancer was the default before ClusterIP. The API server gives such a Service node ports and an
 # externalTrafficPolicy the chart never set, and switching the type has to clear them: under

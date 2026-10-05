@@ -151,6 +151,43 @@ tpl, so they resolve to what they always meant; any value without "{{" is never 
 {{- end }}
 
 {{/*
+The server ID every install shared before chart 0.9.0, when values.yaml set it by default. Existing
+servers run as it and may be licensed against it.
+*/}}
+{{- define "bridgelink.legacyServerId" -}}
+7d760af2-680a-4a19-b9a2-c4685df61ebc
+{{- end }}
+
+{{/*
+"true" when an extraEnv entry supplies SERVER_ID, for example from a Secret.
+*/}}
+{{- define "bridgelink.serverIdFromExtraEnv" -}}
+{{- range .Values.bridgelink.extraEnv -}}
+{{- if eq .name "SERVER_ID" -}}true{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+The server ID. Renders nothing when extraEnv supplies SERVER_ID, since that entry replaces the
+chart's. Otherwise an explicit bridgelink.environment.SERVER_ID is always used. An upgrade with no ID keeps the
+legacy ID: Core recovers and sends only queued messages stamped with its own server ID, so changing
+an existing server's ID strands its queue. A new install with no ID fails rather than generating one,
+because a generated ID would change on every render wherever lookup cannot see the cluster
+(helm template, Argo CD).
+*/}}
+{{- define "bridgelink.serverId" -}}
+{{- $id := toString (.Values.bridgelink.environment.SERVER_ID | default "") -}}
+{{- if include "bridgelink.serverIdFromExtraEnv" . -}}
+{{- else if trim $id -}}
+{{- $id -}}
+{{- else if .Release.IsUpgrade -}}
+{{- include "bridgelink.legacyServerId" . -}}
+{{- else -}}
+{{- fail (printf "bridgelink.environment.SERVER_ID is required for a new install. For a new server, use this freshly generated ID: --set bridgelink.environment.SERVER_ID=%s (or set it in your values file). Record it: BridgeLink licenses are issued against it. If this release replaces an existing server (a restore, a migration, a reinstall against the same database, or an Argo CD application), set that server's ID instead; chart versions before 0.9.0 defaulted to %s. See \"Server ID\" in the chart README." uuidv4 (include "bridgelink.legacyServerId" .)) -}}
+{{- end -}}
+{{- end }}
+
+{{/*
 Service fields shared by the BridgeLink, listener and WebAdmin Services, from one service values
 block. loadBalancerSourceRanges and loadBalancerClass are rendered only for type LoadBalancer: the
 API server rejects both on any other type.

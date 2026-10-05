@@ -66,8 +66,8 @@
               "title": "MP_KEYSTORE_STOREPASS"
             },
             "SERVER_ID": {
-              "default": "7d760af2-680a-4a19-b9a2-c4685df61ebc",
-              "description": "Unique server identifier",
+              "default": "",
+              "description": "Server ID. Required on a new install; licenses are issued against it",
               "required": [],
               "title": "SERVER_ID"
             }

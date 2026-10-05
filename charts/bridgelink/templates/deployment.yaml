@@ -142,8 +142,15 @@ spec:
                   key: keystore.keypass
             {{- end }}
             {{- end }}
+            {{- /* SERVER_ID goes back in resolved, so it keeps its sorted position and an upgrade
+            that does not set it renders the same pod template as before. Not evaluated when
+            extraEnv supplies it: the helper fails a new install that has no ID. */}}
+            {{- $env := omit .Values.bridgelink.environment "SERVER_ID" }}
+            {{- if not (has "SERVER_ID" $extra) }}
+            {{- $_ := set $env "SERVER_ID" (include "bridgelink.serverId" .) }}
+            {{- end }}
             {{- /* Keys resolved above are skipped here to avoid duplicates. */}}
-            {{- range $key, $value := .Values.bridgelink.environment }}
+            {{- range $key, $value := $env }}
             {{- if not (has $key $skip) }}
             - name: {{ $key }}
               value: {{ $value | quote }}

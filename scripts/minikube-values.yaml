@@ -1,3 +1,5 @@
+# scripts/deploy-minikube.sh passes bridgelink.environment.SERVER_ID itself. With this file and helm
+# directly, add --set bridgelink.environment.SERVER_ID=<a new UUID>: the chart requires one on install.
 bridgelink:
   service:
     type: LoadBalancer
