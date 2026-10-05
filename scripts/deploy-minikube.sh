@@ -185,10 +185,20 @@ else
     echo -e "${GREEN}Using existing minikube-values.yaml${NC}"
 fi
 
+# The chart requires a server ID on a new install. Every run here is a new release in a cleaned
+# namespace, so a new ID each run is right. Set SERVER_ID to reuse one; it overrides any ID in the
+# values file.
+if [ -z "${SERVER_ID:-}" ]; then
+    SERVER_ID=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid)
+    SERVER_ID=$(echo "$SERVER_ID" | tr '[:upper:]' '[:lower:]')
+fi
+echo -e "${GREEN}Server ID: ${SERVER_ID}${NC}"
+
 # Deploy BridgeLink using Helm
 echo -e "${GREEN}Deploying BridgeLink to Minikube in ${NAMESPACE} namespace...${NC}"
 helm upgrade --install ${RELEASE_NAME} "$PROJECT_ROOT/charts/bridgelink" \
     -f "$MINIKUBE_VALUES" \
+    --set-string bridgelink.environment.SERVER_ID="$SERVER_ID" \
     -n ${NAMESPACE} \
     --create-namespace \
     --wait \

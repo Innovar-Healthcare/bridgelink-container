@@ -283,8 +283,13 @@ bridgelink:
     MP_DATABASE_USERNAME: ""
     # -- Database password. Leave empty to use `postgres.credentials.password` with the bundled PostgreSQL.
     MP_DATABASE_PASSWORD: ""
-    # -- Unique server identifier
-    SERVER_ID: 7d760af2-680a-4a19-b9a2-c4685df61ebc
+    # -- Server ID, a UUID. Required on a new install: the install fails without it and prints a
+    # freshly generated one to use. Record it: BridgeLink licenses are issued against it. Keep it for
+    # the life of the server, since queued messages are recovered only under the ID that stored them,
+    # and never run two servers with the same ID against one database. An upgrade that leaves it
+    # empty keeps `7d760af2-680a-4a19-b9a2-c4685df61ebc`, the ID every install shared before chart
+    # 0.9.0. See the README's "Server ID" section.
+    SERVER_ID: ""
     # -- Keystore key password
     MP_KEYSTORE_KEYPASS: bridgelinkKeystore
     # -- Keystore store password

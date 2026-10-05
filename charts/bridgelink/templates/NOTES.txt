@@ -1,6 +1,23 @@
 Thank you for installing {{ .Chart.Name }}.
 
 Your release is named {{ .Release.Name }}.
+{{- with include "bridgelink.serverId" . }}
+
+Server ID: {{ . }}
+{{- else }}
+
+Server ID: set through bridgelink.extraEnv.
+{{- end }}
+  Record it: BridgeLink licenses are issued against this ID. Keep it for the life of this server,
+  and never run two servers with the same ID against one database.
+{{- if eq (include "bridgelink.serverId" .) (include "bridgelink.legacyServerId" .) }}
+{{- if not (trim (toString (.Values.bridgelink.environment.SERVER_ID | default ""))) }}
+  This upgrade set no ID, so it uses the one every install shared before chart 0.9.0. If this
+  release was installed with its own ID, upgrade again with that ID now. Otherwise set
+  bridgelink.environment.SERVER_ID={{ include "bridgelink.legacyServerId" . }} in your values, so
+  the ID no longer depends on how the chart is run.
+{{- end }}
+{{- end }}
 
 To get the application URL, run these commands:
 {{- $ns := .Release.Namespace }}

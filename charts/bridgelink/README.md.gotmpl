@@ -36,11 +36,25 @@ To install the chart with the release name `bridgelink`:
 helm repo add bridgelink https://innovar-healthcare.github.io/bridgelink-helm-charts
 helm repo update
 
+# Generate a server ID once, and record it: BridgeLink licenses are issued against it
+SERVER_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
+echo "$SERVER_ID"
+
 # Install the chart
-helm install bridgelink bridgelink/bridgelink
+helm install bridgelink bridgelink/bridgelink --set-string bridgelink.environment.SERVER_ID="$SERVER_ID"
 ```
 
-For a custom configuration using a values file:
+A new install without `bridgelink.environment.SERVER_ID` fails, and the error prints a freshly
+generated ID you can use. See [Server ID](#server-id) before choosing one.
+
+For a custom configuration, keep the ID in your values file with the rest of the settings, so every
+later `helm upgrade` passes it again:
+
+```yaml
+bridgelink:
+  environment:
+    SERVER_ID: "<your server ID>"
+```
 
 ```bash
 helm install bridgelink bridgelink/bridgelink -f values.yaml
@@ -61,7 +75,7 @@ helm uninstall bridgelink
 > release's BridgeLink service:
 >
 > ```bash
-> helm install bridgelink bridgelink/bridgelink \
+> helm install bridgelink bridgelink/bridgelink --set-string bridgelink.environment.SERVER_ID="$SERVER_ID" \
 >   --set webadmin.enabled=true --set webadmin.acceptLicense=true
 > ```
 >
@@ -197,6 +211,36 @@ bridgelink:
 the pod. With `strategy: Recreate` that is a short outage, so batch port changes. A port answers only
 while a deployed channel listens on it.
 
+## Server ID
+
+Every BridgeLink server has a server ID, set by `bridgelink.environment.SERVER_ID`. The chart has no
+default: a new install without one fails, and the error prints a freshly generated ID to use.
+
+- **Record the ID and send it to us when you request a license.** BridgeLink licenses are issued
+  against the server ID.
+- **Keep it for the life of the server.** Messages waiting in a queue are stored under the server ID,
+  and BridgeLink recovers and sends only the ones stamped with its own ID. A server that comes back
+  under a different ID leaves its queued messages unsent, and its license no longer matches.
+- **Reuse it when you replace the same server**: a restore, a migration to another cluster, or a
+  reinstall against the same database. Use a new ID only for a new server.
+- **Never run two live servers with the same ID against one database.** Both would treat the other's
+  queued messages as their own, so the same messages can be sent twice.
+
+To keep the ID out of values, read it from a Secret with `extraEnv`, which replaces the chart's
+variable of the same name:
+
+```yaml
+bridgelink:
+  extraEnv:
+    - name: SERVER_ID
+      valueFrom:
+        secretKeyRef: {name: bridgelink-server-id, key: id}
+```
+
+Before chart 0.9.0, every install shared the default ID `7d760af2-680a-4a19-b9a2-c4685df61ebc`. A
+`helm upgrade` of a release that does not set an ID keeps that one, because the server already runs
+as it. See [Upgrading](#upgrading).
+
 ## Database
 
 The bundled PostgreSQL (`postgres.enabled: true`, the default) is for **evaluation only**. It runs as a
@@ -309,6 +353,25 @@ evaluation only; in a restricted namespace, use an external database.
 
 ## Upgrading
 
+**Chart 0.9.0** stops shipping a default server ID:
+
+- **A new install must set `bridgelink.environment.SERVER_ID`.** Without it the install fails, and the
+  error prints a freshly generated ID. Update install commands, scripts and GitOps applications that
+  install the chart. See [Server ID](#server-id).
+- **`helm upgrade` of an existing release that sets no ID keeps `7d760af2-680a-4a19-b9a2-c4685df61ebc`**,
+  the default every earlier install shared. Nothing restarts. Set that ID explicitly in your values
+  when convenient, so it no longer depends on how the chart is run.
+- **Argo CD, and anything else that renders the chart with `helm template`, fails until the ID is
+  set**, because a template render always looks like a new install. For a release that was on the
+  old default, set `bridgelink.environment.SERVER_ID: 7d760af2-680a-4a19-b9a2-c4685df61ebc` in the
+  application's values once. Until then the sync fails at render time and nothing in the cluster
+  changes. Do not give an existing server a new ID: it strands the server's queued messages.
+- **Pass the ID on every upgrade.** `helm upgrade` without `--reuse-values` resets every value you do
+  not pass again. A release installed with `--set bridgelink.environment.SERVER_ID=...` and later
+  upgraded without it falls back to the old default ID, and its queued messages are no longer sent.
+  Keep the ID in a values file. If it happens, upgrade again with the right ID; the install notes
+  print the ID each upgrade used.
+
 **Chart 0.8.0** changes the default Service type:
 
 - **The BridgeLink and WebAdmin Services default to `ClusterIP`**, not `LoadBalancer`. If your release
@@ -391,7 +454,7 @@ The BridgeLink application can be configured using environment variables:
 - `MP_DATABASE_URL`: Database connection URL
 - `MP_DATABASE_USERNAME`: Database username
 - `MP_DATABASE_PASSWORD`: Database password
-- `SERVER_ID`: Unique server identifier
+- `SERVER_ID`: Server ID, required on a new install; see [Server ID](#server-id)
 
 ### Advanced Configuration
 - `JAVA_OPTS`: JVM options
