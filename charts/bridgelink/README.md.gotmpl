@@ -136,6 +136,23 @@ single pod on one zone-bound volume with no backups. For production, set `postgr
 use an external database such as Amazon RDS. The bundled instance requires a password for every TCP
 connection (`scram-sha-256`).
 
+To use an external database, disable the bundled one and set the connection under
+`bridgelink.environment`. The URL is passed to BridgeLink unchanged, so any JDBC scheme, port and
+parameters work:
+
+```yaml
+postgres:
+  enabled: false
+bridgelink:
+  environment:
+    MP_DATABASE: postgres
+    MP_DATABASE_URL: "jdbc:postgresql://<rds-endpoint>:5432/bridgelinkdb?sslmode=require"
+    MP_DATABASE_USERNAME: bridgelink
+    MP_DATABASE_PASSWORD: "<password>"
+```
+
+With `postgres.enabled: false` and no `MP_DATABASE_URL`, the install fails with a message saying so.
+
 1. **PostgreSQL Data**:
    ```yaml
    postgres:

@@ -83,12 +83,19 @@ spec:
               mountPath: /opt/bridgelink/secrets/vmoptions
               subPath: blserver-vmoptions
           env:
+            {{- with include "bridgelink.databaseUrl" . }}
             - name: MP_DATABASE_URL
-              value: jdbc:postgresql://{{ include "bridgelink.fullname" . }}-postgres:5432/{{ .Values.postgres.credentials.database }}
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with include "bridgelink.databaseUsername" . }}
             - name: MP_DATABASE_USERNAME
-              value: {{ .Values.postgres.credentials.username | quote }}
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with include "bridgelink.databasePassword" . }}
             - name: MP_DATABASE_PASSWORD
-              value: {{ .Values.postgres.credentials.password | quote }}
+              value: {{ . | quote }}
+            {{- end }}
+            {{- /* The three database keys are resolved above, so the loop skips them to avoid duplicates. */}}
             {{- range $key, $value := .Values.bridgelink.environment }}
             {{- if not (or (eq $key "MP_DATABASE_URL") (eq $key "MP_DATABASE_USERNAME") (eq $key "MP_DATABASE_PASSWORD")) }}
             - name: {{ $key }}

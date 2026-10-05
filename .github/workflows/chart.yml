@@ -139,6 +139,58 @@ jobs:
           helm template bl charts/bridgelink --set bridgelink.replicaCount=0 > /dev/null
           echo "replicaCount is capped at 1 and 0 is still allowed"
 
+      - name: Database settings in values reach the container
+        run: |
+          set -euo pipefail
+          # An external database such as RDS: the URL (with its own port and parameters) and the
+          # credentials must arrive unchanged, and no bundled Postgres may be deployed. The chart used
+          # to overwrite all three with the bundled service's values.
+          cat > /tmp/external-db.yaml <<'EOF'
+          postgres:
+            enabled: false
+          bridgelink:
+            environment:
+              MP_DATABASE_URL: "jdbc:postgresql://db.example.us-east-1.rds.amazonaws.com:5433/bl?sslmode=verify-full&sslrootcert=/certs/rds.pem"
+              MP_DATABASE_USERNAME: bladmin
+              MP_DATABASE_PASSWORD: "p@ss,w0rd"
+          EOF
+          helm template bl charts/bridgelink -f /tmp/external-db.yaml > /tmp/external.yaml
+          python3 - <<'PY'
+          import yaml
+          def bl_env(path):
+              docs = [d for d in yaml.safe_load_all(open(path)) if d]
+              dep = [d for d in docs if d['kind'] == 'Deployment' and d['metadata']['name'].endswith('-bl')][0]
+              c = [x for x in dep['spec']['template']['spec']['containers'] if x['name'] == 'bridgelink'][0]
+              names = [e['name'] for e in c['env']]
+              dupes = sorted({n for n in names if names.count(n) > 1})
+              assert not dupes, f'{path}: duplicate env names {dupes}'
+              return docs, {e['name']: e.get('value') for e in c['env']}
+
+          docs, env = bl_env('/tmp/external.yaml')
+          want = yaml.safe_load(open('/tmp/external-db.yaml'))['bridgelink']['environment']
+          for k, v in want.items():
+              assert env.get(k) == v, f'{k} is {env.get(k)!r}, want {v!r} from values'
+          pg = [d['metadata']['name'] for d in docs if d['metadata']['name'].endswith(('-postgres', '-postgres-config'))]
+          assert not pg, f'postgres.enabled=false still rendered {pg}'
+
+          # The default install with the bundled Postgres must keep rendering exactly what it did.
+          _, env = bl_env('/tmp/rendered.yaml')
+          assert env.get('MP_DATABASE_URL') == 'jdbc:postgresql://bl-bridgelink-postgres:5432/bridgelinkdb', \
+              f"default MP_DATABASE_URL changed: {env.get('MP_DATABASE_URL')!r}"
+          vals = yaml.safe_load(open('charts/bridgelink/values.yaml'))['postgres']['credentials']
+          assert env.get('MP_DATABASE_USERNAME') == vals['username']
+          assert env.get('MP_DATABASE_PASSWORD') == vals['password']
+          print('external database passed through; bundled default unchanged')
+          PY
+          # Without the bundled Postgres and without a URL there is nothing to connect to: fail the
+          # render with a message that names the setting, rather than start a pod that cannot.
+          if helm template bl charts/bridgelink --set postgres.enabled=false > /tmp/nourl.txt 2>&1; then
+            echo "::error::postgres.enabled=false with no MP_DATABASE_URL rendered"; exit 1
+          fi
+          grep -q "MP_DATABASE_URL" /tmp/nourl.txt \
+            || { echo "::error::the failure does not name MP_DATABASE_URL"; cat /tmp/nourl.txt; exit 1; }
+          echo "missing external URL is refused"
+
       - name: Bundled PostgreSQL requires a password over TCP
         run: |
           set -euo pipefail

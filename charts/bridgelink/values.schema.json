@@ -31,20 +31,20 @@
               "title": "MP_DATABASE"
             },
             "MP_DATABASE_PASSWORD": {
-              "default": "bridgelinktest",
-              "description": "Database password for authentication",
+              "default": "",
+              "description": "Database password. Leave empty to use postgres.credentials.password with the bundled PostgreSQL",
               "required": [],
               "title": "MP_DATABASE_PASSWORD"
             },
             "MP_DATABASE_URL": {
-              "default": "jdbc:postgresql://bridgelink-postgres:5432/bridgelinkdb",
-              "description": "JDBC URL for database connection",
+              "default": "",
+              "description": "JDBC URL of the database, passed through unchanged. Leave empty to use the bundled PostgreSQL; required when postgres.enabled is false unless MP_DATABASE is derby",
               "required": [],
               "title": "MP_DATABASE_URL"
             },
             "MP_DATABASE_USERNAME": {
-              "default": "bridgelinktest",
-              "description": "Database username for authentication",
+              "default": "",
+              "description": "Database username. Leave empty to use postgres.credentials.username with the bundled PostgreSQL",
               "required": [],
               "title": "MP_DATABASE_USERNAME"
             },

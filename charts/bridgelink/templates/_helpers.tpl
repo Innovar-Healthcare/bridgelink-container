@@ -80,3 +80,36 @@ helm.sh/chart: {{ include "bridgelink.chart" . }}
 app.kubernetes.io/version: {{ .Values.webadmin.image.tag | quote }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end }}
+
+{{/*
+Database connection settings. A non-empty bridgelink.environment value is passed through unchanged, so
+an external database (for example Amazon RDS) can use any JDBC scheme, port and URL parameters. An
+empty value falls back to the bundled PostgreSQL when postgres.enabled is true. Each helper renders
+nothing when there is no value at all, and the Deployment then omits that variable.
+*/}}
+{{- define "bridgelink.databaseUrl" -}}
+{{- $env := .Values.bridgelink.environment -}}
+{{- if $env.MP_DATABASE_URL -}}
+{{- $env.MP_DATABASE_URL -}}
+{{- else if .Values.postgres.enabled -}}
+{{- printf "jdbc:postgresql://%s-postgres:%v/%s" (include "bridgelink.fullname" .) .Values.postgres.service.port .Values.postgres.credentials.database -}}
+{{- else if ne (lower (toString (default "" $env.MP_DATABASE))) "derby" -}}
+{{- fail "postgres.enabled is false, so set bridgelink.environment.MP_DATABASE_URL to your database's JDBC URL (and MP_DATABASE_USERNAME / MP_DATABASE_PASSWORD), or set postgres.enabled=true for the bundled evaluation database" -}}
+{{- end -}}
+{{- end }}
+
+{{- define "bridgelink.databaseUsername" -}}
+{{- if .Values.bridgelink.environment.MP_DATABASE_USERNAME -}}
+{{- .Values.bridgelink.environment.MP_DATABASE_USERNAME -}}
+{{- else if .Values.postgres.enabled -}}
+{{- .Values.postgres.credentials.username -}}
+{{- end -}}
+{{- end }}
+
+{{- define "bridgelink.databasePassword" -}}
+{{- if .Values.bridgelink.environment.MP_DATABASE_PASSWORD -}}
+{{- .Values.bridgelink.environment.MP_DATABASE_PASSWORD -}}
+{{- else if .Values.postgres.enabled -}}
+{{- .Values.postgres.credentials.password -}}
+{{- end -}}
+{{- end }}

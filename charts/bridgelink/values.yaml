@@ -139,12 +139,15 @@ bridgelink:
   environment:
     # -- Database type (postgres, mysql, oracle, sqlserver)
     MP_DATABASE: "postgres"
-    # -- Database connection URL
-    MP_DATABASE_URL: "jdbc:postgresql://{{ include \"bridgelink.fullname\" . }}-postgres:5432/{{ .Values.postgres.credentials.database }}"
-    # -- Database username
-    MP_DATABASE_USERNAME: "{{ .Values.postgres.credentials.username }}"
-    # -- Database password
-    MP_DATABASE_PASSWORD: "{{ .Values.postgres.credentials.password }}"
+    # -- JDBC URL of the database, passed through unchanged, so any scheme, port and parameters work
+    # (for Amazon RDS, e.g. `jdbc:postgresql://<endpoint>:5432/bridgelinkdb?sslmode=require`). Leave
+    # empty to use the bundled PostgreSQL. Required when `postgres.enabled` is false, unless
+    # `MP_DATABASE` is `derby`.
+    MP_DATABASE_URL: ""
+    # -- Database username. Leave empty to use `postgres.credentials.username` with the bundled PostgreSQL.
+    MP_DATABASE_USERNAME: ""
+    # -- Database password. Leave empty to use `postgres.credentials.password` with the bundled PostgreSQL.
+    MP_DATABASE_PASSWORD: ""
     # -- Unique server identifier
     SERVER_ID: 7d760af2-680a-4a19-b9a2-c4685df61ebc
     # -- Keystore key password

@@ -138,6 +138,23 @@ single pod on one zone-bound volume with no backups. For production, set `postgr
 use an external database such as Amazon RDS. The bundled instance requires a password for every TCP
 connection (`scram-sha-256`).
 
+To use an external database, disable the bundled one and set the connection under
+`bridgelink.environment`. The URL is passed to BridgeLink unchanged, so any JDBC scheme, port and
+parameters work:
+
+```yaml
+postgres:
+  enabled: false
+bridgelink:
+  environment:
+    MP_DATABASE: postgres
+    MP_DATABASE_URL: "jdbc:postgresql://<rds-endpoint>:5432/bridgelinkdb?sslmode=require"
+    MP_DATABASE_USERNAME: bridgelink
+    MP_DATABASE_PASSWORD: "<password>"
+```
+
+With `postgres.enabled: false` and no `MP_DATABASE_URL`, the install fails with a message saying so.
+
 1. **PostgreSQL Data**:
    ```yaml
    postgres:
@@ -175,9 +192,9 @@ not apply.
 | bridgelink.affinity | object | `{}` | Pod affinity for BridgeLink |
 | bridgelink.environment.MP_CONFIGURATIONMAP_LOCATION | string | `"database"` | Configuration map location |
 | bridgelink.environment.MP_DATABASE | string | `"postgres"` | Database type (postgres, mysql, oracle, sqlserver) |
-| bridgelink.environment.MP_DATABASE_PASSWORD | string | `"{{ .Values.postgres.credentials.password }}"` | Database password |
-| bridgelink.environment.MP_DATABASE_URL | string | `"jdbc:postgresql://{{ include \"bridgelink.fullname\" . }}-postgres:5432/{{ .Values.postgres.credentials.database }}"` | Database connection URL |
-| bridgelink.environment.MP_DATABASE_USERNAME | string | `"{{ .Values.postgres.credentials.username }}"` | Database username |
+| bridgelink.environment.MP_DATABASE_PASSWORD | string | `""` | Database password. Leave empty to use `postgres.credentials.password` with the bundled PostgreSQL. |
+| bridgelink.environment.MP_DATABASE_URL | string | `""` | JDBC URL of the database, passed through unchanged, so any scheme, port and parameters work (for Amazon RDS, e.g. `jdbc:postgresql://<endpoint>:5432/bridgelinkdb?sslmode=require`). Leave empty to use the bundled PostgreSQL. Required when `postgres.enabled` is false, unless `MP_DATABASE` is `derby`. |
+| bridgelink.environment.MP_DATABASE_USERNAME | string | `""` | Database username. Leave empty to use `postgres.credentials.username` with the bundled PostgreSQL. |
 | bridgelink.environment.MP_KEYSTORE_KEYPASS | string | `"bridgelinkKeystore"` | Keystore key password |
 | bridgelink.environment.MP_KEYSTORE_STOREPASS | string | `"bridgelinkKeypass"` | Keystore store password |
 | bridgelink.environment.SERVER_ID | string | `"7d760af2-680a-4a19-b9a2-c4685df61ebc"` | Unique server identifier |
