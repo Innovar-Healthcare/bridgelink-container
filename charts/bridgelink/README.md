@@ -186,7 +186,8 @@ The chart supports different types of persistence:
   three keys to stay on the bundled database. A values file copied from an older `values.yaml` still
   carries the old `{{ ... }}` placeholder defaults; those keep resolving to the bundled
   database, but you can delete them.
-- **The bundled PostgreSQL requires a password for TCP connections.** PostgreSQL applies
+- **The bundled PostgreSQL requires a password for TCP connections.** The upgrade restarts it once so
+  the new rule takes effect. PostgreSQL applies
   `postgres.credentials.password` only when it first creates its data volume. If you changed that
   value after installing, the database still has the original password, and BridgeLink is now refused.
   Set the database password to match your values (the local socket needs no password):

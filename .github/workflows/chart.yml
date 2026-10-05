@@ -235,6 +235,13 @@ jobs:
           bad = [' '.join(r) for r in host if r[-1] != 'scram-sha-256']
           assert not bad, f'host rules not using scram-sha-256: {bad}'
           print(f'{len(host)} host rules, all scram-sha-256')
+          # pg_hba.conf is a subPath mount, so a running Postgres never sees a ConfigMap change. The
+          # pod template must carry the config's checksum, or `helm upgrade` leaves the old rules
+          # live until some unrelated restart.
+          dep = [d for d in docs if d['kind'] == 'Deployment' and d['metadata']['name'].endswith('-postgres')][0]
+          ann = dep['spec']['template']['metadata'].get('annotations') or {}
+          assert ann.get('checksum/config'), 'Postgres pod template has no checksum/config annotation'
+          print('Postgres restarts when its config changes')
           PY
           # With a password required, Postgres and BridgeLink must receive the same credentials. An
           # unquoted env value would turn "#" into a YAML comment and initialise a different password.
