@@ -82,6 +82,29 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end }}
 
 {{/*
+Bundled PostgreSQL selector labels. Exactly what the Deployment's spec.selector has always used, so
+an existing release can upgrade: a Deployment's selector cannot be changed after it is created.
+*/}}
+{{- define "bridgelink.postgresSelectorLabels" -}}
+app: postgres
+app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end }}
+
+{{/*
+Bundled PostgreSQL labels. Deliberately NOT built on bridgelink.labels, which carries `app: bl`: the
+templates used to add `app: postgres` and then include it, which rendered a duplicate `app` key, and
+the later `app: bl` won.
+*/}}
+{{- define "bridgelink.postgresLabels" -}}
+helm.sh/chart: {{ include "bridgelink.chart" . }}
+{{ include "bridgelink.postgresSelectorLabels" . }}
+app.kubernetes.io/name: {{ include "bridgelink.name" . }}
+app.kubernetes.io/component: postgres
+app.kubernetes.io/version: {{ .Values.postgres.image.tag | quote }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- end }}
+
+{{/*
 Database connection settings. A non-empty bridgelink.environment value is passed through unchanged, so
 an external database (for example Amazon RDS) can use any JDBC scheme, port and URL parameters. An
 empty value falls back to the bundled PostgreSQL when postgres.enabled is true. Each helper renders

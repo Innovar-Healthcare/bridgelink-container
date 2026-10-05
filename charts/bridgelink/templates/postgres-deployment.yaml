@@ -4,8 +4,7 @@ kind: Deployment
 metadata:
   name: {{ include "bridgelink.fullname" . }}-postgres
   labels:
-    app: postgres
-    {{- include "bridgelink.labels" . | nindent 4 }}
+    {{- include "bridgelink.postgresLabels" . | nindent 4 }}
 spec:
   replicas: 1
   # Recreate: the data volume is ReadWriteOnce, so a rolling update can stall on a Multi-Attach error
@@ -14,13 +13,11 @@ spec:
     type: Recreate
   selector:
     matchLabels:
-      app: postgres
-      app.kubernetes.io/instance: {{ .Release.Name }}
+      {{- include "bridgelink.postgresSelectorLabels" . | nindent 6 }}
   template:
     metadata:
       labels:
-        app: postgres
-        app.kubernetes.io/instance: {{ .Release.Name }}
+        {{- include "bridgelink.postgresSelectorLabels" . | nindent 8 }}
     spec:
       containers:
         - name: postgres

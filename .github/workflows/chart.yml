@@ -256,6 +256,49 @@ jobs:
           print('Postgres and BridgeLink receive identical credentials')
           PY
 
+      - name: Rendered manifests have no duplicate keys
+        run: |
+          set -euo pipefail
+          # A duplicate mapping key is silently resolved by most parsers (the last one wins) and
+          # rejected by strict ones. The bundled Postgres resources once carried `app: postgres`
+          # followed by `app: bl`, so they were labelled as BridgeLink. PyYAML keeps the last key
+          # too, so a custom loader is needed to see it at all.
+          helm template bl charts/bridgelink --set webadmin.enabled=true --set webadmin.acceptLicense=true \
+            > /tmp/all.yaml
+          python3 - <<'PY'
+          import yaml
+          class Strict(yaml.SafeLoader):
+              pass
+          def mapping(loader, node):
+              # Skip `<<` merge keys: SafeLoader cannot construct their tag, and merging is not duplication.
+              keys = [loader.construct_object(k) for k, _ in node.value if k.tag != 'tag:yaml.org,2002:merge']
+              dupes = sorted({str(k) for k in keys if keys.count(k) > 1})
+              if dupes:
+                  raise AssertionError(f'duplicate key(s) {dupes} at rendered line {node.start_mark.line + 1}')
+              return dict(yaml.SafeLoader.construct_mapping(loader, node))
+          Strict.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, mapping)
+          for path in ('/tmp/rendered.yaml', '/tmp/all.yaml'):
+              docs = [d for d in yaml.load_all(open(path), Loader=Strict) if d]
+              print(f'{path}: {len(docs)} documents, no duplicate keys')
+
+          docs = [d for d in yaml.safe_load_all(open('/tmp/rendered.yaml')) if d]
+          pg = [d for d in docs if d['metadata']['name'].startswith('bl-bridgelink-postgres')]
+          assert {d['kind'] for d in pg} == {'Deployment', 'Service', 'PersistentVolumeClaim', 'ConfigMap'}, \
+              f"unexpected Postgres resources: {sorted(d['kind'] for d in pg)}"
+          for d in pg:
+              app = d['metadata']['labels'].get('app')
+              assert app == 'postgres', f"{d['kind']} {d['metadata']['name']} is labelled app={app!r}"
+          # A Deployment's selector cannot change after creation, so an upgrade with a different one
+          # fails. Pin it to what the chart has always rendered.
+          dep = next(d for d in pg if d['kind'] == 'Deployment')
+          want = {'app': 'postgres', 'app.kubernetes.io/instance': 'bl'}
+          assert dep['spec']['selector']['matchLabels'] == want, \
+              f"Postgres selector changed to {dep['spec']['selector']['matchLabels']}; existing releases cannot upgrade"
+          svc = next(d for d in pg if d['kind'] == 'Service')
+          assert svc['spec']['selector'] == want, f"Postgres Service selector is {svc['spec']['selector']}"
+          print('Postgres resources labelled app=postgres; selector unchanged')
+          PY
+
       - name: WebAdmin is off by default
         run: |
           set -euo pipefail
