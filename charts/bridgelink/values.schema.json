@@ -304,7 +304,7 @@
         },
         "enabled": {
           "default": "true",
-          "description": "Enable bundled PostgreSQL deployment Set to false to use external database",
+          "description": "Deploy a bundled PostgreSQL for evaluation only (single pod, no backups). Set to false and use an external database such as Amazon RDS for production",
           "required": [],
           "title": "enabled"
         },

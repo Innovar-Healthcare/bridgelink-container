@@ -131,6 +131,11 @@ channels (File, Database and SFTP readers) could process the same work twice.
 
 The chart supports different types of persistence:
 
+The bundled PostgreSQL (`postgres.enabled: true`, the default) is for **evaluation only**. It runs as a
+single pod on one zone-bound volume with no backups. For production, set `postgres.enabled: false` and
+use an external database such as Amazon RDS. The bundled instance requires a password for every TCP
+connection (`scram-sha-256`).
+
 1. **PostgreSQL Data**:
    ```yaml
    postgres:

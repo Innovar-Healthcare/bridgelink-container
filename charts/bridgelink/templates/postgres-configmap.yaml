@@ -22,9 +22,12 @@ data:
     lc_time = 'en_US.utf8'
     default_text_search_config = 'pg_catalog.english'
 
+  # Every TCP connection needs a password. The Unix socket stays `trust`: only processes inside this
+  # container can reach it, and the image's first-start init scripts connect through it.
   pg_hba.conf: |
     local   all             all                                     trust
-    host    all             all             127.0.0.1/32           trust
-    host    all             all             ::1/128                 trust
-    host    all             all             0.0.0.0/0              trust
+    host    all             all             127.0.0.1/32            scram-sha-256
+    host    all             all             ::1/128                 scram-sha-256
+    host    all             all             0.0.0.0/0               scram-sha-256
+    host    all             all             ::/0                    scram-sha-256
 {{- end }}

@@ -156,7 +156,9 @@ bridgelink:
 
 # @section PostgreSQL Settings
 postgres:
-  # -- Enable PostgreSQL deployment (set to false to use external database)
+  # -- Deploy a bundled PostgreSQL for evaluation. It is a single pod on one zone-bound volume with
+  # no backups, so it is not suitable for production. For production set this to false and point
+  # BridgeLink at an external database such as Amazon RDS. TCP connections require a password.
   enabled: true
 
   image:

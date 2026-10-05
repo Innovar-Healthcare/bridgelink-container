@@ -133,6 +133,11 @@ channels (File, Database and SFTP readers) could process the same work twice.
 
 The chart supports different types of persistence:
 
+The bundled PostgreSQL (`postgres.enabled: true`, the default) is for **evaluation only**. It runs as a
+single pod on one zone-bound volume with no backups. For production, set `postgres.enabled: false` and
+use an external database such as Amazon RDS. The bundled instance requires a password for every TCP
+connection (`scram-sha-256`).
+
 1. **PostgreSQL Data**:
    ```yaml
    postgres:
@@ -199,7 +204,7 @@ not apply.
 | postgres.credentials.database | string | `"bridgelinkdb"` | PostgreSQL database name |
 | postgres.credentials.password | string | `"bridgelinktest"` | PostgreSQL password |
 | postgres.credentials.username | string | `"bridgelinktest"` | PostgreSQL username |
-| postgres.enabled | bool | `true` | Enable PostgreSQL deployment (set to false to use external database) |
+| postgres.enabled | bool | `true` | Deploy a bundled PostgreSQL for evaluation. It is a single pod on one zone-bound volume with no backups, so it is not suitable for production. For production set this to false and point BridgeLink at an external database such as Amazon RDS. TCP connections require a password. |
 | postgres.image.pullPolicy | string | `"IfNotPresent"` | PostgreSQL image pull policy |
 | postgres.image.repository | string | `"postgres"` | PostgreSQL image repository |
 | postgres.image.tag | string | `"16-alpine"` | PostgreSQL image tag (kept in sync with docker-compose.yml) |

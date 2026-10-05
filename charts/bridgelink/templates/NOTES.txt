@@ -42,10 +42,16 @@ WebAdmin (connected to this release's BridgeLink server):
   WebAdmin serves a self-signed certificate by default, so expect a browser warning.
 {{- end }}
 
-Database connection:
+{{- if .Values.postgres.enabled }}
+
+Database connection (bundled PostgreSQL):
   Host: {{ include "bridgelink.fullname" . }}-postgres.{{ .Release.Namespace }}.svc:5432
   Database: {{ .Values.postgres.credentials.database }}
   Username: {{ .Values.postgres.credentials.username }}
+
+  The bundled PostgreSQL is for evaluation only: one pod, one zone-bound volume, no backups.
+  For production, set postgres.enabled=false and use an external database such as Amazon RDS.
+{{- end }}
 
 {{ if or .Values.bridgelink.startupProbe .Values.bridgelink.readinessProbe }}
 NOTE — you have enabled the exec probes. Check your image carries the probe binary:
