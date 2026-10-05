@@ -118,19 +118,16 @@ This chart deploys BridgeLink with the following components:
 - Ingress resources (optional)
 - Monitoring and metrics endpoints (optional)
 
-## High Availability
+## Replicas and upgrades
 
-For production deployments, consider:
-1. Setting up multiple replicas
-2. Configuring pod anti-affinity
-3. Using node selectors or taints/tolerations
-4. Implementing proper backup strategies
+The chart runs **one** BridgeLink pod. `bridgelink.replicaCount` accepts only `0` or `1`: more than one
+active node needs the Channel Coordinator plugin and a separate server ID per pod, which this chart
+does not set up.
 
-```yaml
-replicaCount: 3
-podAntiAffinity:
-  enabled: true
-```
+Both the BridgeLink and the bundled PostgreSQL Deployments use `strategy: Recreate`, so `helm upgrade`
+stops the old pod before starting the new one. Expect a short outage during an upgrade. That is
+deliberate: a rolling update would briefly run two engines against the same database, and polling
+channels (File, Database and SFTP readers) could process the same work twice.
 
 ## Persistence
 
@@ -185,7 +182,7 @@ not apply.
 | bridgelink.livenessProbe | object | `{"failureThreshold":3,"httpGet":{"httpHeaders":[{"name":"X-Requested-With","value":"kube-probe"}],"path":"/api/server/version","port":"https","scheme":"HTTPS"},"periodSeconds":20,"timeoutSeconds":5}` | Liveness probe. Enabled by default: it is a plain HTTPS GET and works against any image. Restarts the pod only when the API stops answering at all.  Deliberately /api/server/version, NOT /api/server/status. When the database goes away, getStatus() calls isDatabaseRunning() -> testDatabase(), which blocks on the connection pool, so /status does not return UNAVAILABLE — it HANGS (measured: no response in 10s, while /version answered 200 in 73ms on the same server; tracked as a Core defect). A liveness probe pointed at /status would therefore time out and restart the pod after failureThreshold x periodSeconds of any database outage, which is exactly what liveness must not do: a restart does not fix a database. /version reads an in-memory value and needs no authentication (@DontCheckAuthorized), so it answers iff the JVM and Jetty are actually serving.  kubelet does not verify the certificate on an HTTPS probe, so the self-signed keystore needs no configuration. The X-Requested-With header is required (server.api.require-requested-with, default true) — without it the endpoint returns HTTP 400 even though it needs no authentication. |
 | bridgelink.nodeSelector | object | `{}` | Node selector for BridgeLink pods |
 | bridgelink.readinessProbe | string | `nil` | Readiness probe. Disabled by default for the same reason as startupProbe; see above. Note that until you enable it, a pod is considered Ready as soon as its container is running, which means Service traffic can reach BridgeLink while the engine is still deploying channels. |
-| bridgelink.replicaCount | int | `1` | Number of BridgeLink replicas to deploy |
+| bridgelink.replicaCount | int | `1` | Number of BridgeLink pods: 0 or 1. The schema rejects anything higher, because more than one active node needs the Channel Coordinator plugin and a server ID per pod, which this chart does not set up. Upgrades stop the old pod before starting the new one (`strategy: Recreate`). |
 | bridgelink.resources.limits.cpu | string | `"2000m"` | CPU limit for BridgeLink pods |
 | bridgelink.resources.limits.memory | string | `"2Gi"` | Memory limit for BridgeLink pods |
 | bridgelink.resources.requests.cpu | string | `"500m"` | CPU request for BridgeLink pods |

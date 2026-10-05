@@ -105,9 +105,12 @@
         },
         "replicaCount": {
           "default": "1",
-          "description": "Number of BridgeLink pods to run",
+          "description": "Number of BridgeLink pods to run: 0 or 1. More than one active node needs the Channel Coordinator plugin and a server ID per pod, which this chart does not set up",
+          "maximum": 1,
+          "minimum": 0,
           "required": [],
-          "title": "replicaCount"
+          "title": "replicaCount",
+          "type": "integer"
         },
         "runAsUser": {
           "default": 1000,

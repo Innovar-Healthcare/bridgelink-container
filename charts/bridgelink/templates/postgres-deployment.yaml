@@ -8,6 +8,10 @@ metadata:
     {{- include "bridgelink.labels" . | nindent 4 }}
 spec:
   replicas: 1
+  # Recreate: the data volume is ReadWriteOnce, so a rolling update can stall on a Multi-Attach error
+  # when the new pod is scheduled on another node while the old one still holds the volume.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: postgres

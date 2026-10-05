@@ -114,6 +114,31 @@ jobs:
             | grep -q "livenessProbe:" && { echo "::error::livenessProbe=null did not disable it"; exit 1; }
           echo "livenessProbe=null disables it"
 
+      - name: Upgrades never run two pods at once
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import yaml
+          docs = [d for d in yaml.safe_load_all(open('/tmp/rendered.yaml')) if d]
+          deps = {d['metadata']['name']: d for d in docs if d['kind'] == 'Deployment'}
+          # BridgeLink: two engines on one server ID and one database can process the same polled
+          # work twice. Postgres: its ReadWriteOnce volume can stall a rolling update on Multi-Attach.
+          for suffix in ('-bl', '-postgres'):
+              m = [d for n, d in deps.items() if n.endswith(suffix)]
+              assert len(m) == 1, f'expected one Deployment *{suffix}, got {len(m)}'
+              strategy = m[0]['spec'].get('strategy', {}).get('type')
+              assert strategy == 'Recreate', f'*{suffix} strategy is {strategy!r}, want Recreate'
+          print('both Deployments use Recreate')
+          PY
+          # More than one active node needs the Channel Coordinator plugin and a server ID per pod.
+          if helm template bl charts/bridgelink --set bridgelink.replicaCount=2 > /tmp/replicas.txt 2>&1; then
+            echo "::error::bridgelink.replicaCount=2 rendered; the schema must cap it at 1"; exit 1
+          fi
+          grep -q "replicaCount" /tmp/replicas.txt \
+            || { echo "::error::the failure does not name replicaCount"; cat /tmp/replicas.txt; exit 1; }
+          helm template bl charts/bridgelink --set bridgelink.replicaCount=0 > /dev/null
+          echo "replicaCount is capped at 1 and 0 is still allowed"
+
       - name: WebAdmin is off by default
         run: |
           set -euo pipefail

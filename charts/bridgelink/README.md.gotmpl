@@ -116,19 +116,16 @@ This chart deploys BridgeLink with the following components:
 - Ingress resources (optional)
 - Monitoring and metrics endpoints (optional)
 
-## High Availability
+## Replicas and upgrades
 
-For production deployments, consider:
-1. Setting up multiple replicas
-2. Configuring pod anti-affinity
-3. Using node selectors or taints/tolerations
-4. Implementing proper backup strategies
+The chart runs **one** BridgeLink pod. `bridgelink.replicaCount` accepts only `0` or `1`: more than one
+active node needs the Channel Coordinator plugin and a separate server ID per pod, which this chart
+does not set up.
 
-```yaml
-replicaCount: 3
-podAntiAffinity:
-  enabled: true
-```
+Both the BridgeLink and the bundled PostgreSQL Deployments use `strategy: Recreate`, so `helm upgrade`
+stops the old pod before starting the new one. Expect a short outage during an upgrade. That is
+deliberate: a rolling update would briefly run two engines against the same database, and polling
+channels (File, Database and SFTP readers) could process the same work twice.
 
 ## Persistence
 

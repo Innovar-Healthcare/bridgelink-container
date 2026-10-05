@@ -6,6 +6,11 @@ metadata:
     {{- include "bridgelink.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.bridgelink.replicaCount }}
+  # Recreate, not the default RollingUpdate: a rolling update starts the new pod before stopping the
+  # old one, and two engines sharing one server ID and one database can process the same polled work
+  # (File, Database, SFTP readers) twice.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       {{- include "bridgelink.selectorLabels" . | nindent 6 }}
