@@ -126,8 +126,13 @@ jobs:
           for suffix in ('-bl', '-postgres'):
               m = [d for n, d in deps.items() if n.endswith(suffix)]
               assert len(m) == 1, f'expected one Deployment *{suffix}, got {len(m)}'
-              strategy = m[0]['spec'].get('strategy', {}).get('type')
-              assert strategy == 'Recreate', f'*{suffix} strategy is {strategy!r}, want Recreate'
+              strategy = m[0]['spec'].get('strategy', {})
+              assert strategy.get('type') == 'Recreate', f"*{suffix} strategy is {strategy.get('type')!r}, want Recreate"
+              # The explicit null is what lets a client-side upgrade of a release created by an older
+              # chart drop the API server's defaulted rollingUpdate block. Without it the upgrade is
+              # rejected: rollingUpdate may not be specified when type is Recreate.
+              assert 'rollingUpdate' in strategy and strategy['rollingUpdate'] is None, \
+                  f'*{suffix} strategy must set rollingUpdate: null explicitly, got {strategy}'
           print('both Deployments use Recreate')
           PY
           # More than one active node needs the Channel Coordinator plugin and a server ID per pod.

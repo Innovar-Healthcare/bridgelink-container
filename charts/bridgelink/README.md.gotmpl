@@ -193,7 +193,11 @@ The chart supports different types of persistence:
 - **`bridgelink.replicaCount` must be the integer `0` or `1`.** Higher values, and quoted strings such
   as `"1"`, are rejected by the schema.
 - **Upgrades use `strategy: Recreate`**, so expect a short outage while the old pod stops and the new
-  one starts.
+  one starts. If this upgrade fails with `spec.strategy.rollingUpdate: Forbidden: may not be specified
+  when strategy type is 'Recreate'`, the release was installed with Helm 4's server-side apply, which
+  cannot remove the old rolling-update settings. Nothing is restarted when it fails. Run the same
+  upgrade once more with `--server-side=false`; later upgrades need no flag. Releases installed with
+  Helm 3, or with `--server-side=false`, upgrade without it.
 
 **Bundled PostgreSQL default moved from `14-alpine` to `16-alpine` (chart 0.2.0).** PostgreSQL does
 not upgrade its on-disk data directory across major versions automatically, so an existing release

@@ -11,6 +11,10 @@ spec:
   # (File, Database, SFTP readers) twice.
   strategy:
     type: Recreate
+    # Not redundant. A release created by an older chart has the API server's default
+    # rollingUpdate block, which Kubernetes rejects alongside Recreate; the explicit null makes a
+    # client-side upgrade remove it. See the README's Upgrading section for server-side apply.
+    rollingUpdate: null
   selector:
     matchLabels:
       {{- include "bridgelink.selectorLabels" . | nindent 6 }}
