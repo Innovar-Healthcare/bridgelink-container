@@ -194,10 +194,15 @@ The chart supports different types of persistence:
   as `"1"`, are rejected by the schema.
 - **Upgrades use `strategy: Recreate`**, so expect a short outage while the old pod stops and the new
   one starts. If this upgrade fails with `spec.strategy.rollingUpdate: Forbidden: may not be specified
-  when strategy type is 'Recreate'`, the release was installed with Helm 4's server-side apply, which
-  cannot remove the old rolling-update settings. Nothing is restarted when it fails. Run the same
-  upgrade once more with `--server-side=false`; later upgrades need no flag. Releases installed with
-  Helm 3, or with `--server-side=false`, upgrade without it.
+  when strategy type is 'Recreate'`, your tool applied it server-side: Helm 4 for a release it
+  installed, Argo CD with `ServerSideApply=true`, or `kubectl apply --server-side`. Server-side apply
+  cannot remove the rolling-update settings Kubernetes added to the old Deployments. Nothing restarts
+  when it fails. Switch each Deployment the error names once (this restarts nothing either), then run
+  the upgrade again:
+  `kubectl patch deployment <name> --type=json -p='[{"op":"replace","path":"/spec/strategy","value":{"type":"Recreate"}}]'`
+  With Helm you can instead rerun the upgrade with `--server-side=false`; Helm then keeps managing that
+  release client-side, and `--server-side=true` once switches it back. Helm 3 and plain `kubectl apply`
+  upgrade without either step.
 
 **Bundled PostgreSQL default moved from `14-alpine` to `16-alpine` (chart 0.2.0).** PostgreSQL does
 not upgrade its on-disk data directory across major versions automatically, so an existing release
