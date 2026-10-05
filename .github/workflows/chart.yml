@@ -32,7 +32,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Pinned: the action's default is whatever Helm release is newest, so the major version, and
+      # with it client-side vs server-side apply, would change under this gate without a commit.
       - uses: azure/setup-helm@v4
+        with:
+          version: v4.3.0
       - name: helm lint
         run: helm lint charts/bridgelink
   
@@ -408,3 +412,49 @@ jobs:
             exit 1
           fi
           echo "chart README is current"
+
+  kind:
+    # Installs the chart on a real cluster (kind, Kubernetes in Docker) and checks what `helm
+    # template` cannot: that BridgeLink becomes Ready, that an upgrade never runs two BridgeLink pods,
+    # that the bundled Postgres runs the config the chart ships and refuses passwordless connections,
+    # and that an external database works. A separate job because it takes several minutes, so the
+    # template checks above still report in under one. charts/test/kind-test.sh has the detail.
+    needs: chart
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # Helm 3 upgrades with a client-side three-way merge; Helm 4 uses server-side apply for the
+        # releases it installs. They can disagree about removing a field (they did for the move to
+        # strategy: Recreate), so the chart is installed and upgraded under both.
+        helm: [v3.22.0, v4.3.0]
+    name: kind (helm ${{ matrix.helm }})
+    env:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # UPGRADE_FROM checks out the base branch's chart
+      - uses: azure/setup-helm@v4
+        with:
+          version: ${{ matrix.helm }}
+      # Authenticated pulls, as in build-images.yml: every image would otherwise be pulled
+      # anonymously from the runner's shared address. Skipped where the secret is unavailable
+      # (pull requests from forks); the test then pulls anonymously.
+      - name: Log in to Docker Hub (authenticated pulls)
+        if: env.DOCKERHUB_USERNAME != ''
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - uses: helm/kind-action@v1
+        with:
+          install_only: true   # the script creates and deletes its own cluster
+      - name: Install, upgrade and exercise the chart on kind
+        env:
+          # On a pull request, install the base branch's chart and upgrade to this one: the path an
+          # existing release takes when the PR merges. On main, install and upgrade this checkout.
+          UPGRADE_FROM: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || '' }}
+          PULL_IMAGES: "1"   # pull on the host (logged in above) and load into kind
+        run: bash charts/test/kind-test.sh
