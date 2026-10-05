@@ -30,6 +30,10 @@ permissions:
 jobs:
   chart:
     runs-on: ubuntu-latest
+    env:
+      # A new install must set a server ID, and every render below is a new install, so each one
+      # passes this. The step on server IDs renders without it on purpose.
+      SID: --set-string bridgelink.environment.SERVER_ID=3f0c2a9e-5b1d-4c7e-8a6f-0d9e1b2c3a4f
     steps:
       - uses: actions/checkout@v4
       # Pinned: the action's default is whatever Helm release is newest, so the major version, and
@@ -38,10 +42,10 @@ jobs:
         with:
           version: v4.3.0
       - name: helm lint
-        run: helm lint charts/bridgelink
+        run: helm lint charts/bridgelink $SID
   
       - name: helm template (defaults)
-        run: helm template bl charts/bridgelink > /tmp/rendered.yaml
+        run: helm template bl charts/bridgelink $SID > /tmp/rendered.yaml
   
       - name: Default probes are safe against any published image
         run: |
@@ -87,7 +91,7 @@ jobs:
           # values.yaml documents a block to paste in once the image carries the probe. If that
           # block stops working, the docs are lying, so render it here rather than trusting prose.
           PROBE='{"exec":{"command":["java","-XX:TieredStopAtLevel=1","-XX:+UseSerialGC","-XX:-UsePerfData","-Xmx32m","-cp","/opt/bridgelink/bootstrap","BridgeLinkHealthcheck"]},"periodSeconds":10,"failureThreshold":30,"timeoutSeconds":5}'
-          helm template bl charts/bridgelink \
+          helm template bl charts/bridgelink $SID \
             --set-json "bridgelink.startupProbe=$PROBE" \
             --set-json "bridgelink.readinessProbe=$PROBE" > /tmp/enabled.yaml
           python3 - <<'PY'
@@ -110,11 +114,11 @@ jobs:
       - name: Schema accepts probe overrides
         run: |
           set -euo pipefail
-          helm template bl charts/bridgelink \
+          helm template bl charts/bridgelink $SID \
             --set bridgelink.livenessProbe.periodSeconds=60 > /dev/null
           echo "probe overrides accepted by values.schema.json"
           # The null default must stay renderable, and explicitly nulling liveness must work too.
-          helm template bl charts/bridgelink --set bridgelink.livenessProbe=null \
+          helm template bl charts/bridgelink $SID --set bridgelink.livenessProbe=null \
             | grep -q "livenessProbe:" && { echo "::error::livenessProbe=null did not disable it"; exit 1; }
           echo "livenessProbe=null disables it"
 
@@ -140,13 +144,59 @@ jobs:
           print('both Deployments use Recreate')
           PY
           # More than one active node needs the Channel Coordinator plugin and a server ID per pod.
-          if helm template bl charts/bridgelink --set bridgelink.replicaCount=2 > /tmp/replicas.txt 2>&1; then
+          if helm template bl charts/bridgelink $SID --set bridgelink.replicaCount=2 > /tmp/replicas.txt 2>&1; then
             echo "::error::bridgelink.replicaCount=2 rendered; the schema must cap it at 1"; exit 1
           fi
           grep -q "replicaCount" /tmp/replicas.txt \
             || { echo "::error::the failure does not name replicaCount"; cat /tmp/replicas.txt; exit 1; }
-          helm template bl charts/bridgelink --set bridgelink.replicaCount=0 > /dev/null
+          helm template bl charts/bridgelink $SID --set bridgelink.replicaCount=0 > /dev/null
           echo "replicaCount is capped at 1 and 0 is still allowed"
+
+      - name: A new install needs a server ID, and an upgrade keeps the old default
+        run: |
+          set -euo pipefail
+          # Licenses are issued against the server ID, so the chart ships none: a new install without
+          # one must fail, and print a generated ID to use. An upgrade without one keeps the ID every
+          # release had before, because BridgeLink sends only queued messages stamped with its own
+          # server ID. helm template renders as an install unless given --is-upgrade, so these renders
+          # deliberately leave out $SID.
+          LEGACY=7d760af2-680a-4a19-b9a2-c4685df61ebc
+          if helm template bl charts/bridgelink > /tmp/noid.txt 2>&1; then
+            echo "::error::a new install with no SERVER_ID rendered"; exit 1
+          fi
+          grep -q "bridgelink.environment.SERVER_ID" /tmp/noid.txt \
+            || { echo "::error::the failure does not name bridgelink.environment.SERVER_ID"; cat /tmp/noid.txt; exit 1; }
+          grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}' /tmp/noid.txt | grep -qv "$LEGACY" \
+            || { echo "::error::the failure prints no newly generated ID to use"; cat /tmp/noid.txt; exit 1; }
+          echo "a new install with no server ID is refused, with a generated ID to use"
+          helm template bl charts/bridgelink --is-upgrade > /tmp/id-upgrade.yaml
+          helm template bl charts/bridgelink --set-string bridgelink.environment.SERVER_ID=ABC-own-id > /tmp/id-install.yaml
+          helm template bl charts/bridgelink --is-upgrade \
+            --set-string bridgelink.environment.SERVER_ID=ABC-own-id > /tmp/id-upgrade-own.yaml
+          helm template bl charts/bridgelink --set-json \
+            'bridgelink.extraEnv=[{"name":"SERVER_ID","valueFrom":{"secretKeyRef":{"name":"bl-id","key":"id"}}}]' \
+            > /tmp/id-extra.yaml
+          python3 - <<'PY'
+          import os, yaml
+          def ids(path):
+              docs = [d for d in yaml.safe_load_all(open(path)) if d]
+              dep = [d for d in docs if d['kind'] == 'Deployment' and d['metadata']['name'].endswith('-bl')][0]
+              return [e for e in dep['spec']['template']['spec']['containers'][0]['env'] if e['name'] == 'SERVER_ID']
+          legacy = '7d760af2-680a-4a19-b9a2-c4685df61ebc'
+          got = ids('/tmp/id-upgrade.yaml')
+          assert got == [{'name': 'SERVER_ID', 'value': legacy}], f'an upgrade with no ID must keep {legacy}, got {got}'
+          for path in ('/tmp/id-install.yaml', '/tmp/id-upgrade-own.yaml'):
+              got = ids(path)
+              assert got == [{'name': 'SERVER_ID', 'value': 'ABC-own-id'}], \
+                  f'{path}: an explicit ID must be used unchanged, got {got}'
+          got = ids('/tmp/id-extra.yaml')
+          assert len(got) == 1 and got[0].get('valueFrom', {}).get('secretKeyRef') == {'name': 'bl-id', 'key': 'id'}, \
+              f'SERVER_ID from extraEnv must render once, from the Secret, got {got}'
+          want = os.environ['SID'].rsplit('=', 1)[1]
+          got = ids('/tmp/rendered.yaml')
+          assert got == [{'name': 'SERVER_ID', 'value': want}], f'the default render does not carry its ID: {got}'
+          print('an upgrade keeps the old default; explicit and extraEnv IDs are used as given')
+          PY
 
       - name: Database settings in values reach the container
         run: |
@@ -163,7 +213,7 @@ jobs:
               MP_DATABASE_USERNAME: bladmin
               MP_DATABASE_PASSWORD: "p@ss,w0rd"
           EOF
-          helm template bl charts/bridgelink -f /tmp/external-db.yaml > /tmp/external.yaml
+          helm template bl charts/bridgelink $SID -f /tmp/external-db.yaml > /tmp/external.yaml
           python3 - <<'PY'
           import yaml
           def bl_env(path):
@@ -193,7 +243,7 @@ jobs:
           PY
           # Without the bundled Postgres and without a URL there is nothing to connect to: fail the
           # render with a message that names the setting, rather than start a pod that cannot.
-          if helm template bl charts/bridgelink --set postgres.enabled=false > /tmp/nourl.txt 2>&1; then
+          if helm template bl charts/bridgelink $SID --set postgres.enabled=false > /tmp/nourl.txt 2>&1; then
             echo "::error::postgres.enabled=false with no MP_DATABASE_URL rendered"; exit 1
           fi
           grep -q "MP_DATABASE_URL" /tmp/nourl.txt \
@@ -201,7 +251,7 @@ jobs:
           echo "missing external URL is refused"
 
           # Embedded Derby needs no URL: it must render, with no database variables injected.
-          helm template bl charts/bridgelink --set postgres.enabled=false \
+          helm template bl charts/bridgelink $SID --set postgres.enabled=false \
             --set bridgelink.environment.MP_DATABASE=derby > /tmp/derby.yaml
           # Values files copied from older chart versions carry the old placeholder defaults. They
           # must keep resolving to the bundled database, not reach the container as literal text.
@@ -212,7 +262,7 @@ jobs:
               MP_DATABASE_USERNAME: "{{ .Values.postgres.credentials.username }}"
               MP_DATABASE_PASSWORD: "{{ .Values.postgres.credentials.password }}"
           EOF
-          helm template bl charts/bridgelink -f /tmp/legacy-db.yaml > /tmp/legacy.yaml
+          helm template bl charts/bridgelink $SID -f /tmp/legacy-db.yaml > /tmp/legacy.yaml
           python3 - <<'PY'
           import yaml
           def bl_env(path):
@@ -254,7 +304,7 @@ jobs:
           PY
           # With a password required, Postgres and BridgeLink must receive the same credentials. An
           # unquoted env value would turn "#" into a YAML comment and initialise a different password.
-          helm template bl charts/bridgelink --set-string 'postgres.credentials.password=s3cret #1' \
+          helm template bl charts/bridgelink $SID --set-string 'postgres.credentials.password=s3cret #1' \
             --set-string postgres.credentials.username=yes --set-string postgres.credentials.database=0755 \
             > /tmp/pgcreds.yaml
           python3 - <<'PY'
@@ -279,7 +329,7 @@ jobs:
           # rejected by strict ones. The bundled Postgres resources once carried `app: postgres`
           # followed by `app: bl`, so they were labelled as BridgeLink. PyYAML keeps the last key
           # too, so a custom loader is needed to see it at all.
-          helm template bl charts/bridgelink --set webadmin.enabled=true --set webadmin.acceptLicense=true \
+          helm template bl charts/bridgelink $SID --set webadmin.enabled=true --set webadmin.acceptLicense=true \
             > /tmp/all.yaml
           python3 - <<'PY'
           import yaml
@@ -324,8 +374,8 @@ jobs:
           # bundled Postgres is excluded: the official image starts as root, and it is documented as
           # evaluation-only. charts/test/kind-test.sh proves real admission on a cluster.
           WA="--set webadmin.enabled=true --set webadmin.acceptLicense=true"
-          helm template bl charts/bridgelink $WA > /tmp/psa-default.yaml
-          helm template bl charts/bridgelink $WA --set bridgelink.keystore.existingSecret=ks \
+          helm template bl charts/bridgelink $SID $WA > /tmp/psa-default.yaml
+          helm template bl charts/bridgelink $SID $WA --set bridgelink.keystore.existingSecret=ks \
             --set bridgelink.runAsUser=65532 --set bridgelink.runAsGroup=65532 > /tmp/psa-secret.yaml
           python3 - <<'PY'
           import yaml
@@ -363,10 +413,10 @@ jobs:
           # The data-encryption key lives only in appdata/keystore.jks. On an emptyDir, or wiped by an
           # init container, every replaced pod generates a new key and earlier encrypted content can
           # no longer be read.
-          helm template bl charts/bridgelink > /tmp/ad-default.yaml
-          helm template bl charts/bridgelink --set bridgelink.persistence.enabled=false > /tmp/ad-off.yaml
-          helm template bl charts/bridgelink --set bridgelink.persistence.existingClaim=mine > /tmp/ad-claim.yaml
-          helm template bl charts/bridgelink --set bridgelink.keystore.existingSecret=ks \
+          helm template bl charts/bridgelink $SID > /tmp/ad-default.yaml
+          helm template bl charts/bridgelink $SID --set bridgelink.persistence.enabled=false > /tmp/ad-off.yaml
+          helm template bl charts/bridgelink $SID --set bridgelink.persistence.existingClaim=mine > /tmp/ad-claim.yaml
+          helm template bl charts/bridgelink $SID --set bridgelink.keystore.existingSecret=ks \
             --set bridgelink.persistence.enabled=false \
             --set bridgelink.helperImage.repository=123456789012.dkr.ecr.us-east-1.amazonaws.com/busybox \
             --set bridgelink.helperImage.tag=1.36.1 \
@@ -445,7 +495,7 @@ jobs:
             resources: {requests: {ephemeral-storage: 1Gi}}
           webadmin: {enabled: true, acceptLicense: true}
           EOF
-          helm template bl charts/bridgelink -f /tmp/options.yaml > /tmp/options-out.yaml
+          helm template bl charts/bridgelink $SID -f /tmp/options.yaml > /tmp/options-out.yaml
           python3 - <<'PY'
           import yaml
           docs = [d for d in yaml.safe_load_all(open('/tmp/options-out.yaml')) if d]
@@ -475,19 +525,19 @@ jobs:
           # Open where Kubernetes defines the shape, strict where the chart does: a misspelt chart
           # key must still fail the install rather than be silently ignored.
           for bad in bridgelink.persistance.enabled=true serviceAccount.crate=true bridgelink.image.tagg=x; do
-            if helm template bl charts/bridgelink --set "$bad" > /tmp/typo.txt 2>&1; then
+            if helm template bl charts/bridgelink $SID --set "$bad" > /tmp/typo.txt 2>&1; then
               echo "::error::the schema accepted the misspelt key in $bad"; exit 1
             fi
           done
           echo "misspelt chart keys are still rejected"
           # Helm renders an unquoted large number as 3e+06, which BridgeLink would read verbatim.
-          if helm template bl charts/bridgelink --set bridgelink.environment.MP_X=3000000 > /tmp/num.txt 2>&1; then
+          if helm template bl charts/bridgelink $SID --set bridgelink.environment.MP_X=3000000 > /tmp/num.txt 2>&1; then
             echo "::error::an unquoted number in bridgelink.environment was accepted"; exit 1
           fi
           echo "unquoted numbers in environment are rejected"
           # An external URL from a Secret alone, with nothing in environment: the URL helper must not
           # fail the render for a variable extraEnv already supplies.
-          helm template bl charts/bridgelink --set postgres.enabled=false --set-json \
+          helm template bl charts/bridgelink $SID --set postgres.enabled=false --set-json \
             'bridgelink.extraEnv=[{"name":"MP_DATABASE_URL","valueFrom":{"secretKeyRef":{"name":"db","key":"url"}}}]' \
             > /tmp/url-secret.yaml
           grep -q "key: url" /tmp/url-secret.yaml && [ "$(grep -c 'name: MP_DATABASE_URL' /tmp/url-secret.yaml)" = 1 ] \
@@ -517,20 +567,24 @@ jobs:
           # Classic ELB serving the admin API, so both Services default to ClusterIP. Channel listeners
           # need extra ports, and an internal NLB needs annotations, so those are settable.
           WA="--set webadmin.enabled=true --set webadmin.acceptLicense=true"
-          helm template bl charts/bridgelink $WA > /tmp/svc-default.yaml
+          helm template bl charts/bridgelink $SID $WA > /tmp/svc-default.yaml
           # deploy-minikube.sh writes its own values file and waits for a LoadBalancer address. Render
           # exactly what it writes, so it keeps working whatever the chart default is.
           sed -n '/cat > "\$MINIKUBE_VALUES" << EOL$/,/^EOL$/p' scripts/deploy-minikube.sh | sed '1d;$d' > /tmp/minikube-values.yaml
           [ -s /tmp/minikube-values.yaml ] || { echo "::error::could not extract the values file from scripts/deploy-minikube.sh"; exit 1; }
-          helm template bl charts/bridgelink -f /tmp/minikube-values.yaml > /tmp/svc-minikube.yaml
-          helm template bl charts/bridgelink --set bridgelink.service.ports.http=null > /tmp/svc-nohttp.yaml
+          # The script passes the server ID on its helm command line rather than in that file.
+          sed -n '/^helm upgrade --install /,/[^\\]$/p' scripts/deploy-minikube.sh > /tmp/minikube-helm.txt
+          grep -q -- '--set-string bridgelink.environment.SERVER_ID="\$SERVER_ID"' /tmp/minikube-helm.txt \
+            || { echo "::error::the helm command in scripts/deploy-minikube.sh does not pass bridgelink.environment.SERVER_ID, so its install fails"; cat /tmp/minikube-helm.txt; exit 1; }
+          helm template bl charts/bridgelink $SID -f /tmp/minikube-values.yaml > /tmp/svc-minikube.yaml
+          helm template bl charts/bridgelink $SID --set bridgelink.service.ports.http=null > /tmp/svc-nohttp.yaml
           cat > /tmp/svc-ports.yaml <<'EOF'
           bridgelink:
             extraPorts:
               - {name: mllp-adt, containerPort: 6661}
               - {name: syslog, containerPort: 5514, port: 514, protocol: UDP}
           EOF
-          helm template bl charts/bridgelink -f /tmp/svc-ports.yaml > /tmp/svc-main.yaml
+          helm template bl charts/bridgelink $SID -f /tmp/svc-ports.yaml > /tmp/svc-main.yaml
           cat > /tmp/svc-lb.yaml <<'EOF'
           bridgelink:
             service:
@@ -548,9 +602,9 @@ jobs:
               type: LoadBalancer
               loadBalancerSourceRanges: [172.16.0.0/12]
           EOF
-          helm template bl charts/bridgelink $WA -f /tmp/svc-ports.yaml -f /tmp/svc-lb.yaml > /tmp/svc-listener.yaml
+          helm template bl charts/bridgelink $SID $WA -f /tmp/svc-ports.yaml -f /tmp/svc-lb.yaml > /tmp/svc-listener.yaml
           # Same settings with ClusterIP: the API server rejects the load-balancer-only fields there.
-          helm template bl charts/bridgelink $WA -f /tmp/svc-ports.yaml -f /tmp/svc-lb.yaml \
+          helm template bl charts/bridgelink $SID $WA -f /tmp/svc-ports.yaml -f /tmp/svc-lb.yaml \
             --set bridgelink.service.type=ClusterIP --set bridgelink.listenerService.type=ClusterIP \
             --set webadmin.service.type=ClusterIP > /tmp/svc-clusterip.yaml
           python3 - <<'PY'
@@ -614,7 +668,7 @@ jobs:
           for bad in '[{"name":"MLLP","containerPort":6661}]' '[{"name":"a-sixteen-chars1","containerPort":6661}]' \
                      '[{"name":"https","containerPort":6661}]' '[{"name":"mllp","containerPort":6661,"protocol":"tcp"}]' \
                      '[{"name":"mllp","containerPort":70000}]' '[{"name":"mllp"}]' '[{"name":"mllp","containerPort":6661,"targetPort":1}]'; do
-            if helm template bl charts/bridgelink --set-json "bridgelink.extraPorts=$bad" > /tmp/badport.txt 2>&1; then
+            if helm template bl charts/bridgelink $SID --set-json "bridgelink.extraPorts=$bad" > /tmp/badport.txt 2>&1; then
               echo "::error::the schema accepted extraPorts=$bad"; exit 1
             fi
           done
@@ -624,22 +678,22 @@ jobs:
           for bad in '[{"name":"mllp","containerPort":6661},{"name":"mllp","containerPort":6662}]' \
                      '[{"name":"mllp","containerPort":8443}]' '[{"name":"mllp","containerPort":6661,"port":8080}]' \
                      '[{"name":"a","containerPort":6661},{"name":"b","containerPort":6662,"port":6661}]'; do
-            if helm template bl charts/bridgelink --set-json "bridgelink.extraPorts=$bad" > /tmp/clash.txt 2>&1; then
+            if helm template bl charts/bridgelink $SID --set-json "bridgelink.extraPorts=$bad" > /tmp/clash.txt 2>&1; then
               echo "::error::clashing extraPorts=$bad rendered"; exit 1
             fi
             grep -q "bridgelink.extraPorts" /tmp/clash.txt \
               || { echo "::error::the failure for $bad does not name bridgelink.extraPorts"; cat /tmp/clash.txt; exit 1; }
           done
           # The same numbers are fine where they do not clash: another protocol, or HTTP off.
-          helm template bl charts/bridgelink --set bridgelink.service.ports.http=null --set-json \
+          helm template bl charts/bridgelink $SID --set bridgelink.service.ports.http=null --set-json \
             'bridgelink.extraPorts=[{"name":"udp","containerPort":8443,"protocol":"UDP"},{"name":"web","containerPort":6661,"port":8080}]' > /dev/null
           echo "clashing extraPorts are refused, non-clashing ones are not"
-          if helm template bl charts/bridgelink --set bridgelink.service.type=Loadbalancer > /tmp/badtype.txt 2>&1; then
+          if helm template bl charts/bridgelink $SID --set bridgelink.service.type=Loadbalancer > /tmp/badtype.txt 2>&1; then
             echo "::error::the schema accepted service.type=Loadbalancer"; exit 1
           fi
           echo "a misspelt Service type is rejected"
           # A Service with no ports is invalid, so the listener Service needs at least one extra port.
-          if helm template bl charts/bridgelink --set bridgelink.listenerService.enabled=true > /tmp/nolistener.txt 2>&1; then
+          if helm template bl charts/bridgelink $SID --set bridgelink.listenerService.enabled=true > /tmp/nolistener.txt 2>&1; then
             echo "::error::listenerService.enabled=true rendered with no extraPorts"; exit 1
           fi
           grep -q "extraPorts" /tmp/nolistener.txt \
@@ -663,7 +717,7 @@ jobs:
           # webadmin.env tries to override every chart-owned variable. The chart must ignore those
           # entries (a duplicate env name is rejected by Kubernetes only at apply time) and keep
           # unrelated extras.
-          helm template bl charts/bridgelink \
+          helm template bl charts/bridgelink $SID \
             --set webadmin.enabled=true --set webadmin.acceptLicense=true \
             --set webadmin.env.BRIDGELINK_SERVER_URL=https://elsewhere:8443 \
             --set webadmin.env.PORT=3000 --set webadmin.env.BL_ACCEPT_LICENSE=0 \
@@ -719,7 +773,7 @@ jobs:
           set -euo pipefail
           # Accepting the WebAdmin license is the user's decision. Enabling WebAdmin without
           # webadmin.acceptLicense must fail the render, not deploy something that accepts it.
-          if helm template bl charts/bridgelink --set webadmin.enabled=true > /tmp/nolicense.txt 2>&1; then
+          if helm template bl charts/bridgelink $SID --set webadmin.enabled=true > /tmp/nolicense.txt 2>&1; then
             echo "::error::webadmin.enabled=true rendered without webadmin.acceptLicense=true"; exit 1
           fi
           grep -q "acceptLicense" /tmp/nolicense.txt \
