@@ -4,8 +4,7 @@ kind: PersistentVolumeClaim
 metadata:
   name: {{ include "bridgelink.fullname" . }}-postgres
   labels:
-    app: postgres
-    {{- include "bridgelink.labels" . | nindent 4 }}
+    {{- include "bridgelink.postgresLabels" . | nindent 4 }}
 spec:
   accessModes:
     - ReadWriteOnce

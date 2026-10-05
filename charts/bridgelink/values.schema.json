@@ -31,20 +31,20 @@
               "title": "MP_DATABASE"
             },
             "MP_DATABASE_PASSWORD": {
-              "default": "bridgelinktest",
-              "description": "Database password for authentication",
+              "default": "",
+              "description": "Database password. Leave empty to use postgres.credentials.password with the bundled PostgreSQL",
               "required": [],
               "title": "MP_DATABASE_PASSWORD"
             },
             "MP_DATABASE_URL": {
-              "default": "jdbc:postgresql://bridgelink-postgres:5432/bridgelinkdb",
-              "description": "JDBC URL for database connection",
+              "default": "",
+              "description": "JDBC URL of the database, passed through unchanged (a value containing {{ is rendered as a Helm template). Leave empty to use the bundled PostgreSQL; required when postgres.enabled is false. For embedded Derby set MP_DATABASE to derby and postgres.enabled to false, and leave this empty",
               "required": [],
               "title": "MP_DATABASE_URL"
             },
             "MP_DATABASE_USERNAME": {
-              "default": "bridgelinktest",
-              "description": "Database username for authentication",
+              "default": "",
+              "description": "Database username. Leave empty to use postgres.credentials.username with the bundled PostgreSQL",
               "required": [],
               "title": "MP_DATABASE_USERNAME"
             },
@@ -105,9 +105,12 @@
         },
         "replicaCount": {
           "default": "1",
-          "description": "Number of BridgeLink pods to run",
+          "description": "Number of BridgeLink pods to run: 0 or 1. More than one active node needs the Channel Coordinator plugin and a server ID per pod, which this chart does not set up",
+          "maximum": 1,
+          "minimum": 0,
           "required": [],
-          "title": "replicaCount"
+          "title": "replicaCount",
+          "type": "integer"
         },
         "runAsUser": {
           "default": 1000,
@@ -301,7 +304,7 @@
         },
         "enabled": {
           "default": "true",
-          "description": "Enable bundled PostgreSQL deployment Set to false to use external database",
+          "description": "Deploy a bundled PostgreSQL for evaluation only (single pod, no backups). Set to false and use an external database such as Amazon RDS for production",
           "required": [],
           "title": "enabled"
         },

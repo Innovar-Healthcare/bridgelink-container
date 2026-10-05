@@ -4,19 +4,30 @@ kind: Deployment
 metadata:
   name: {{ include "bridgelink.fullname" . }}-postgres
   labels:
-    app: postgres
-    {{- include "bridgelink.labels" . | nindent 4 }}
+    {{- include "bridgelink.postgresLabels" . | nindent 4 }}
 spec:
   replicas: 1
+  # Recreate: the data volume is ReadWriteOnce, so a rolling update can stall on a Multi-Attach error
+  # when the new pod is scheduled on another node while the old one still holds the volume.
+  strategy:
+    type: Recreate
+    # Not redundant. A release created by an older chart has the API server's default
+    # rollingUpdate block, which Kubernetes rejects alongside Recreate; the explicit null makes a
+    # client-side upgrade remove it. See the README's Upgrading section for server-side apply.
+    rollingUpdate: null
   selector:
     matchLabels:
-      app: postgres
-      app.kubernetes.io/instance: {{ .Release.Name }}
+      {{- include "bridgelink.postgresSelectorLabels" . | nindent 6 }}
   template:
     metadata:
       labels:
-        app: postgres
-        app.kubernetes.io/instance: {{ .Release.Name }}
+        {{- include "bridgelink.postgresSelectorLabels" . | nindent 8 }}
+      # Restart Postgres when its config changes. Both files are subPath mounts, which never receive
+      # ConfigMap updates in a running container, so without this a pg_hba.conf change would wait for
+      # an unrelated restart to take effect. Only `data` is hashed: the labels carry the chart version,
+      # and a release that does not touch the config should not restart the database.
+      annotations:
+        checksum/config: {{ (include (print $.Template.BasePath "/postgres-configmap.yaml") . | fromYaml).data | toYaml | sha256sum }}
     spec:
       containers:
         - name: postgres
@@ -27,11 +38,11 @@ spec:
               protocol: TCP
           env:
             - name: POSTGRES_PASSWORD
-              value: {{ .Values.postgres.credentials.password }}
+              value: {{ .Values.postgres.credentials.password | quote }}
             - name: POSTGRES_USER
-              value: {{ .Values.postgres.credentials.username }}
+              value: {{ .Values.postgres.credentials.username | quote }}
             - name: POSTGRES_DB
-              value: {{ .Values.postgres.credentials.database }}
+              value: {{ .Values.postgres.credentials.database | quote }}
             - name: PGDATA
               value: /var/lib/postgresql/data/pgdata
           resources:

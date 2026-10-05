@@ -116,19 +116,41 @@ This chart deploys BridgeLink with the following components:
 - Ingress resources (optional)
 - Monitoring and metrics endpoints (optional)
 
-## High Availability
+## Replicas and upgrades
 
-For production deployments, consider:
-1. Setting up multiple replicas
-2. Configuring pod anti-affinity
-3. Using node selectors or taints/tolerations
-4. Implementing proper backup strategies
+The chart runs **one** BridgeLink pod. `bridgelink.replicaCount` accepts only `0` or `1`: more than one
+active node needs the Channel Coordinator plugin and a separate server ID per pod, which this chart
+does not set up.
+
+Both the BridgeLink and the bundled PostgreSQL Deployments use `strategy: Recreate`, so `helm upgrade`
+stops the old pod before starting the new one. Expect a short outage during an upgrade. That is
+deliberate: a rolling update would briefly run two engines against the same database, and polling
+channels (File, Database and SFTP readers) could process the same work twice.
+
+## Database
+
+The bundled PostgreSQL (`postgres.enabled: true`, the default) is for **evaluation only**. It runs as a
+single pod on one zone-bound volume with no backups. For production, set `postgres.enabled: false` and
+use an external database such as Amazon RDS. The bundled instance requires a password for every TCP
+connection (`scram-sha-256`).
+
+To use an external database, disable the bundled one and set the connection under
+`bridgelink.environment`. The URL is passed to BridgeLink unchanged, so any JDBC scheme, port and
+parameters work. The one exception is a value containing `{{"{{"}}`, which is rendered as a Helm template:
 
 ```yaml
-replicaCount: 3
-podAntiAffinity:
-  enabled: true
+postgres:
+  enabled: false
+bridgelink:
+  environment:
+    MP_DATABASE: postgres
+    MP_DATABASE_URL: "jdbc:postgresql://<rds-endpoint>:5432/bridgelinkdb?sslmode=require"
+    MP_DATABASE_USERNAME: bridgelink
+    MP_DATABASE_PASSWORD: "<password>"
 ```
+
+With `postgres.enabled: false` and no `MP_DATABASE_URL`, the install fails with a message saying so.
+For the embedded Derby database instead, set `MP_DATABASE: derby` and `postgres.enabled: false`.
 
 ## Persistence
 
@@ -152,6 +174,35 @@ The chart supports different types of persistence:
    ```
 
 ## Upgrading
+
+**Chart 0.5.0** changes four things an existing release can notice:
+
+- **Database settings in `bridgelink.environment` are now used.** Earlier versions ignored
+  `MP_DATABASE_URL`, `MP_DATABASE_USERNAME` and `MP_DATABASE_PASSWORD` and always connected to the
+  bundled PostgreSQL. If you set them to an external database, BridgeLink now connects there on
+  upgrade, and the bundled PostgreSQL holding your existing data keeps running untouched. Remove the
+  three keys to stay on the bundled database. A values file copied from an older `values.yaml` still
+  carries the old `{{"{{"}} ... {{"}}"}}` placeholder defaults; those keep resolving to the bundled
+  database, but you can delete them.
+- **The bundled PostgreSQL requires a password for TCP connections.** The upgrade restarts it once so
+  the new rule takes effect. PostgreSQL applies
+  `postgres.credentials.password` only when it first creates its data volume. If you changed that
+  value after installing, the database still has the original password, and BridgeLink is now refused.
+  Set the database password to match your values (the local socket needs no password):
+  `kubectl exec $(kubectl get pod -l app=postgres,app.kubernetes.io/instance=<release> -o name) -- psql -U <username> -d <database> -c "ALTER USER <username> PASSWORD '<password>'"`
+- **`bridgelink.replicaCount` must be the integer `0` or `1`.** Higher values, and quoted strings such
+  as `"1"`, are rejected by the schema.
+- **Upgrades use `strategy: Recreate`**, so expect a short outage while the old pod stops and the new
+  one starts. If this upgrade fails with `spec.strategy.rollingUpdate: Forbidden: may not be specified
+  when strategy type is 'Recreate'`, your tool applied it server-side: Helm 4 for a release it
+  installed, Argo CD with `ServerSideApply=true`, or `kubectl apply --server-side`. Server-side apply
+  cannot remove the rolling-update settings Kubernetes added to the old Deployments. Nothing restarts
+  when it fails. Switch each Deployment the error names once (this restarts nothing either), then run
+  the upgrade again:
+  `kubectl patch deployment <name> --type=json -p='[{"op":"replace","path":"/spec/strategy","value":{"type":"Recreate"}}]'`
+  With Helm you can instead rerun the upgrade with `--server-side=false`; Helm then keeps managing that
+  release client-side, and `--server-side=true` once switches it back. Helm 3 and plain `kubectl apply`
+  upgrade without either step.
 
 **Bundled PostgreSQL default moved from `14-alpine` to `16-alpine` (chart 0.2.0).** PostgreSQL does
 not upgrade its on-disk data directory across major versions automatically, so an existing release

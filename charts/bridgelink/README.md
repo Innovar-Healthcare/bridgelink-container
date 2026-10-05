@@ -1,6 +1,6 @@
 # bridgelink
 
-![Version: 0.4.0](https://img.shields.io/badge/Version-0.4.0-informational?style=flat-square)
+![Version: 0.5.0](https://img.shields.io/badge/Version-0.5.0-informational?style=flat-square)
 ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square)
 ![AppVersion: 26.9.0](https://img.shields.io/badge/AppVersion-26.9.0-informational?style=flat-square)
 
@@ -118,19 +118,41 @@ This chart deploys BridgeLink with the following components:
 - Ingress resources (optional)
 - Monitoring and metrics endpoints (optional)
 
-## High Availability
+## Replicas and upgrades
 
-For production deployments, consider:
-1. Setting up multiple replicas
-2. Configuring pod anti-affinity
-3. Using node selectors or taints/tolerations
-4. Implementing proper backup strategies
+The chart runs **one** BridgeLink pod. `bridgelink.replicaCount` accepts only `0` or `1`: more than one
+active node needs the Channel Coordinator plugin and a separate server ID per pod, which this chart
+does not set up.
+
+Both the BridgeLink and the bundled PostgreSQL Deployments use `strategy: Recreate`, so `helm upgrade`
+stops the old pod before starting the new one. Expect a short outage during an upgrade. That is
+deliberate: a rolling update would briefly run two engines against the same database, and polling
+channels (File, Database and SFTP readers) could process the same work twice.
+
+## Database
+
+The bundled PostgreSQL (`postgres.enabled: true`, the default) is for **evaluation only**. It runs as a
+single pod on one zone-bound volume with no backups. For production, set `postgres.enabled: false` and
+use an external database such as Amazon RDS. The bundled instance requires a password for every TCP
+connection (`scram-sha-256`).
+
+To use an external database, disable the bundled one and set the connection under
+`bridgelink.environment`. The URL is passed to BridgeLink unchanged, so any JDBC scheme, port and
+parameters work. The one exception is a value containing `{{`, which is rendered as a Helm template:
 
 ```yaml
-replicaCount: 3
-podAntiAffinity:
-  enabled: true
+postgres:
+  enabled: false
+bridgelink:
+  environment:
+    MP_DATABASE: postgres
+    MP_DATABASE_URL: "jdbc:postgresql://<rds-endpoint>:5432/bridgelinkdb?sslmode=require"
+    MP_DATABASE_USERNAME: bridgelink
+    MP_DATABASE_PASSWORD: "<password>"
 ```
+
+With `postgres.enabled: false` and no `MP_DATABASE_URL`, the install fails with a message saying so.
+For the embedded Derby database instead, set `MP_DATABASE: derby` and `postgres.enabled: false`.
 
 ## Persistence
 
@@ -155,6 +177,35 @@ The chart supports different types of persistence:
 
 ## Upgrading
 
+**Chart 0.5.0** changes four things an existing release can notice:
+
+- **Database settings in `bridgelink.environment` are now used.** Earlier versions ignored
+  `MP_DATABASE_URL`, `MP_DATABASE_USERNAME` and `MP_DATABASE_PASSWORD` and always connected to the
+  bundled PostgreSQL. If you set them to an external database, BridgeLink now connects there on
+  upgrade, and the bundled PostgreSQL holding your existing data keeps running untouched. Remove the
+  three keys to stay on the bundled database. A values file copied from an older `values.yaml` still
+  carries the old `{{ ... }}` placeholder defaults; those keep resolving to the bundled
+  database, but you can delete them.
+- **The bundled PostgreSQL requires a password for TCP connections.** The upgrade restarts it once so
+  the new rule takes effect. PostgreSQL applies
+  `postgres.credentials.password` only when it first creates its data volume. If you changed that
+  value after installing, the database still has the original password, and BridgeLink is now refused.
+  Set the database password to match your values (the local socket needs no password):
+  `kubectl exec $(kubectl get pod -l app=postgres,app.kubernetes.io/instance=<release> -o name) -- psql -U <username> -d <database> -c "ALTER USER <username> PASSWORD '<password>'"`
+- **`bridgelink.replicaCount` must be the integer `0` or `1`.** Higher values, and quoted strings such
+  as `"1"`, are rejected by the schema.
+- **Upgrades use `strategy: Recreate`**, so expect a short outage while the old pod stops and the new
+  one starts. If this upgrade fails with `spec.strategy.rollingUpdate: Forbidden: may not be specified
+  when strategy type is 'Recreate'`, your tool applied it server-side: Helm 4 for a release it
+  installed, Argo CD with `ServerSideApply=true`, or `kubectl apply --server-side`. Server-side apply
+  cannot remove the rolling-update settings Kubernetes added to the old Deployments. Nothing restarts
+  when it fails. Switch each Deployment the error names once (this restarts nothing either), then run
+  the upgrade again:
+  `kubectl patch deployment <name> --type=json -p='[{"op":"replace","path":"/spec/strategy","value":{"type":"Recreate"}}]'`
+  With Helm you can instead rerun the upgrade with `--server-side=false`; Helm then keeps managing that
+  release client-side, and `--server-side=true` once switches it back. Helm 3 and plain `kubectl apply`
+  upgrade without either step.
+
 **Bundled PostgreSQL default moved from `14-alpine` to `16-alpine` (chart 0.2.0).** PostgreSQL does
 not upgrade its on-disk data directory across major versions automatically, so an existing release
 that used the bundled PostgreSQL 14 will **crash-loop** if simply upgraded to the 16 image against the
@@ -173,9 +224,9 @@ not apply.
 | bridgelink.affinity | object | `{}` | Pod affinity for BridgeLink |
 | bridgelink.environment.MP_CONFIGURATIONMAP_LOCATION | string | `"database"` | Configuration map location |
 | bridgelink.environment.MP_DATABASE | string | `"postgres"` | Database type (postgres, mysql, oracle, sqlserver) |
-| bridgelink.environment.MP_DATABASE_PASSWORD | string | `"{{ .Values.postgres.credentials.password }}"` | Database password |
-| bridgelink.environment.MP_DATABASE_URL | string | `"jdbc:postgresql://{{ include \"bridgelink.fullname\" . }}-postgres:5432/{{ .Values.postgres.credentials.database }}"` | Database connection URL |
-| bridgelink.environment.MP_DATABASE_USERNAME | string | `"{{ .Values.postgres.credentials.username }}"` | Database username |
+| bridgelink.environment.MP_DATABASE_PASSWORD | string | `""` | Database password. Leave empty to use `postgres.credentials.password` with the bundled PostgreSQL. |
+| bridgelink.environment.MP_DATABASE_URL | string | `""` | JDBC URL of the database, passed through unchanged, so any scheme, port and parameters work (for Amazon RDS, e.g. `jdbc:postgresql://<endpoint>:5432/bridgelinkdb?sslmode=require`). A value containing `{{` is rendered as a Helm template, as are the username and password below. Leave empty to use the bundled PostgreSQL. Required when `postgres.enabled` is false. For the embedded Derby database instead, set `MP_DATABASE: derby` and `postgres.enabled: false` and leave this empty. |
+| bridgelink.environment.MP_DATABASE_USERNAME | string | `""` | Database username. Leave empty to use `postgres.credentials.username` with the bundled PostgreSQL. |
 | bridgelink.environment.MP_KEYSTORE_KEYPASS | string | `"bridgelinkKeystore"` | Keystore key password |
 | bridgelink.environment.MP_KEYSTORE_STOREPASS | string | `"bridgelinkKeypass"` | Keystore store password |
 | bridgelink.environment.SERVER_ID | string | `"7d760af2-680a-4a19-b9a2-c4685df61ebc"` | Unique server identifier |
@@ -185,7 +236,7 @@ not apply.
 | bridgelink.livenessProbe | object | `{"failureThreshold":3,"httpGet":{"httpHeaders":[{"name":"X-Requested-With","value":"kube-probe"}],"path":"/api/server/version","port":"https","scheme":"HTTPS"},"periodSeconds":20,"timeoutSeconds":5}` | Liveness probe. Enabled by default: it is a plain HTTPS GET and works against any image. Restarts the pod only when the API stops answering at all.  Deliberately /api/server/version, NOT /api/server/status. When the database goes away, getStatus() calls isDatabaseRunning() -> testDatabase(), which blocks on the connection pool, so /status does not return UNAVAILABLE — it HANGS (measured: no response in 10s, while /version answered 200 in 73ms on the same server; tracked as a Core defect). A liveness probe pointed at /status would therefore time out and restart the pod after failureThreshold x periodSeconds of any database outage, which is exactly what liveness must not do: a restart does not fix a database. /version reads an in-memory value and needs no authentication (@DontCheckAuthorized), so it answers iff the JVM and Jetty are actually serving.  kubelet does not verify the certificate on an HTTPS probe, so the self-signed keystore needs no configuration. The X-Requested-With header is required (server.api.require-requested-with, default true) — without it the endpoint returns HTTP 400 even though it needs no authentication. |
 | bridgelink.nodeSelector | object | `{}` | Node selector for BridgeLink pods |
 | bridgelink.readinessProbe | string | `nil` | Readiness probe. Disabled by default for the same reason as startupProbe; see above. Note that until you enable it, a pod is considered Ready as soon as its container is running, which means Service traffic can reach BridgeLink while the engine is still deploying channels. |
-| bridgelink.replicaCount | int | `1` | Number of BridgeLink replicas to deploy |
+| bridgelink.replicaCount | int | `1` | Number of BridgeLink pods: 0 or 1. The schema rejects anything higher, because more than one active node needs the Channel Coordinator plugin and a server ID per pod, which this chart does not set up. Upgrades stop the old pod before starting the new one (`strategy: Recreate`). |
 | bridgelink.resources.limits.cpu | string | `"2000m"` | CPU limit for BridgeLink pods |
 | bridgelink.resources.limits.memory | string | `"2Gi"` | Memory limit for BridgeLink pods |
 | bridgelink.resources.requests.cpu | string | `"500m"` | CPU request for BridgeLink pods |
@@ -202,7 +253,7 @@ not apply.
 | postgres.credentials.database | string | `"bridgelinkdb"` | PostgreSQL database name |
 | postgres.credentials.password | string | `"bridgelinktest"` | PostgreSQL password |
 | postgres.credentials.username | string | `"bridgelinktest"` | PostgreSQL username |
-| postgres.enabled | bool | `true` | Enable PostgreSQL deployment (set to false to use external database) |
+| postgres.enabled | bool | `true` | Deploy a bundled PostgreSQL for evaluation. It is a single pod on one zone-bound volume with no backups, so it is not suitable for production. For production set this to false and point BridgeLink at an external database such as Amazon RDS. TCP connections require a password. |
 | postgres.image.pullPolicy | string | `"IfNotPresent"` | PostgreSQL image pull policy |
 | postgres.image.repository | string | `"postgres"` | PostgreSQL image repository |
 | postgres.image.tag | string | `"16-alpine"` | PostgreSQL image tag (kept in sync with docker-compose.yml) |
