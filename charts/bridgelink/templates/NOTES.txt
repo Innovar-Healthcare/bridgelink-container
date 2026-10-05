@@ -53,6 +53,18 @@ Database connection (bundled PostgreSQL):
   For production, set postgres.enabled=false and use an external database such as Amazon RDS.
 {{- end }}
 
+{{- if and (not .Values.bridgelink.persistence.enabled) (not .Values.bridgelink.keystore.existingSecret) }}
+
+WARNING: appdata is an emptyDir and no keystore Secret is set. Whenever the BridgeLink pod is
+  replaced (node drain, upgrade, rescheduling) it starts with a new data-encryption key, and message
+  content stored with encryption on before then can no longer be read. Set
+  bridgelink.persistence.enabled=true or bridgelink.keystore.existingSecret.
+{{- else }}
+
+Back up appdata/keystore.jks and its passwords: they hold the data-encryption key and TLS
+certificate, and encrypted message content cannot be read without them. See the chart README.
+{{- end }}
+
 {{ if or .Values.bridgelink.startupProbe .Values.bridgelink.readinessProbe }}
 NOTE — you have enabled the exec probes. Check your image carries the probe binary:
 

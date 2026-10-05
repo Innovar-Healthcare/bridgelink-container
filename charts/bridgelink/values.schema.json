@@ -247,6 +247,121 @@
             "object",
             "null"
           ]
+        },
+        "containerSecurityContext": {
+          "description": "Security context for the BridgeLink container and the keystore init container",
+          "required": [],
+          "title": "containerSecurityContext",
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "helperImage": {
+          "additionalProperties": false,
+          "description": "Image for the init container that copies the keystore from keystore.existingSecret",
+          "properties": {
+            "pullPolicy": {
+              "default": "IfNotPresent",
+              "description": "Helper image pull policy",
+              "required": [],
+              "title": "pullPolicy",
+              "type": "string"
+            },
+            "repository": {
+              "default": "busybox",
+              "description": "Helper image repository",
+              "required": [],
+              "title": "repository",
+              "type": "string"
+            },
+            "tag": {
+              "default": "1.37.0",
+              "description": "Helper image tag, pinned",
+              "minLength": 1,
+              "required": [],
+              "title": "tag",
+              "type": "string"
+            }
+          },
+          "required": [],
+          "title": "helperImage",
+          "type": "object"
+        },
+        "keystore": {
+          "additionalProperties": false,
+          "description": "A keystore supplied from a Secret",
+          "properties": {
+            "existingSecret": {
+              "default": "",
+              "description": "Secret holding keystore.jks, keystore.storepass and keystore.keypass, copied into appdata at every start",
+              "required": [],
+              "title": "existingSecret",
+              "type": "string"
+            }
+          },
+          "required": [],
+          "title": "keystore",
+          "type": "object"
+        },
+        "persistence": {
+          "additionalProperties": false,
+          "description": "Where appdata, which holds the keystore and data-encryption key, is kept",
+          "properties": {
+            "accessModes": {
+              "default": [
+                "ReadWriteOnce"
+              ],
+              "description": "Access modes for the claim",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "required": [],
+              "title": "accessModes",
+              "type": "array"
+            },
+            "enabled": {
+              "default": true,
+              "description": "Keep appdata on a PersistentVolumeClaim. false uses an emptyDir.",
+              "required": [],
+              "title": "enabled",
+              "type": "boolean"
+            },
+            "existingClaim": {
+              "default": "",
+              "description": "Existing PersistentVolumeClaim to use instead of creating one",
+              "required": [],
+              "title": "existingClaim",
+              "type": "string"
+            },
+            "size": {
+              "default": "1Gi",
+              "description": "Size of the claim",
+              "required": [],
+              "title": "size",
+              "type": "string"
+            },
+            "storageClass": {
+              "default": "",
+              "description": "Storage class for the claim. Empty uses the cluster default.",
+              "required": [],
+              "title": "storageClass",
+              "type": "string"
+            }
+          },
+          "required": [],
+          "title": "persistence",
+          "type": "object"
+        },
+        "podSecurityContext": {
+          "description": "Pod security context. runAsUser, runAsGroup and fsGroup default to bridgelink.runAsUser and bridgelink.runAsGroup.",
+          "required": [],
+          "title": "podSecurityContext",
+          "type": [
+            "object",
+            "null"
+          ]
         }
       },
       "required": [
@@ -567,6 +682,24 @@
           "required": [],
           "title": "tolerations",
           "type": "array"
+        },
+        "containerSecurityContext": {
+          "description": "Security context for the WebAdmin container",
+          "required": [],
+          "title": "containerSecurityContext",
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "podSecurityContext": {
+          "description": "Pod security context for WebAdmin",
+          "required": [],
+          "title": "podSecurityContext",
+          "type": [
+            "object",
+            "null"
+          ]
         }
       },
       "required": [],

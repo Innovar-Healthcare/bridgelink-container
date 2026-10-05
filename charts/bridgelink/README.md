@@ -1,6 +1,6 @@
 # bridgelink
 
-![Version: 0.5.0](https://img.shields.io/badge/Version-0.5.0-informational?style=flat-square)
+![Version: 0.6.0](https://img.shields.io/badge/Version-0.6.0-informational?style=flat-square)
 ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square)
 ![AppVersion: 26.9.0](https://img.shields.io/badge/AppVersion-26.9.0-informational?style=flat-square)
 
@@ -26,7 +26,7 @@ BridgeLink is a healthcare integration platform that facilitates seamless commun
 
 * Kubernetes 1.19+
 * Helm 3.0+
-* PV provisioner support in the underlying infrastructure (for PostgreSQL persistence)
+* PV provisioner support in the underlying infrastructure (for appdata and PostgreSQL persistence)
 * TLS certificates for secure communication (optional)
 
 ## Installing the Chart
@@ -103,10 +103,8 @@ helm uninstall bridgelink
    - Enable SSL for database connections
    - Consider using external secrets management
 
-3. **Pod Security**:
-   - The deployment runs with a non-root user
-   - Security contexts are properly configured
-   - Network policies are available for configuration
+3. **Pod Security**: BridgeLink and WebAdmin meet the Kubernetes "restricted" Pod Security
+   Standard. See [Pod Security](#pod-security).
 
 ## Architecture
 
@@ -154,28 +152,93 @@ bridgelink:
 With `postgres.enabled: false` and no `MP_DATABASE_URL`, the install fails with a message saying so.
 For the embedded Derby database instead, set `MP_DATABASE: derby` and `postgres.enabled: false`.
 
-## Persistence
+## Keystore and appdata
 
-The chart supports different types of persistence:
+`appdata/keystore.jks` holds the server's **data-encryption key** and its TLS certificate. A channel
+with encryption on stores message content encrypted with that key, so if the keystore is lost, that
+content can no longer be read. Choose one of two ways to keep it:
 
-1. **PostgreSQL Data**:
-   ```yaml
-   postgres:
-     persistence:
-       enabled: true
-       size: 10Gi
-       storageClass: "standard"
-   ```
+- **On a volume** (`bridgelink.persistence.enabled: true`, the default). appdata is a
+  PersistentVolumeClaim named `<release>-bridgelink-appdata`. On EKS the default storage class gives
+  an EBS volume, which is tied to one availability zone; for a volume that follows the pod across
+  zones, use an EFS storage class and set its `uid` and `gid` to `bridgelink.runAsUser` and
+  `runAsGroup`, because EFS ignores `fsGroup`. `existingClaim` uses a claim you created yourself.
+  `helm uninstall` leaves the claim in place, so the key outlives the release; delete it yourself
+  when you are sure.
+- **From a Secret** (`bridgelink.keystore.existingSecret`). The Secret holds `keystore.jks`,
+  `keystore.storepass` and `keystore.keypass`. An init container copies the keystore into appdata on
+  every start, so the Secret always wins over what is on the volume, and it works with persistence
+  off. The passwords replace `MP_KEYSTORE_STOREPASS` and `MP_KEYSTORE_KEYPASS`.
+  The keystore must be one a BridgeLink server created, taken from its appdata (see below), so that
+  it already holds the data-encryption key. A keystore you built with only a TLS certificate does
+  not: the server adds a new key at every start, and encrypted content does not survive a restart.
+  For the same reason, changes the server makes to the keystore, such as a certificate replaced from
+  the Administrator, are overwritten at the next start; update the Secret instead.
 
-2. **Application Data**:
-   ```yaml
-   persistence:
-     enabled: true
-     size: 5Gi
-     storageClass: "standard"
-   ```
+With persistence off and no Secret, appdata is an emptyDir and every replaced pod starts with a new
+key. The install notes warn about this.
+
+**Back up the keystore and its passwords together.** One is useless without the other. The
+passwords are `bridgelink.environment.MP_KEYSTORE_STOREPASS` and `MP_KEYSTORE_KEYPASS`, or the
+Secret's. If you set both of those to empty, the image generates passwords on first start and saves
+them next to the keystore in `appdata/keystore-passwords.properties`; back that file up too. Do not
+change the passwords after the first start: the server cannot open its keystore with new ones.
+
+For the volume, a snapshot (EBS snapshots or AWS Backup) captures the keystore. To copy the file
+itself, which is also how you seed a Secret, read it through a pod that mounts the claim. This works
+with both images and in a namespace enforcing "restricted". Use `65532` as the user for the DHI image:
+
+```bash
+NODE=$(kubectl get pod -l app=bl,app.kubernetes.io/instance=<release> -o jsonpath='{.items[0].spec.nodeName}')
+kubectl run keystore-copy --image=busybox:1.37.0 --restart=Never --overrides='{"spec":{
+  "nodeName":"'"$NODE"'",
+  "securityContext":{"runAsNonRoot":true,"runAsUser":1000,"seccompProfile":{"type":"RuntimeDefault"}},
+  "volumes":[{"name":"appdata","persistentVolumeClaim":{"claimName":"<release>-bridgelink-appdata"}}],
+  "containers":[{"name":"copy","image":"busybox:1.37.0","command":["sleep","300"],
+    "securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}},
+    "volumeMounts":[{"name":"appdata","mountPath":"/appdata","readOnly":true}]}]}}'
+kubectl wait --for=condition=Ready pod/keystore-copy
+kubectl exec keystore-copy -- cat /appdata/keystore.jks > keystore.jks
+kubectl delete pod keystore-copy
+kubectl create secret generic bridgelink-keystore --from-file=keystore.jks \
+  --from-literal=keystore.storepass='<storepass>' --from-literal=keystore.keypass='<keypass>'
+```
+
+`nodeName` places the pod next to BridgeLink, because an EBS volume attaches to one node at a time.
+
+## Pod Security
+
+The BridgeLink and WebAdmin pods meet the Kubernetes "restricted" Pod Security Standard with both
+BridgeLink images (Rocky, UID 1000, and DHI, UID 65532). They run as non-root with all capabilities
+dropped, no privilege escalation, and the runtime's default seccomp profile. appdata is made writable
+through `fsGroup` rather than a root init container. The only helper image, used to copy a keystore
+from a Secret, is pinned and set with `bridgelink.helperImage`, for example to an Amazon ECR mirror.
+
+Each pod's security context is set in values (`podSecurityContext`, `containerSecurityContext` under
+`bridgelink` and `webadmin`), so a stricter policy such as Kyverno or OPA Gatekeeper can be met
+without editing templates. `readOnlyRootFilesystem` cannot be enabled: both images write their
+configuration at startup.
+
+The bundled PostgreSQL does **not** meet "restricted": the official image starts as root. It is for
+evaluation only; in a restricted namespace, use an external database.
 
 ## Upgrading
+
+**Chart 0.6.0** changes how appdata is stored and how the pods run:
+
+- **appdata moves to a PersistentVolumeClaim** (`<release>-bridgelink-appdata`, 1Gi, default storage
+  class), so the keystore now survives pod replacement. The upgrade itself still replaces the pod,
+  and the keystore on the old emptyDir goes with it, as on every earlier pod replacement. To keep
+  content encrypted before the upgrade readable, copy the keystore out first, put it in a Secret (see
+  [Keystore and appdata](#keystore-and-appdata)), and upgrade with `keystore.existingSecret` set. On
+  the Rocky image: `kubectl exec deploy/<release>-bridgelink-bl -- cat /opt/bridgelink/appdata/keystore.jks > keystore.jks`.
+  To keep the old behavior, set `bridgelink.persistence.enabled: false`.
+- **The pods meet the "restricted" Pod Security Standard.** The init container that ran as root from
+  an unpinned `busybox` is gone; `fsGroup` makes appdata writable instead. A namespace that enforces
+  "restricted" now admits BridgeLink and WebAdmin.
+- **The `<release>-bridgelink-config` ConfigMap is removed.** Its `extension.properties` enabled
+  extensions that are enabled by default anyway, and its copy of the keystore passwords was never
+  read. Enabling or disabling an extension in the Administrator now lasts across restarts.
 
 **Chart 0.5.0** changes four things an existing release can notice:
 
@@ -222,6 +285,7 @@ not apply.
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | bridgelink.affinity | object | `{}` | Pod affinity for BridgeLink |
+| bridgelink.containerSecurityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}}` | Security context for the BridgeLink container and the keystore init container. The defaults meet the "restricted" Pod Security Standard. `readOnlyRootFilesystem` cannot be enabled: the image writes its configuration under /opt/bridgelink at startup. |
 | bridgelink.environment.MP_CONFIGURATIONMAP_LOCATION | string | `"database"` | Configuration map location |
 | bridgelink.environment.MP_DATABASE | string | `"postgres"` | Database type (postgres, mysql, oracle, sqlserver) |
 | bridgelink.environment.MP_DATABASE_PASSWORD | string | `""` | Database password. Leave empty to use `postgres.credentials.password` with the bundled PostgreSQL. |
@@ -230,18 +294,28 @@ not apply.
 | bridgelink.environment.MP_KEYSTORE_KEYPASS | string | `"bridgelinkKeystore"` | Keystore key password |
 | bridgelink.environment.MP_KEYSTORE_STOREPASS | string | `"bridgelinkKeypass"` | Keystore store password |
 | bridgelink.environment.SERVER_ID | string | `"7d760af2-680a-4a19-b9a2-c4685df61ebc"` | Unique server identifier |
+| bridgelink.helperImage.pullPolicy | string | `"IfNotPresent"` | Helper image pull policy |
+| bridgelink.helperImage.repository | string | `"busybox"` | Helper image repository. Needs `/bin/sh`, `cp` and `mv`. |
+| bridgelink.helperImage.tag | string | `"1.37.0"` | Helper image tag. Pinned: a moving tag would change what runs without a chart change. |
 | bridgelink.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy |
 | bridgelink.image.repository | string | `"innovarhealthcare/bridgelink"` | BridgeLink container image repository |
 | bridgelink.image.tag | string | `"26.9.0"` | BridgeLink container image tag. Defaults to the Rocky image. For the hardened (DHI) image set `tag: 26.9.0-dhi` and `runAsUser: 65532` / `runAsGroup: 65532` (see below). |
+| bridgelink.keystore.existingSecret | string | `""` | Name of a Secret holding a keystore and its passwords, under the keys `keystore.jks`, `keystore.storepass` and `keystore.keypass`. When set, the keystore is copied into appdata at every start (the Secret wins over what is on the volume) and the passwords replace `MP_KEYSTORE_STOREPASS` and `MP_KEYSTORE_KEYPASS`. Works with or without `persistence`. The keystore must come from a BridgeLink server's appdata, so it already holds the data-encryption key: one with only a TLS certificate gets a new key at every start. See the README. |
 | bridgelink.livenessProbe | object | `{"failureThreshold":3,"httpGet":{"httpHeaders":[{"name":"X-Requested-With","value":"kube-probe"}],"path":"/api/server/version","port":"https","scheme":"HTTPS"},"periodSeconds":20,"timeoutSeconds":5}` | Liveness probe. Enabled by default: it is a plain HTTPS GET and works against any image. Restarts the pod only when the API stops answering at all.  Deliberately /api/server/version, NOT /api/server/status. When the database goes away, getStatus() calls isDatabaseRunning() -> testDatabase(), which blocks on the connection pool, so /status does not return UNAVAILABLE — it HANGS (measured: no response in 10s, while /version answered 200 in 73ms on the same server; tracked as a Core defect). A liveness probe pointed at /status would therefore time out and restart the pod after failureThreshold x periodSeconds of any database outage, which is exactly what liveness must not do: a restart does not fix a database. /version reads an in-memory value and needs no authentication (@DontCheckAuthorized), so it answers iff the JVM and Jetty are actually serving.  kubelet does not verify the certificate on an HTTPS probe, so the self-signed keystore needs no configuration. The X-Requested-With header is required (server.api.require-requested-with, default true) — without it the endpoint returns HTTP 400 even though it needs no authentication. |
 | bridgelink.nodeSelector | object | `{}` | Node selector for BridgeLink pods |
+| bridgelink.persistence.accessModes | list | `["ReadWriteOnce"]` | Access modes for the claim. `ReadWriteOnce` suits EBS; EFS also allows `ReadWriteMany`. |
+| bridgelink.persistence.enabled | bool | `true` | Keep appdata on a PersistentVolumeClaim, so the keystore survives pod replacement (node drains, upgrades, Karpenter consolidation). With `false`, appdata is an emptyDir and a replaced pod starts with a new key unless `keystore.existingSecret` is set. |
+| bridgelink.persistence.existingClaim | string | `""` | Use this existing PersistentVolumeClaim instead of creating one, e.g. one bound to a statically provisioned EFS volume. Used only while `enabled` is true. |
+| bridgelink.persistence.size | string | `"1Gi"` | Size of the claim. The keystore is small; the embedded Derby database (`MP_DATABASE: derby`) also lives in appdata and needs more. |
+| bridgelink.persistence.storageClass | string | `""` | Storage class for the claim. Empty uses the cluster default (EBS on EKS). For EFS, name an EFS storage class whose `uid` and `gid` match `runAsUser` and `runAsGroup`, since EFS ignores `fsGroup`. |
+| bridgelink.podSecurityContext | object | `{"fsGroupChangePolicy":"OnRootMismatch","runAsNonRoot":true,"seccompProfile":{"type":"RuntimeDefault"}}` | Pod security context. `runAsUser`, `runAsGroup` and `fsGroup` default to the two values above and can be overridden here. The defaults meet the Kubernetes "restricted" Pod Security Standard; set one of the keys below to `null` to remove it. |
 | bridgelink.readinessProbe | string | `nil` | Readiness probe. Disabled by default for the same reason as startupProbe; see above. Note that until you enable it, a pod is considered Ready as soon as its container is running, which means Service traffic can reach BridgeLink while the engine is still deploying channels. |
 | bridgelink.replicaCount | int | `1` | Number of BridgeLink pods: 0 or 1. The schema rejects anything higher, because more than one active node needs the Channel Coordinator plugin and a server ID per pod, which this chart does not set up. Upgrades stop the old pod before starting the new one (`strategy: Recreate`). |
 | bridgelink.resources.limits.cpu | string | `"2000m"` | CPU limit for BridgeLink pods |
 | bridgelink.resources.limits.memory | string | `"2Gi"` | Memory limit for BridgeLink pods |
 | bridgelink.resources.requests.cpu | string | `"500m"` | CPU request for BridgeLink pods |
 | bridgelink.resources.requests.memory | string | `"1Gi"` | Memory request for BridgeLink pods |
-| bridgelink.runAsGroup | int | `1000` | Non-root GID the container runs as (see runAsUser). 1000 for Rocky, 65532 for DHI. |
+| bridgelink.runAsGroup | int | `1000` | Non-root GID the container runs as (see runAsUser). 1000 for Rocky, 65532 for DHI. Also the default `fsGroup`, which makes appdata writable without a root init container. |
 | bridgelink.runAsUser | int | `1000` | Non-root UID the container runs as. Use 1000 for the Rocky image, 65532 for the hardened (DHI) image. Must match the image so mounted appdata/custom-extensions are writable. |
 | bridgelink.service.ports.http | int | `8080` | HTTP port for web interface |
 | bridgelink.service.ports.https | int | `8443` | HTTPS port for secure web interface |
@@ -268,6 +342,7 @@ not apply.
 | webadmin.acceptLicense | bool | `false` | Accept the WebAdmin license: the Business Source License 1.1 plus the BridgeLink WebAdmin Supplemental Terms. Read them with `docker run --rm --entrypoint cat <image> /app/LICENSE /app/SUPPLEMENTAL-TERMS.md`, using the image set under `image:` below; the install error prints the exact command. The chart never accepts them for you: with `enabled: true` and this left false, `helm install` fails with an explanation instead of starting a container that would exit without running. |
 | webadmin.affinity | object | `{}` | Pod affinity for WebAdmin |
 | webadmin.containerPort | int | `8444` | Port WebAdmin listens on (HTTPS). 8444 is WebAdmin's documented default. It is passed to the container as `PORT`, because the image's built-in config still says 3000. |
+| webadmin.containerSecurityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}}` | Security context for the WebAdmin container. `readOnlyRootFilesystem` cannot be enabled: the image writes webadmin.conf and a self-signed TLS certificate under /app at startup. |
 | webadmin.enabled | bool | `false` | Deploy WebAdmin, the browser-based administrator, alongside BridgeLink. It is pointed at this release's BridgeLink Service automatically. Requires `acceptLicense` as well. |
 | webadmin.env | object | `{}` | Extra environment variables for WebAdmin, e.g. `BRIDGELINK_PUBLIC_HOST` or `COOKIE_SECURE`. `BRIDGELINK_SERVER_URL`, `PORT` and `BL_ACCEPT_LICENSE` are set by the chart and ignored here. |
 | webadmin.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy |
@@ -275,6 +350,7 @@ not apply.
 | webadmin.image.tag | string | `"26.9.0"` | WebAdmin container image tag. WebAdmin is released separately from BridgeLink, and 26.9.0 is the newest WebAdmin release for the 26.9 line. Bump it together with `bridgelink.image.tag`. |
 | webadmin.livenessProbe | object | `{"failureThreshold":3,"periodSeconds":20,"tcpSocket":{"port":"https"},"timeoutSeconds":5}` | Liveness probe for WebAdmin. The image has no health endpoint, so this checks the port. |
 | webadmin.nodeSelector | object | `{}` | Node selector for WebAdmin pods |
+| webadmin.podSecurityContext | object | `{"runAsGroup":1000,"runAsNonRoot":true,"runAsUser":1000,"seccompProfile":{"type":"RuntimeDefault"}}` | Pod security context for WebAdmin. 1000 is the image's `node` user. The defaults meet the "restricted" Pod Security Standard. |
 | webadmin.readinessProbe | object | `{"failureThreshold":3,"initialDelaySeconds":5,"periodSeconds":10,"tcpSocket":{"port":"https"},"timeoutSeconds":5}` | Readiness probe for WebAdmin. The image has no health endpoint, so this checks the port. |
 | webadmin.resources.limits.cpu | string | `"500m"` | CPU limit for WebAdmin pods |
 | webadmin.resources.limits.memory | string | `"512Mi"` | Memory limit for WebAdmin pods |

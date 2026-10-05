@@ -18,18 +18,18 @@ spec:
       labels:
         {{- include "bridgelink.webadminSelectorLabels" . | nindent 8 }}
     spec:
+      {{- with .Values.webadmin.podSecurityContext }}
       securityContext:
-        # The image's `node` user. Its entrypoint writes webadmin.conf and a self-signed TLS
-        # certificate under /app at startup, so the root filesystem must stay writable.
-        runAsNonRoot: true
-        runAsUser: 1000
-        runAsGroup: 1000
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: webadmin
           image: "{{ .Values.webadmin.image.repository }}:{{ .Values.webadmin.image.tag }}"
           imagePullPolicy: {{ .Values.webadmin.image.pullPolicy }}
+          {{- with .Values.webadmin.containerSecurityContext }}
           securityContext:
-            allowPrivilegeEscalation: false
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           ports:
             - name: https
               containerPort: {{ .Values.webadmin.containerPort }}

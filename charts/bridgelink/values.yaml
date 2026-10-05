@@ -22,8 +22,69 @@ bridgelink:
   # -- Non-root UID the container runs as. Use 1000 for the Rocky image, 65532 for the hardened
   # (DHI) image. Must match the image so mounted appdata/custom-extensions are writable.
   runAsUser: 1000
-  # -- Non-root GID the container runs as (see runAsUser). 1000 for Rocky, 65532 for DHI.
+  # -- Non-root GID the container runs as (see runAsUser). 1000 for Rocky, 65532 for DHI. Also the
+  # default `fsGroup`, which makes appdata writable without a root init container.
   runAsGroup: 1000
+
+  # -- Pod security context. `runAsUser`, `runAsGroup` and `fsGroup` default to the two values above
+  # and can be overridden here. The defaults meet the Kubernetes "restricted" Pod Security Standard;
+  # set one of the keys below to `null` to remove it.
+  podSecurityContext:
+    runAsNonRoot: true
+    # Fix appdata ownership only when its top directory is wrong, rather than on every start.
+    fsGroupChangePolicy: OnRootMismatch
+    seccompProfile:
+      type: RuntimeDefault
+
+  # -- Security context for the BridgeLink container and the keystore init container. The defaults
+  # meet the "restricted" Pod Security Standard. `readOnlyRootFilesystem` cannot be enabled: the
+  # image writes its configuration under /opt/bridgelink at startup.
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
+
+  # appdata holds keystore.jks: the data-encryption key and the TLS certificate. If it is lost, every
+  # message stored with encryption on can no longer be read. Keep it either on a volume (persistence)
+  # or in a Secret you manage (keystore.existingSecret), and back it up with its passwords. See the
+  # README's "Keystore and appdata" section.
+  persistence:
+    # -- Keep appdata on a PersistentVolumeClaim, so the keystore survives pod replacement (node
+    # drains, upgrades, Karpenter consolidation). With `false`, appdata is an emptyDir and a replaced
+    # pod starts with a new key unless `keystore.existingSecret` is set.
+    enabled: true
+    # -- Use this existing PersistentVolumeClaim instead of creating one, e.g. one bound to a
+    # statically provisioned EFS volume. Used only while `enabled` is true.
+    existingClaim: ""
+    # -- Storage class for the claim. Empty uses the cluster default (EBS on EKS). For EFS, name an
+    # EFS storage class whose `uid` and `gid` match `runAsUser` and `runAsGroup`, since EFS ignores
+    # `fsGroup`.
+    storageClass: ""
+    # -- Access modes for the claim. `ReadWriteOnce` suits EBS; EFS also allows `ReadWriteMany`.
+    accessModes:
+      - ReadWriteOnce
+    # -- Size of the claim. The keystore is small; the embedded Derby database (`MP_DATABASE: derby`)
+    # also lives in appdata and needs more.
+    size: 1Gi
+
+  keystore:
+    # -- Name of a Secret holding a keystore and its passwords, under the keys `keystore.jks`,
+    # `keystore.storepass` and `keystore.keypass`. When set, the keystore is copied into appdata at
+    # every start (the Secret wins over what is on the volume) and the passwords replace
+    # `MP_KEYSTORE_STOREPASS` and `MP_KEYSTORE_KEYPASS`. Works with or without `persistence`. The
+    # keystore must come from a BridgeLink server's appdata, so it already holds the data-encryption
+    # key: one with only a TLS certificate gets a new key at every start. See the README.
+    existingSecret: ""
+
+  # Image for the init container that copies the keystore from `keystore.existingSecret`. Not used
+  # otherwise. Point it at a mirror (for example Amazon ECR) if your nodes cannot pull Docker Hub.
+  helperImage:
+    # -- Helper image repository. Needs `/bin/sh`, `cp` and `mv`.
+    repository: busybox
+    # -- Helper image tag. Pinned: a moving tag would change what runs without a chart change.
+    tag: "1.37.0"
+    # -- Helper image pull policy
+    pullPolicy: IfNotPresent
 
   service:
     # -- Service type for BridgeLink (LoadBalancer, ClusterIP, NodePort)
@@ -227,6 +288,22 @@ webadmin:
     tag: "26.9.0"
     # -- Image pull policy
     pullPolicy: IfNotPresent
+
+  # -- Pod security context for WebAdmin. 1000 is the image's `node` user. The defaults meet the
+  # "restricted" Pod Security Standard.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+
+  # -- Security context for the WebAdmin container. `readOnlyRootFilesystem` cannot be enabled: the
+  # image writes webadmin.conf and a self-signed TLS certificate under /app at startup.
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
 
   # -- Port WebAdmin listens on (HTTPS). 8444 is WebAdmin's documented default. It is passed to the
   # container as `PORT`, because the image's built-in config still says 3000.
