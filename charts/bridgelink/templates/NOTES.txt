@@ -3,29 +3,67 @@ Thank you for installing {{ .Chart.Name }}.
 Your release is named {{ .Release.Name }}.
 
 To get the application URL, run these commands:
+{{- $ns := .Release.Namespace }}
+{{- $bl := printf "%s-bl" (include "bridgelink.fullname" .) }}
+{{- $svc := .Values.bridgelink.service }}
+{{- /* AWS reports a load balancer hostname and most other providers an IP, so print whichever is set. */}}
+{{- $lbAddr := "{.status.loadBalancer.ingress[0].hostname}{.status.loadBalancer.ingress[0].ip}" }}
 
-{{- if eq .Values.bridgelink.service.type "LoadBalancer" }}
-  NOTE: It may take a few minutes for the LoadBalancer IP to be available.
-        Watch the status with: 'kubectl get svc --namespace {{ .Release.Namespace }} -w {{ include "bridgelink.fullname" . }}-bl'
+{{- if eq $svc.type "LoadBalancer" }}
+  NOTE: It may take a few minutes for the load balancer address to be available.
+        Watch the status with: 'kubectl get svc --namespace {{ $ns }} -w {{ $bl }}'
 
-  export SERVICE_IP=$(kubectl get svc --namespace {{ .Release.Namespace }} {{ include "bridgelink.fullname" . }}-bl -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+  export SERVICE_HOST=$(kubectl get svc --namespace {{ $ns }} {{ $bl }} -o jsonpath='{{ $lbAddr }}')
   echo "BridgeLink URLs:"
-  echo "- HTTP:  http://$SERVICE_IP:{{ .Values.bridgelink.service.ports.http }}"
-  echo "- HTTPS: https://$SERVICE_IP:{{ .Values.bridgelink.service.ports.https }}"
+  {{- if $svc.ports.http }}
+  echo "- HTTP:  http://$SERVICE_HOST:{{ $svc.ports.http }}"
+  {{- end }}
+  echo "- HTTPS: https://$SERVICE_HOST:{{ $svc.ports.https }}"
 
-{{- else if eq .Values.bridgelink.service.type "ClusterIP" }}
+{{- else if eq $svc.type "NodePort" }}
+  export NODE_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[0].address}')
+  export NODE_PORT=$(kubectl get svc --namespace {{ $ns }} {{ $bl }} -o jsonpath='{.spec.ports[?(@.name=="https")].nodePort}')
+  echo "BridgeLink HTTPS: https://$NODE_IP:$NODE_PORT"
+
+{{- else }}
   To access BridgeLink from within the cluster:
   echo "BridgeLink URLs:"
-  echo "- HTTP:  http://{{ include "bridgelink.fullname" . }}-bl.{{ .Release.Namespace }}.svc:{{ .Values.bridgelink.service.ports.http }}"
-  echo "- HTTPS: https://{{ include "bridgelink.fullname" . }}-bl.{{ .Release.Namespace }}.svc:{{ .Values.bridgelink.service.ports.https }}"
+  {{- if $svc.ports.http }}
+  echo "- HTTP:  http://{{ $bl }}.{{ $ns }}.svc:{{ $svc.ports.http }}"
+  {{- end }}
+  echo "- HTTPS: https://{{ $bl }}.{{ $ns }}.svc:{{ $svc.ports.https }}"
 
   To access from outside the cluster, run these commands in a shell:
-  kubectl port-forward --namespace {{ .Release.Namespace }} svc/{{ include "bridgelink.fullname" . }}-bl {{ .Values.bridgelink.service.ports.http }}:{{ .Values.bridgelink.service.ports.http }} &
-  kubectl port-forward --namespace {{ .Release.Namespace }} svc/{{ include "bridgelink.fullname" . }}-bl {{ .Values.bridgelink.service.ports.https }}:{{ .Values.bridgelink.service.ports.https }} &
+  {{- if $svc.ports.http }}
+  kubectl port-forward --namespace {{ $ns }} svc/{{ $bl }} {{ $svc.ports.http }}:{{ $svc.ports.http }} &
+  {{- end }}
+  kubectl port-forward --namespace {{ $ns }} svc/{{ $bl }} {{ $svc.ports.https }}:{{ $svc.ports.https }} &
 
   Then access:
-  - HTTP:  http://127.0.0.1:{{ .Values.bridgelink.service.ports.http }}
-  - HTTPS: https://127.0.0.1:{{ .Values.bridgelink.service.ports.https }}
+  {{- if $svc.ports.http }}
+  - HTTP:  http://127.0.0.1:{{ $svc.ports.http }}
+  {{- end }}
+  - HTTPS: https://127.0.0.1:{{ $svc.ports.https }}
+{{- end }}
+
+{{- with .Values.bridgelink.extraPorts }}
+{{- $ls := $.Values.bridgelink.listenerService }}
+{{- $on := ternary (printf "%s-listeners" (include "bridgelink.fullname" $)) $bl $ls.enabled }}
+
+Channel listener ports, on Service {{ $on }}:
+{{- range . }}
+  - {{ .name }}: Service port {{ .port | default .containerPort }}/{{ .protocol | default "TCP" }} -> container port {{ .containerPort }}
+{{- end }}
+{{- $onType := ternary $ls.type $svc.type $ls.enabled }}
+{{- if eq $onType "LoadBalancer" }}
+  export LISTENER_HOST=$(kubectl get svc --namespace {{ $ns }} {{ $on }} -o jsonpath='{{ $lbAddr }}')
+  {{- range . }}
+  echo "- {{ .name }}: $LISTENER_HOST:{{ .port | default .containerPort }}"
+  {{- end }}
+{{- else if eq $onType "NodePort" }}
+  kubectl get svc --namespace {{ $ns }} {{ $on }} -o jsonpath='{range .spec.ports[*]}{.name}: node port {.nodePort}{"\n"}{end}'
+{{- end }}
+  A port answers only while a deployed channel listens on its container port.
 {{- end }}
 
 {{- if .Values.webadmin.enabled }}
@@ -33,10 +71,13 @@ To get the application URL, run these commands:
 
 WebAdmin (connected to this release's BridgeLink server):
 {{- if eq .Values.webadmin.service.type "LoadBalancer" }}
-  export WEBADMIN_IP=$(kubectl get svc --namespace {{ .Release.Namespace }} {{ $wa }} -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
-  echo "- WebAdmin: https://$WEBADMIN_IP:{{ .Values.webadmin.service.port }}"
+  export WEBADMIN_HOST=$(kubectl get svc --namespace {{ $ns }} {{ $wa }} -o jsonpath='{{ $lbAddr }}')
+  echo "- WebAdmin: https://$WEBADMIN_HOST:{{ .Values.webadmin.service.port }}"
+{{- else if eq .Values.webadmin.service.type "NodePort" }}
+  export WEBADMIN_PORT=$(kubectl get svc --namespace {{ $ns }} {{ $wa }} -o jsonpath='{.spec.ports[0].nodePort}')
+  echo "- WebAdmin: https://<node address>:$WEBADMIN_PORT"
 {{- else }}
-  kubectl port-forward --namespace {{ .Release.Namespace }} svc/{{ $wa }} {{ .Values.webadmin.service.port }}:{{ .Values.webadmin.service.port }} &
+  kubectl port-forward --namespace {{ $ns }} svc/{{ $wa }} {{ .Values.webadmin.service.port }}:{{ .Values.webadmin.service.port }} &
   Then open https://127.0.0.1:{{ .Values.webadmin.service.port }}
 {{- end }}
   WebAdmin serves a self-signed certificate by default, so expect a browser warning.

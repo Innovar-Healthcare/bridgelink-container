@@ -149,3 +149,69 @@ tpl, so they resolve to what they always meant; any value without "{{" is never 
 {{- .Values.postgres.credentials.password -}}
 {{- end -}}
 {{- end }}
+
+{{/*
+Service fields shared by the BridgeLink, listener and WebAdmin Services, from one service values
+block. loadBalancerSourceRanges and loadBalancerClass are rendered only for type LoadBalancer: the
+API server rejects both on any other type.
+*/}}
+{{- define "bridgelink.serviceSpec" -}}
+type: {{ .type }}
+{{- if eq .type "LoadBalancer" }}
+{{- with .loadBalancerClass }}
+loadBalancerClass: {{ . | quote }}
+{{- end }}
+{{- with .loadBalancerSourceRanges }}
+loadBalancerSourceRanges:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
+Ports from bridgelink.extraPorts, as Service ports targeting the container ports of the same name.
+*/}}
+{{- define "bridgelink.extraServicePorts" -}}
+{{- range . }}
+- port: {{ .port | default .containerPort }}
+  targetPort: {{ .name }}
+  protocol: {{ .protocol | default "TCP" }}
+  name: {{ .name }}
+{{- end }}
+{{- end }}
+
+{{/*
+Fails the render on extraPorts that Kubernetes would reject only at apply time, after some objects
+were already updated: a repeated name, a container port already in use (8443 and 8080 are the
+server's own), or a Service port repeated on the Service the extra ports join. Port and protocol
+together must be unique, so UDP and TCP may share a number.
+*/}}
+{{- define "bridgelink.validateExtraPorts" -}}
+{{- $svc := .Values.bridgelink.service }}
+{{- $names := list }}
+{{- $container := list "8443/TCP" "8080/TCP" }}
+{{- $service := list }}
+{{- if not .Values.bridgelink.listenerService.enabled }}
+{{- $service = append $service (printf "%d/TCP" (int $svc.ports.https)) }}
+{{- if $svc.ports.http }}
+{{- $service = append $service (printf "%d/TCP" (int $svc.ports.http)) }}
+{{- end }}
+{{- end }}
+{{- range .Values.bridgelink.extraPorts }}
+{{- $proto := .protocol | default "TCP" }}
+{{- $c := printf "%d/%s" (int .containerPort) $proto }}
+{{- $s := printf "%d/%s" (int (.port | default .containerPort)) $proto }}
+{{- if has .name $names }}
+{{- fail (printf "bridgelink.extraPorts: the name %q is used twice" .name) }}
+{{- end }}
+{{- if has $c $container }}
+{{- fail (printf "bridgelink.extraPorts %q: container port %s is already in use (8443 and 8080 are BridgeLink's own)" .name $c) }}
+{{- end }}
+{{- if has $s $service }}
+{{- fail (printf "bridgelink.extraPorts %q: Service port %s is already in use on that Service" .name $s) }}
+{{- end }}
+{{- $names = append $names .name }}
+{{- $container = append $container $c }}
+{{- $service = append $service $s }}
+{{- end }}
+{{- end }}

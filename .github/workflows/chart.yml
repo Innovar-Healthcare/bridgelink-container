@@ -504,8 +504,147 @@ jobs:
                   s = d['spec']['template']['spec']
                   for k in ('serviceAccountName', 'imagePullSecrets'):
                       assert k not in s, f"{d['metadata']['name']}: {k} rendered by default"
+                  if d['metadata']['name'].endswith('-bl'):
+                      ports = [(p['name'], p['containerPort']) for p in s['containers'][0]['ports']]
+                      assert ports == [('https', 8443), ('http', 8080)], f'default container ports changed: {ports}'
           print('defaults leave the pod templates unchanged')
           PY
+
+      - name: Services expose listener ports and stay inside the cluster by default
+        run: |
+          set -euo pipefail
+          # A plain LoadBalancer on EKS without the AWS Load Balancer Controller is an internet-facing
+          # Classic ELB serving the admin API, so both Services default to ClusterIP. Channel listeners
+          # need extra ports, and an internal NLB needs annotations, so those are settable.
+          WA="--set webadmin.enabled=true --set webadmin.acceptLicense=true"
+          helm template bl charts/bridgelink $WA > /tmp/svc-default.yaml
+          # deploy-minikube.sh writes its own values file and waits for a LoadBalancer address. Render
+          # exactly what it writes, so it keeps working whatever the chart default is.
+          sed -n '/cat > "\$MINIKUBE_VALUES" << EOL$/,/^EOL$/p' scripts/deploy-minikube.sh | sed '1d;$d' > /tmp/minikube-values.yaml
+          [ -s /tmp/minikube-values.yaml ] || { echo "::error::could not extract the values file from scripts/deploy-minikube.sh"; exit 1; }
+          helm template bl charts/bridgelink -f /tmp/minikube-values.yaml > /tmp/svc-minikube.yaml
+          helm template bl charts/bridgelink --set bridgelink.service.ports.http=null > /tmp/svc-nohttp.yaml
+          cat > /tmp/svc-ports.yaml <<'EOF'
+          bridgelink:
+            extraPorts:
+              - {name: mllp-adt, containerPort: 6661}
+              - {name: syslog, containerPort: 5514, port: 514, protocol: UDP}
+          EOF
+          helm template bl charts/bridgelink -f /tmp/svc-ports.yaml > /tmp/svc-main.yaml
+          cat > /tmp/svc-lb.yaml <<'EOF'
+          bridgelink:
+            service:
+              type: LoadBalancer
+              annotations: {service.beta.kubernetes.io/aws-load-balancer-scheme: internal}
+              loadBalancerSourceRanges: [10.0.0.0/8]
+              loadBalancerClass: service.k8s.aws/nlb
+            listenerService:
+              enabled: true
+              type: LoadBalancer
+              annotations: {service.beta.kubernetes.io/aws-load-balancer-type: external}
+              loadBalancerSourceRanges: [192.168.0.0/16]
+          webadmin:
+            service:
+              type: LoadBalancer
+              loadBalancerSourceRanges: [172.16.0.0/12]
+          EOF
+          helm template bl charts/bridgelink $WA -f /tmp/svc-ports.yaml -f /tmp/svc-lb.yaml > /tmp/svc-listener.yaml
+          # Same settings with ClusterIP: the API server rejects the load-balancer-only fields there.
+          helm template bl charts/bridgelink $WA -f /tmp/svc-ports.yaml -f /tmp/svc-lb.yaml \
+            --set bridgelink.service.type=ClusterIP --set bridgelink.listenerService.type=ClusterIP \
+            --set webadmin.service.type=ClusterIP > /tmp/svc-clusterip.yaml
+          python3 - <<'PY'
+          import yaml
+          def load(path):
+              docs = [d for d in yaml.safe_load_all(open(path)) if d]
+              svcs = {d['metadata']['name']: d for d in docs if d['kind'] == 'Service'}
+              dep = [d for d in docs if d['kind'] == 'Deployment' and d['metadata']['name'].endswith('-bl')][0]
+              return svcs, dep['spec']['template']
+          def ports(svc):
+              return [(p['name'], p['port'], p['targetPort'], p['protocol']) for p in svc['spec']['ports']]
+          LB_ONLY = ('loadBalancerSourceRanges', 'loadBalancerClass')
+
+          svcs, pod = load('/tmp/svc-default.yaml')
+          for n in ('bl-bridgelink-bl', 'bl-bridgelink-webadmin'):
+              s = svcs[n]
+              assert s['spec']['type'] == 'ClusterIP', f"{n} defaults to {s['spec']['type']}, want ClusterIP"
+              assert not s['metadata'].get('annotations'), f'{n} has annotations by default'
+              assert not [k for k in LB_ONLY if k in s['spec']], f'{n} renders load balancer fields by default'
+          assert ports(svcs['bl-bridgelink-bl']) == [('https', 8443, 'https', 'TCP'), ('http', 8080, 'http', 'TCP')], \
+              f"default BridgeLink Service ports changed: {ports(svcs['bl-bridgelink-bl'])}"
+          assert 'bl-bridgelink-listeners' not in svcs, 'a listener Service is rendered by default'
+
+          svcs, _ = load('/tmp/svc-minikube.yaml')
+          assert svcs['bl-bridgelink-bl']['spec']['type'] == 'LoadBalancer', \
+              'scripts/deploy-minikube.sh waits for a LoadBalancer address, but its values no longer render one'
+
+          svcs, pod = load('/tmp/svc-nohttp.yaml')
+          assert [p[0] for p in ports(svcs['bl-bridgelink-bl'])] == ['https'], 'ports.http=null must leave HTTP off the Service'
+          assert 'http' in [p['name'] for p in pod['spec']['containers'][0]['ports']], \
+              'ports.http=null must not change the container (that would restart the pod)'
+
+          extra = [('mllp-adt', 6661, 'mllp-adt', 'TCP'), ('syslog', 514, 'syslog', 'UDP')]
+          svcs, pod = load('/tmp/svc-main.yaml')
+          cports = [(p['name'], p['containerPort'], p['protocol']) for p in pod['spec']['containers'][0]['ports']]
+          assert cports[2:] == [('mllp-adt', 6661, 'TCP'), ('syslog', 5514, 'UDP')], f'extra container ports: {cports}'
+          assert ports(svcs['bl-bridgelink-bl'])[2:] == extra, f"extra ports on the BridgeLink Service: {ports(svcs['bl-bridgelink-bl'])}"
+          assert 'bl-bridgelink-listeners' not in svcs
+
+          svcs, pod = load('/tmp/svc-listener.yaml')
+          bl, ls, wa = svcs['bl-bridgelink-bl'], svcs['bl-bridgelink-listeners'], svcs['bl-bridgelink-webadmin']
+          assert [p[0] for p in ports(bl)] == ['https', 'http'], 'with the listener Service on, extra ports must leave the BridgeLink Service'
+          assert ports(ls) == extra, f'listener Service ports: {ports(ls)}'
+          assert ls['spec']['selector'] == bl['spec']['selector'], 'the listener Service must select the BridgeLink pod'
+          assert bl['metadata']['annotations'] == {'service.beta.kubernetes.io/aws-load-balancer-scheme': 'internal'}
+          assert ls['metadata']['annotations'] == {'service.beta.kubernetes.io/aws-load-balancer-type': 'external'}
+          assert bl['spec']['loadBalancerSourceRanges'] == ['10.0.0.0/8'] and bl['spec']['loadBalancerClass'] == 'service.k8s.aws/nlb'
+          assert ls['spec']['loadBalancerSourceRanges'] == ['192.168.0.0/16'] and 'loadBalancerClass' not in ls['spec']
+          assert wa['spec']['loadBalancerSourceRanges'] == ['172.16.0.0/12']
+
+          svcs, _ = load('/tmp/svc-clusterip.yaml')
+          for n in ('bl-bridgelink-bl', 'bl-bridgelink-listeners', 'bl-bridgelink-webadmin'):
+              s = svcs[n]
+              assert s['spec']['type'] == 'ClusterIP', f"{n} is {s['spec']['type']}"
+              assert not [k for k in LB_ONLY if k in s['spec']], f'{n} renders load balancer fields with type ClusterIP'
+          assert svcs['bl-bridgelink-bl']['metadata']['annotations'], 'annotations must render whatever the type'
+          print('Service defaults, extra ports, listener Service and load balancer settings render as documented')
+          PY
+          # Kubernetes rejects these only at apply time, after a release is half-updated; the schema
+          # rejects them at install.
+          for bad in '[{"name":"MLLP","containerPort":6661}]' '[{"name":"a-sixteen-chars1","containerPort":6661}]' \
+                     '[{"name":"https","containerPort":6661}]' '[{"name":"mllp","containerPort":6661,"protocol":"tcp"}]' \
+                     '[{"name":"mllp","containerPort":70000}]' '[{"name":"mllp"}]' '[{"name":"mllp","containerPort":6661,"targetPort":1}]'; do
+            if helm template bl charts/bridgelink --set-json "bridgelink.extraPorts=$bad" > /tmp/badport.txt 2>&1; then
+              echo "::error::the schema accepted extraPorts=$bad"; exit 1
+            fi
+          done
+          echo "invalid extraPorts are rejected"
+          # Clashes between entries, or with BridgeLink's own ports, need the whole list to see, so
+          # the template checks them rather than the schema.
+          for bad in '[{"name":"mllp","containerPort":6661},{"name":"mllp","containerPort":6662}]' \
+                     '[{"name":"mllp","containerPort":8443}]' '[{"name":"mllp","containerPort":6661,"port":8080}]' \
+                     '[{"name":"a","containerPort":6661},{"name":"b","containerPort":6662,"port":6661}]'; do
+            if helm template bl charts/bridgelink --set-json "bridgelink.extraPorts=$bad" > /tmp/clash.txt 2>&1; then
+              echo "::error::clashing extraPorts=$bad rendered"; exit 1
+            fi
+            grep -q "bridgelink.extraPorts" /tmp/clash.txt \
+              || { echo "::error::the failure for $bad does not name bridgelink.extraPorts"; cat /tmp/clash.txt; exit 1; }
+          done
+          # The same numbers are fine where they do not clash: another protocol, or HTTP off.
+          helm template bl charts/bridgelink --set bridgelink.service.ports.http=null --set-json \
+            'bridgelink.extraPorts=[{"name":"udp","containerPort":8443,"protocol":"UDP"},{"name":"web","containerPort":6661,"port":8080}]' > /dev/null
+          echo "clashing extraPorts are refused, non-clashing ones are not"
+          if helm template bl charts/bridgelink --set bridgelink.service.type=Loadbalancer > /tmp/badtype.txt 2>&1; then
+            echo "::error::the schema accepted service.type=Loadbalancer"; exit 1
+          fi
+          echo "a misspelt Service type is rejected"
+          # A Service with no ports is invalid, so the listener Service needs at least one extra port.
+          if helm template bl charts/bridgelink --set bridgelink.listenerService.enabled=true > /tmp/nolistener.txt 2>&1; then
+            echo "::error::listenerService.enabled=true rendered with no extraPorts"; exit 1
+          fi
+          grep -q "extraPorts" /tmp/nolistener.txt \
+            || { echo "::error::the failure does not name extraPorts"; cat /tmp/nolistener.txt; exit 1; }
+          echo "a listener Service without extra ports is refused"
 
       - name: WebAdmin is off by default
         run: |
@@ -608,10 +747,12 @@ jobs:
   kind:
     # Installs the chart on a real cluster (kind, Kubernetes in Docker) and checks what `helm
     # template` cannot: that BridgeLink becomes Ready, that an upgrade never runs two BridgeLink pods,
-    # that encrypted messages stay readable after the pod is replaced, that the bundled Postgres runs
-    # the config the chart ships and refuses passwordless connections, and that BridgeLink and
-    # WebAdmin are admitted in a namespace enforcing "restricted", against an external database. A separate job because it takes several minutes, so the
-    # template checks above still report in under one. charts/test/kind-test.sh has the detail.
+    # that encrypted messages stay readable after the pod is replaced, that a channel listener answers
+    # through the listener Service, that the bundled Postgres runs the config the chart ships and
+    # refuses passwordless connections, that BridgeLink and WebAdmin are admitted in a namespace
+    # enforcing "restricted", against an external database, and that the Services survive a change
+    # from LoadBalancer to ClusterIP on upgrade. A separate job because it takes several minutes, so
+    # the template checks above still report in under one. charts/test/kind-test.sh has the detail.
     needs: chart
     runs-on: ubuntu-latest
     timeout-minutes: 60

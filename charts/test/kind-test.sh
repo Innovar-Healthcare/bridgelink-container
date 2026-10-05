@@ -4,10 +4,12 @@
 # `helm template` in chart.yml checks what the chart renders; this checks what Kubernetes does with
 # it: that BridgeLink becomes ready, that an upgrade never runs two BridgeLink pods at once, that a
 # message stored encrypted stays readable after the pod is replaced (keystore on the claim, then from
-# a Secret), that the bundled PostgreSQL really runs the config the chart ships, and that BridgeLink,
-# with WebAdmin and the standard Kubernetes options set (service account, pull secret, extra env from a
-# Secret, extra volume), runs in a namespace enforcing the "restricted" Pod Security Standard against
-# an external database.
+# a Secret), that a channel listener on an extra port answers through the listener Service, that the
+# bundled PostgreSQL really runs the config the chart ships, that BridgeLink, with WebAdmin and the
+# standard Kubernetes options set (service account, pull secret, extra env from a Secret, extra
+# volume), runs in a namespace enforcing the "restricted" Pod Security Standard against an external
+# database, and that the Services survive type changes on upgrade and print their load balancer
+# hostname in the install notes.
 #
 # Lives under charts/ rather than test/ on purpose: build-images.yml runs the full multi-arch image
 # build for any change under test/**, and a chart-only change should not pay for that.
@@ -127,17 +129,32 @@ replace_pod() {
 }
 
 # A channel that stores every message with encryption on. RAW in and out, so a message needs no
-# parsing. Shape from bridgelink-mcp's create_channel skeleton.
-channel_json() {   # <server version>
-  local v="$1" rid='{"@class":"linked-hash-map","entry":{"string":["Default Resource","[Default Resource]"]}}'
+# parsing. Shape from bridgelink-mcp's create_channel skeleton. The source is a Channel Reader, or an
+# HTTP Listener when a port is given. The HTTP Listener needs every field its constructor would set:
+# the server fills omitted ones with null, and the deploy then fails on a null binaryMimeTypes.
+channel_json() {   # <server version> <channel id> <name> [HTTP listener port]
+  local v="$1" id="$2" name="$3" port="${4:-}" transport props
+  local rid='{"@class":"linked-hash-map","entry":{"string":["Default Resource","[Default Resource]"]}}'
   local raw='{"@class":"com.mirth.connect.plugins.datatypes.raw.RawDataTypeProperties","@version":"'"$v"'","batchProperties":{"@class":"com.mirth.connect.plugins.datatypes.raw.RawBatchProperties","@version":"'"$v"'","splitType":"JavaScript","batchScript":""}}'
+  local scp='{"@version":"'"$v"'","responseVariable":"None","respondAfterProcessing":true,"processBatch":false,"firstResponse":false,"processingThreads":1,"resourceIds":'"$rid"',"queueBufferSize":1000}'
+  if [ -n "$port" ]; then
+    transport="HTTP Listener"
+    props='{"@class":"com.mirth.connect.connectors.http.HttpReceiverProperties","@version":"'"$v"'","pluginProperties":null,
+   "listenerConnectorProperties":{"@version":"'"$v"'","host":"0.0.0.0","port":"'"$port"'"},"sourceConnectorProperties":'"$scp"',
+   "xmlBody":false,"parseMultipart":false,"includeMetadata":false,"binaryMimeTypes":"application/, image/, video/, audio/",
+   "binaryMimeTypesRegex":false,"responseContentType":"text/plain","responseDataTypeBinary":false,"responseStatusCode":"",
+   "responseHeaders":{"@class":"linked-hash-map"},"responseHeadersVariable":"","useResponseHeadersVariable":false,
+   "charset":"UTF-8","contextPath":"","timeout":"30000","staticResources":null}'
+  else
+    transport="Channel Reader"
+    props='{"@class":"com.mirth.connect.connectors.vm.VmReceiverProperties","@version":"'"$v"'","pluginProperties":null,"sourceConnectorProperties":'"$scp"'}'
+  fi
   cat <<EOF
-{"channel":{"@version":"$v","id":"$CHANNEL_ID","nextMetaDataId":2,"name":"kind-test-encrypted","description":"","revision":1,
+{"channel":{"@version":"$v","id":"$id","nextMetaDataId":2,"name":"$name","description":"","revision":1,
  "sourceConnector":{"@version":"$v","metaDataId":0,"name":"sourceConnector",
-  "properties":{"@class":"com.mirth.connect.connectors.vm.VmReceiverProperties","@version":"$v","pluginProperties":null,
-   "sourceConnectorProperties":{"@version":"$v","responseVariable":"None","respondAfterProcessing":true,"processBatch":false,"firstResponse":false,"processingThreads":1,"resourceIds":$rid,"queueBufferSize":1000}},
+  "properties":$props,
   "transformer":{"@version":"$v","elements":null,"inboundTemplate":{"@encoding":"base64"},"outboundTemplate":{"@encoding":"base64"},"inboundDataType":"RAW","outboundDataType":"RAW","inboundProperties":$raw,"outboundProperties":$raw},
-  "filter":{"@version":"$v","elements":null},"transportName":"Channel Reader","mode":"SOURCE","enabled":true,"waitForPrevious":true},
+  "filter":{"@version":"$v","elements":null},"transportName":"$transport","mode":"SOURCE","enabled":true,"waitForPrevious":true},
  "destinationConnectors":{"connector":{"@version":"$v","metaDataId":1,"name":"Destination 1",
   "properties":{"@class":"com.mirth.connect.connectors.vm.VmDispatcherProperties","@version":"$v","pluginProperties":null,
    "destinationConnectorProperties":{"@version":"$v","queueEnabled":false,"sendFirst":false,"retryIntervalMillis":10000,"regenerateTemplate":false,"retryCount":0,"rotate":false,"includeFilterTransformer":false,"threadCount":1,"threadAssignmentVariable":null,"validateResponse":false,"resourceIds":$rid,"queueBufferSize":1000,"reattachAttachments":true},
@@ -171,7 +188,8 @@ done
 
 # Values shared by every release. The exec probes are enabled (the default image carries the probe),
 # so Ready means BridgeLink reported status 0, not merely that the JVM started. ClusterIP because a
-# LoadBalancer never gets an address on kind and `helm --wait` would wait for one forever.
+# LoadBalancer never gets an address on kind and `helm --wait` would wait for one forever. It is the
+# chart default now, but older charts installed through UPGRADE_FROM default to LoadBalancer.
 PROBE='["java","-XX:TieredStopAtLevel=1","-XX:+UseSerialGC","-XX:-UsePerfData","-Xmx32m","-cp","/opt/bridgelink/bootstrap","BridgeLinkHealthcheck"]'
 cat > "$WORK/common.yaml" <<EOF
 bridgelink:
@@ -293,7 +311,7 @@ forward bl
 CODE="$(login)"
 [ "$CODE" = "200" ] && ok "logged in to the BridgeLink API" || bad "API login returned HTTP $CODE"
 VERSION="$(api GET /server/version)"
-channel_json "$VERSION" > "$WORK/channel.json"
+channel_json "$VERSION" "$CHANNEL_ID" kind-test-encrypted > "$WORK/channel.json"
 CODE="$(api POST /channels -H 'Content-Type: application/json' --data-binary @"$WORK/channel.json" -o "$WORK/out" -w '%{http_code}')"
 [ "$CODE" = "200" ] || { bad "creating the channel returned HTTP $CODE"; cat "$WORK/out"; }
 CODE="$(api POST "/channels/$CHANNEL_ID/_deploy" -o "$WORK/out" -w '%{http_code}')"
@@ -343,7 +361,7 @@ k exec ksread -- cat /appdata/keystore.jks > "$WORK/keystore.jks"
 k delete pod ksread --wait=false >/dev/null
 ENV_OF() { k get deploy bl-bridgelink-bl -o jsonpath="{.spec.template.spec.containers[0].env[?(@.name==\"$1\")].value}"; }
 STOREPASS="$(ENV_OF MP_KEYSTORE_STOREPASS)" KEYPASS="$(ENV_OF MP_KEYSTORE_KEYPASS)"
-for ns in "$NS" "$NS_R"; do   # step 6 uses it in the restricted namespace
+for ns in "$NS" "$NS_R"; do   # step 7 uses it in the restricted namespace
   kubectl --context "kind-$CLUSTER" -n "$ns" create secret generic bl-keystore >/dev/null \
     --from-file=keystore.jks="$WORK/keystore.jks" \
     --from-literal=keystore.storepass="$STOREPASS" --from-literal=keystore.keypass="$KEYPASS"
@@ -375,10 +393,53 @@ if [ -n "$REPLACED" ]; then
 else
   bad "the BridgeLink pod was not replaced"; dump
 fi
+
+# ---- 5. channel listener on an extra port ------------------------------------------------------
+info "5. a channel listener on an extra port answers through the listener Service"
+# An HTTP Listener channel, reached from another pod through the listener Service. A response proves
+# the port is on the container and on that Service, and that the Service selects the BridgeLink pod.
+LISTENER_ID="8b3e1f5a-2c4d-4e6f-9a1b-3c5d7e9f0b2d"
+LISTEN_PORT=6661
+LISTENER_SVC="bl-bridgelink-listeners"
+if h upgrade bl "$CHART" -f "$WORK/common.yaml" ${SETS[@]+"${SETS[@]}"} --set-string bridgelink.resources.requests.cpu=251m \
+     --set bridgelink.persistence.enabled=false --set bridgelink.keystore.existingSecret=bl-keystore \
+     --set-json "bridgelink.extraPorts=[{\"name\":\"http-listen\",\"containerPort\":$LISTEN_PORT}]" \
+     --set bridgelink.listenerService.enabled=true --wait --timeout "$TIMEOUT" >/dev/null; then
+  ok "upgraded with an extra port on a listener Service, and BridgeLink Ready"
+else
+  bad "the upgrade adding an extra port did not become ready"; dump
+fi
+CPORTS="$(k get deploy bl-bridgelink-bl -o jsonpath='{.spec.template.spec.containers[0].ports[*].containerPort}')"
+LPORTS="$(k get svc "$LISTENER_SVC" -o jsonpath='{.spec.ports[*].port}' 2>&1)"
+MPORTS="$(k get svc bl-bridgelink-bl -o jsonpath='{.spec.ports[*].port}')"
+[[ " $CPORTS " == *" $LISTEN_PORT "* ]] && [ "$LPORTS" = "$LISTEN_PORT" ] && [[ " $MPORTS " != *" $LISTEN_PORT "* ]] \
+  && ok "port $LISTEN_PORT is on the container and on the listener Service, not the BridgeLink Service" \
+  || bad "port $LISTEN_PORT: container [$CPORTS], listener Service [$LPORTS], BridgeLink Service [$MPORTS]"
+forward bl; login >/dev/null
+channel_json "$VERSION" "$LISTENER_ID" kind-test-listener "$LISTEN_PORT" > "$WORK/listener.json"
+CODE="$(api POST /channels -H 'Content-Type: application/json' --data-binary @"$WORK/listener.json" -o "$WORK/out" -w '%{http_code}')"
+[ "$CODE" = "200" ] || { bad "creating the listener channel returned HTTP $CODE"; cat "$WORK/out"; }
+CODE="$(api POST "/channels/$LISTENER_ID/_deploy" -o "$WORK/out" -w '%{http_code}')"
+[ "$CODE" = "204" ] || { bad "deploying the listener channel returned HTTP $CODE"; cat "$WORK/out"; }
+LMARK="kind-test-listener-$RANDOM$RANDOM"
+for i in $(seq 1 15); do   # the listener can start a moment after the deploy call returns
+  OUT="$(client wget -S -O /dev/null --post-data="$LMARK" --header='Content-Type: text/plain' "http://$LISTENER_SVC:$LISTEN_PORT/")"
+  case "$OUT" in *"HTTP/1.1 200"*) break ;; esac
+  sleep 2
+done
+case "$OUT" in
+  *"HTTP/1.1 200"*) ok "the listener answered HTTP 200 through $LISTENER_SVC:$LISTEN_PORT" ;;
+  *) bad "no HTTP 200 from the listener through $LISTENER_SVC:$LISTEN_PORT: $OUT" ;;
+esac
+# By id, as message_readable does: the channel stores content encrypted and the search endpoint does
+# not return it decrypted. The first message on a new channel is 1.
+GOT="$(api GET "/channels/$LISTENER_ID/messages/1" -H 'Accept: application/json' | grep -c "$LMARK")"
+[ "${GOT:-0}" -ge 1 ] && ok "the listener channel received the message" \
+  || bad "the message sent through the listener Service is not in the channel"
 kill "$PF_PID" 2>/dev/null; wait "$PF_PID" 2>/dev/null; PF_PID=""
 
-# ---- 5. bundled PostgreSQL --------------------------------------------------------------------
-info "5. bundled PostgreSQL"
+# ---- 6. bundled PostgreSQL --------------------------------------------------------------------
+info "6. bundled PostgreSQL"
 APP_LABEL="$(k get deploy "$PG_DEPLOY" -o jsonpath='{.metadata.labels.app}')"
 [ "$APP_LABEL" = "postgres" ] && ok "Postgres Deployment is labelled app=postgres" \
   || bad "Postgres Deployment is labelled app=$APP_LABEL"
@@ -403,8 +464,8 @@ esac
 h uninstall bl --wait --timeout 5m >/dev/null 2>&1
 k delete pvc -l app.kubernetes.io/instance=bl --ignore-not-found >/dev/null 2>&1
 
-# ---- 6. restricted namespace, external database -----------------------------------------------
-info "6. restricted Pod Security Standard, with WebAdmin and an external database standing in for RDS"
+# ---- 7. restricted namespace, external database -----------------------------------------------
+info "7. restricted Pod Security Standard, with WebAdmin and an external database standing in for RDS"
 cat <<'EOF' | k apply -f - >/dev/null
 apiVersion: apps/v1
 kind: Deployment
@@ -514,6 +575,81 @@ TABLES="$(SQL "select count(*) from information_schema.tables where table_schema
 APPS="$(SQL "select count(*) from pg_stat_activity where application_name='bl-chart-test'")"
 [ "${APPS:-0}" -gt 0 ] 2>/dev/null && ok "URL parameters reached the driver unchanged ($APPS connections named bl-chart-test)" \
   || bad "no connections carry the ApplicationName from the URL: $APPS"
+
+# ---- 8. Service types across upgrades --------------------------------------------------------
+info "8. Service type, load balancer settings and install notes across upgrades"
+# Only the Services matter here, so the release runs no BridgeLink pod and no database. No --wait: a
+# LoadBalancer never gets an address on kind.
+SVC_SETS=(--set bridgelink.replicaCount=0 --set postgres.enabled=false --set bridgelink.environment.MP_DATABASE=derby
+  --set bridgelink.persistence.enabled=false --set webadmin.enabled=true --set webadmin.acceptLicense=true)
+svc_state() { k get svc "$1" -o jsonpath='{.spec.type} nodePorts=[{.spec.ports[*].nodePort}] etp={.spec.externalTrafficPolicy}' 2>&1; }
+# LoadBalancer was the default before ClusterIP. The API server gives such a Service node ports and an
+# externalTrafficPolicy the chart never set, and switching the type has to clear them: under
+# server-side apply (Helm 4) nobody owns those fields, so the upgrade itself cannot remove them.
+if h install svc "$FROM_CHART" "${SVC_SETS[@]}" --set bridgelink.service.type=LoadBalancer \
+     --set webadmin.service.type=LoadBalancer >/dev/null 2>"$WORK/svc.err"; then
+  GOT="$(svc_state svc-bridgelink-bl)"
+  [[ "$GOT" == "LoadBalancer nodePorts=["[0-9]* ]] && ok "installed ${UPGRADE_FROM:-this checkout} as LoadBalancer, node ports allocated ($GOT)" \
+    || bad "the LoadBalancer install has no node ports, so the switch below proves nothing: $GOT"
+else
+  bad "installing the LoadBalancer release failed"; cat "$WORK/svc.err"
+fi
+if h upgrade svc "$CHART" "${SVC_SETS[@]}" >/dev/null 2>"$WORK/svc.err"; then
+  ok "upgraded to this checkout's default Service type"
+else
+  bad "the upgrade from LoadBalancer to the default type failed"; cat "$WORK/svc.err"
+fi
+for s in svc-bridgelink-bl svc-bridgelink-webadmin; do
+  GOT="$(svc_state "$s")"
+  [ "$GOT" = "ClusterIP nodePorts=[] etp=" ] && ok "$s is ClusterIP, nothing left over from LoadBalancer" \
+    || bad "$s after the upgrade: $GOT"
+done
+cat > "$WORK/lb.yaml" <<'EOF'
+bridgelink:
+  service:
+    type: LoadBalancer
+    annotations: {service.beta.kubernetes.io/aws-load-balancer-scheme: internal}
+    loadBalancerSourceRanges: [10.0.0.0/8]
+    loadBalancerClass: example.com/kind-test
+    ports: {http: null}
+  extraPorts:
+    - {name: mllp, containerPort: 6661}
+    - {name: syslog, containerPort: 5514, port: 514, protocol: UDP}
+  listenerService:
+    enabled: true
+    type: LoadBalancer
+    loadBalancerSourceRanges: [192.168.0.0/16]
+EOF
+if h upgrade svc "$CHART" "${SVC_SETS[@]}" -f "$WORK/lb.yaml" >/dev/null 2>"$WORK/svc.err"; then
+  ok "upgraded to LoadBalancer with annotations, source ranges, a class, no HTTP and a listener Service"
+else
+  bad "the upgrade to the load balancer settings failed"; cat "$WORK/svc.err"
+fi
+GOT="$(k get svc svc-bridgelink-bl -o jsonpath='{.spec.type}|{.metadata.annotations.service\.beta\.kubernetes\.io/aws-load-balancer-scheme}|{.spec.loadBalancerSourceRanges[*]}|{.spec.loadBalancerClass}|{.spec.ports[*].name}' 2>&1)"
+[ "$GOT" = "LoadBalancer|internal|10.0.0.0/8|example.com/kind-test|https" ] \
+  && ok "BridgeLink Service has the annotation, source range and class, and HTTP is off it" \
+  || bad "BridgeLink Service load balancer settings: $GOT"
+GOT="$(k get svc svc-bridgelink-listeners -o jsonpath='{.spec.type}|{.spec.loadBalancerSourceRanges[*]}|{range .spec.ports[*]}{.name}:{.port}/{.protocol} {end}' 2>&1)"
+[ "$GOT" = "LoadBalancer|192.168.0.0/16|mllp:6661/TCP syslog:514/UDP " ] \
+  && ok "listener Service carries the extra ports with its own source range" || bad "listener Service: $GOT"
+# AWS reports a load balancer hostname, not an IP. Give the Service one and run the notes' command.
+k patch svc svc-bridgelink-bl --subresource=status --type=merge \
+  -p '{"status":{"loadBalancer":{"ingress":[{"hostname":"internal-bl-kind-test.elb.us-east-1.amazonaws.com"}]}}}' >/dev/null
+LINE="$(h get notes svc | grep 'export SERVICE_HOST=')"
+GOT="$( [ -n "$LINE" ] && eval "${LINE/kubectl /kubectl --context kind-$CLUSTER }" && echo "${SERVICE_HOST:-}" )"
+[ "$GOT" = "internal-bl-kind-test.elb.us-east-1.amazonaws.com" ] && ok "the install notes print the load balancer hostname" \
+  || bad "the install notes print '$GOT' for a load balancer with a hostname (notes line: ${LINE:-none})"
+if h upgrade svc "$CHART" "${SVC_SETS[@]}" >/dev/null 2>"$WORK/svc.err"; then
+  ok "upgraded back to the defaults"
+else
+  bad "the upgrade back to the defaults failed"; cat "$WORK/svc.err"
+fi
+GOT="$(svc_state svc-bridgelink-bl)|$(k get svc svc-bridgelink-bl -o jsonpath='{.spec.loadBalancerClass}{.spec.loadBalancerSourceRanges}{.metadata.annotations.service\.beta\.kubernetes\.io/aws-load-balancer-scheme}')"
+[ "$GOT" = "ClusterIP nodePorts=[] etp=|" ] && ok "BridgeLink Service is ClusterIP again with no load balancer settings" \
+  || bad "BridgeLink Service after returning to the defaults: $GOT"
+k get svc svc-bridgelink-listeners >/dev/null 2>&1 && bad "the listener Service was not removed" \
+  || ok "the listener Service was removed"
+h uninstall svc --wait --timeout 2m >/dev/null 2>&1
 
 # ---- summary ----------------------------------------------------------------------------------
 echo

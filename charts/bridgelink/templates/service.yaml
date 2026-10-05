@@ -1,19 +1,33 @@
+{{- $svc := .Values.bridgelink.service }}
+{{- include "bridgelink.validateExtraPorts" . }}
 apiVersion: v1
 kind: Service
 metadata:
   name: {{ include "bridgelink.fullname" . }}-bl
   labels:
     {{- include "bridgelink.labels" . | nindent 4 }}
+  {{- with $svc.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
-  type: {{ .Values.bridgelink.service.type }}
+  {{- include "bridgelink.serviceSpec" $svc | nindent 2 }}
   ports:
-    - port: {{ .Values.bridgelink.service.ports.https }}
+    - port: {{ $svc.ports.https }}
       targetPort: https
       protocol: TCP
       name: https
-    - port: {{ .Values.bridgelink.service.ports.http }}
+    {{- /* null leaves plain HTTP off the Service; the container still listens on it. */}}
+    {{- if $svc.ports.http }}
+    - port: {{ $svc.ports.http }}
       targetPort: http
       protocol: TCP
       name: http
+    {{- end }}
+    {{- if not .Values.bridgelink.listenerService.enabled }}
+    {{- with .Values.bridgelink.extraPorts }}
+    {{- include "bridgelink.extraServicePorts" . | trim | nindent 4 }}
+    {{- end }}
+    {{- end }}
   selector:
     {{- include "bridgelink.selectorLabels" . | nindent 4 }}

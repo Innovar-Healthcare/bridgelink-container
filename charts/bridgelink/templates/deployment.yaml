@@ -85,6 +85,11 @@ spec:
             - name: http
               containerPort: 8080
               protocol: TCP
+            {{- range .Values.bridgelink.extraPorts }}
+            - name: {{ .name }}
+              containerPort: {{ .containerPort }}
+              protocol: {{ .protocol | default "TCP" }}
+            {{- end }}
           volumeMounts:
             - name: appdata
               mountPath: /opt/bridgelink/appdata
