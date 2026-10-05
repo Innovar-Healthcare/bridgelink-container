@@ -3,6 +3,21 @@ nameOverride: ""
 # -- Provide a name to substitute for the full names of resources
 fullnameOverride: ""
 
+# -- Image pull secrets for every pod the chart creates (BridgeLink, WebAdmin, PostgreSQL), as a list
+# of `{name: <secret>}`, e.g. for a private registry mirror.
+imagePullSecrets: []
+
+serviceAccount:
+  # -- Create a ServiceAccount for the BridgeLink pod. With `create: false` and no `name`, the pod
+  # uses the namespace's default ServiceAccount.
+  create: false
+  # -- ServiceAccount for the BridgeLink pod: the name to create, or an existing one to use. Empty
+  # with `create: true` uses the release's full name.
+  name: ""
+  # -- Annotations for the created ServiceAccount, e.g. `eks.amazonaws.com/role-arn` to give
+  # BridgeLink an IAM role through IRSA.
+  annotations: {}
+
 # @section BridgeLink Settings
 bridgelink:
   # -- Number of BridgeLink pods: 0 or 1. The schema rejects anything higher, because more than one
@@ -190,6 +205,21 @@ bridgelink:
     timeoutSeconds: 5
     failureThreshold: 3
 
+  # -- Extra annotations for the BridgeLink pod
+  podAnnotations: {}
+  # -- Extra labels for the BridgeLink pod. The chart's selector labels (`app`,
+  # `app.kubernetes.io/name`, `app.kubernetes.io/instance`) cannot be changed and are ignored here.
+  podLabels: {}
+
+  # -- Extra environment variables for the BridgeLink container, as Kubernetes EnvVar entries, so
+  # `valueFrom` works (for example a password from a Secret). An entry here replaces any variable of
+  # the same name the chart sets, including `environment` and the database settings.
+  extraEnv: []
+  # -- Extra volumes for the BridgeLink pod, e.g. an EFS claim for file-based channels
+  extraVolumes: []
+  # -- Extra volume mounts for the BridgeLink container
+  extraVolumeMounts: []
+
   # -- Node selector for BridgeLink pods
   nodeSelector: {}
   # -- Pod tolerations for BridgeLink
@@ -197,6 +227,11 @@ bridgelink:
   # -- Pod affinity for BridgeLink
   affinity: {}
 
+  # Every key becomes an environment variable on the BridgeLink container, so any setting the image
+  # reads works here: an `MP_` variable sets the matching mirth.properties key (`MP_FOO_BAR` sets
+  # `foo.bar`), and others such as `CUSTOM_PROPERTIES` or `BL_HEALTH_ALWAYS_STATUS` are read by the
+  # image itself. Quote numbers (`"3000000"`): the schema rejects unquoted ones, because Helm would
+  # render a large one as `3e+06`. For values from a Secret, use `extraEnv`.
   environment:
     # -- Database type (postgres, mysql, oracle, sqlserver)
     MP_DATABASE: "postgres"

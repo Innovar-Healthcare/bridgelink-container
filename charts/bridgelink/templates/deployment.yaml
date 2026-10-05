@@ -22,11 +22,23 @@ spec:
     metadata:
       labels:
         {{- include "bridgelink.selectorLabels" . | nindent 8 }}
+        {{- /* The selector labels are fixed: a Deployment's selector cannot change after creation. */}}
+        {{- with omit (.Values.bridgelink.podLabels | default dict) "app" "app.kubernetes.io/name" "app.kubernetes.io/instance" }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       {{- with .Values.bridgelink.podAnnotations }}
       annotations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
     spec:
+      {{- /* Only when asked for, so a release that sets neither keeps an unchanged pod template. */}}
+      {{- if or .Values.serviceAccount.create .Values.serviceAccount.name }}
+      serviceAccountName: {{ include "bridgelink.serviceAccountName" . }}
+      {{- end }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       # Restricted Pod Security Standard by default. fsGroup makes appdata writable by the BridgeLink
       # user on volumes that support it (emptyDir, EBS), which is what used to need a root init
       # container. See bridgelink.podSecurityContext in values.yaml.
@@ -79,32 +91,51 @@ spec:
             - name: blserver-vmoptions
               mountPath: /opt/bridgelink/secrets/vmoptions
               subPath: blserver-vmoptions
+            {{- with .Values.bridgelink.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           env:
+            {{- /* An extraEnv entry replaces any variable of the same name the chart would set. */}}
+            {{- $extra := list }}
+            {{- range .Values.bridgelink.extraEnv }}
+            {{- $extra = append $extra .name }}
+            {{- end }}
+            {{- /* Not even evaluated when overridden: the helper fails when it finds no URL. */}}
+            {{- if not (has "MP_DATABASE_URL" $extra) }}
             {{- with include "bridgelink.databaseUrl" . }}
             - name: MP_DATABASE_URL
               value: {{ . | quote }}
             {{- end }}
+            {{- end }}
             {{- with include "bridgelink.databaseUsername" . }}
+            {{- if not (has "MP_DATABASE_USERNAME" $extra) }}
             - name: MP_DATABASE_USERNAME
               value: {{ . | quote }}
             {{- end }}
+            {{- end }}
             {{- with include "bridgelink.databasePassword" . }}
+            {{- if not (has "MP_DATABASE_PASSWORD" $extra) }}
             - name: MP_DATABASE_PASSWORD
               value: {{ . | quote }}
             {{- end }}
-            {{- $skip := list "MP_DATABASE_URL" "MP_DATABASE_USERNAME" "MP_DATABASE_PASSWORD" }}
+            {{- end }}
+            {{- $skip := concat $extra (list "MP_DATABASE_URL" "MP_DATABASE_USERNAME" "MP_DATABASE_PASSWORD" "CUSTOM_VMOPTIONS_PATH") }}
             {{- with .Values.bridgelink.keystore.existingSecret }}
             {{- $skip = concat $skip (list "MP_KEYSTORE_STOREPASS" "MP_KEYSTORE_KEYPASS") }}
+            {{- if not (has "MP_KEYSTORE_STOREPASS" $extra) }}
             - name: MP_KEYSTORE_STOREPASS
               valueFrom:
                 secretKeyRef:
                   name: {{ . }}
                   key: keystore.storepass
+            {{- end }}
+            {{- if not (has "MP_KEYSTORE_KEYPASS" $extra) }}
             - name: MP_KEYSTORE_KEYPASS
               valueFrom:
                 secretKeyRef:
                   name: {{ . }}
                   key: keystore.keypass
+            {{- end }}
             {{- end }}
             {{- /* Keys resolved above are skipped here to avoid duplicates. */}}
             {{- range $key, $value := .Values.bridgelink.environment }}
@@ -113,8 +144,13 @@ spec:
               value: {{ $value | quote }}
             {{- end }}
             {{- end }}
+            {{- if not (has "CUSTOM_VMOPTIONS_PATH" $extra) }}
             - name: CUSTOM_VMOPTIONS_PATH
               value: /opt/bridgelink/secrets/vmoptions
+            {{- end }}
+            {{- with .Values.bridgelink.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           resources:
             {{- toYaml .Values.bridgelink.resources | nindent 12 }}
           {{- if .Values.bridgelink.startupProbe }}
@@ -150,6 +186,9 @@ spec:
         - name: blserver-vmoptions
           secret:
             secretName: {{ include "bridgelink.fullname" . }}-vmoptions
+        {{- with .Values.bridgelink.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       {{- with .Values.bridgelink.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
