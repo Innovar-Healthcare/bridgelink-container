@@ -26,12 +26,27 @@ awsr resourcegroupstaggingapi get-resources --resources-per-page 1 >/dev/null \
 # The controllers tag what they create (elbv2.k8s.aws/cluster, ebs.csi.aws.com/cluster) as well as
 # with this run's tags. Matching on both leaves out the nodes' own volumes and eksctl's groups,
 # which carry the run's tags too and go with the cluster.
-wait_gone() {   # <what> <resource type filter> <controller tag filter>
+#
+# Volumes and security groups are listed through EC2 itself: the tagging API goes on returning a
+# deleted volume for a while, which would hold this script up and then fail it for nothing.
+list_tagged() {   # <resource type filter> <controller tag key> <value>
+  case "$1" in
+    ec2:volume)
+      awsr ec2 describe-volumes --filters "Name=tag:Project,Values=$PROJECT" "Name=tag:$2,Values=$3" \
+        --query 'Volumes[].VolumeId' --output text ;;
+    ec2:security-group)
+      awsr ec2 describe-security-groups --filters "Name=tag:Project,Values=$PROJECT" "Name=tag:$2,Values=$3" \
+        --query 'SecurityGroups[].GroupId' --output text ;;
+    *)
+      awsr resourcegroupstaggingapi get-resources --resource-type-filters "$1" \
+        --tag-filters "Key=Project,Values=$PROJECT" "Key=$2,Values=$3" \
+        --query 'ResourceTagMappingList[].ResourceARN' --output text ;;
+  esac
+}
+wait_gone() {   # <what> <resource type filter> <controller tag key> <value>
   local left="" rc
   for _ in $(seq 1 40); do
-    left="$(awsr resourcegroupstaggingapi get-resources --resource-type-filters "$2" \
-      --tag-filters "Key=Project,Values=$PROJECT" "$3" \
-      --query 'ResourceTagMappingList[].ResourceARN' --output text)"
+    left="$(list_tagged "$2" "$3" "$4")"
     rc=$?
     [ "$rc" != "0" ] && { echo "  $1: cannot list them (exit $rc); treating as still present"; return 1; }
     [ -z "$left" ] && { echo "  $1: none left"; return 0; }
@@ -52,11 +67,10 @@ kubectl -n "$NS" delete pvc --all --wait=true --timeout=5m 2>/dev/null || true
 kubectl delete namespace "$NS" --ignore-not-found --wait=true --timeout=5m || { echo "  namespace $NS did not go"; FAILED=1; }
 
 echo "== waiting for the controllers to delete their AWS resources"
-LBC="Key=elbv2.k8s.aws/cluster,Values=$CLUSTER_NAME"
-wait_gone "load balancers" elasticloadbalancing:loadbalancer "$LBC" || FAILED=1
-wait_gone "target groups" elasticloadbalancing:targetgroup "$LBC" || FAILED=1
-wait_gone "load balancer security groups" ec2:security-group "$LBC" || FAILED=1
-wait_gone "EBS volumes" ec2:volume "Key=ebs.csi.aws.com/cluster,Values=true" || FAILED=1
+wait_gone "load balancers" elasticloadbalancing:loadbalancer elbv2.k8s.aws/cluster "$CLUSTER_NAME" || FAILED=1
+wait_gone "target groups" elasticloadbalancing:targetgroup elbv2.k8s.aws/cluster "$CLUSTER_NAME" || FAILED=1
+wait_gone "load balancer security groups" ec2:security-group elbv2.k8s.aws/cluster "$CLUSTER_NAME" || FAILED=1
+wait_gone "EBS volumes" ec2:volume ebs.csi.aws.com/cluster true || FAILED=1
 
 if [ "$FAILED" != "0" ] || kubectl get namespace "$NS" >/dev/null 2>&1; then
   echo

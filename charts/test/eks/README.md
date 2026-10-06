@@ -106,10 +106,14 @@ In this order. Each step needs the one before it to have finished.
 charts/test/eks/cleanup.sh "$E"     # waits until the NLB, its groups and the EBS volume are gone
 aws --profile "$PROFILE" --region "$REGION" cloudformation delete-stack --stack-name "$RDS_STACK"
 aws --profile "$PROFILE" --region "$REGION" cloudformation wait stack-delete-complete --stack-name "$RDS_STACK"
-eksctl delete cluster -f "$OUT_DIR/cluster.yaml" --profile "$PROFILE" --wait
+eksctl delete cluster -f "$OUT_DIR/cluster.yaml" --profile "$PROFILE" --wait --disable-nodegroup-eviction
 charts/test/eks/strays.sh "$E"      # read-only; exits non-zero if anything is left
 helm registry logout ghcr.io
 ```
+
+`--disable-nodegroup-eviction` is not optional. Without it eksctl cordons every node at once and then
+drains them, the CoreDNS and EBS controller disruption budgets allow no eviction once their pods
+have nowhere to go, and the delete waits forever without deleting anything.
 
 `eksctl delete cluster` removes only what eksctl created. **A load balancer or volume the
 controllers made outlives it**, and an NLB left behind keeps network interfaces in the subnets.

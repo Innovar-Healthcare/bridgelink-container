@@ -31,13 +31,35 @@ oidc_providers() {   # the OIDC provider eksctl made for this cluster, found by 
   done
   return 0
 }
+# The tagging API goes on listing EC2 resources for a while after they are deleted (an instance for
+# an hour or more), so each EC2 hit is confirmed with EC2 itself. Other resource types are reported
+# as listed.
+tagged_existing() {   # <tag key> <value>
+  local arns arn id s
+  arns="$(awsr resourcegroupstaggingapi get-resources --tag-filters "Key=$1,Values=$2" \
+    --query 'ResourceTagMappingList[].ResourceARN' --output text)" || return 1
+  for arn in $arns; do
+    id="${arn##*/}"
+    case "$arn" in
+      *:instance/*) s="$(awsr ec2 describe-instances --instance-ids "$id" \
+          --query 'Reservations[0].Instances[0].State.Name' --output text 2>&1)" ;;
+      *:volume/*) s="$(awsr ec2 describe-volumes --volume-ids "$id" --query 'Volumes[0].State' --output text 2>&1)" ;;
+      *:network-interface/*) s="$(awsr ec2 describe-network-interfaces --network-interface-ids "$id" \
+          --query 'NetworkInterfaces[0].Status' --output text 2>&1)" ;;
+      *) echo "$arn"; continue ;;
+    esac
+    case "$s" in
+      terminated|None|*NotFound*) ;;
+      *) echo "$arn ($s)" ;;
+    esac
+  done
+  return 0
+}
 TMP_ERR="$(mktemp)"
 trap 'rm -f "$TMP_ERR"' EXIT
 
-check "resources tagged Project=$PROJECT" awsr resourcegroupstaggingapi get-resources \
-  --tag-filters "Key=Project,Values=$PROJECT" --query 'ResourceTagMappingList[].ResourceARN' --output text
-check "resources tagged Ticket=$TICKET" awsr resourcegroupstaggingapi get-resources \
-  --tag-filters "Key=Ticket,Values=$TICKET" --query 'ResourceTagMappingList[].ResourceARN' --output text
+check "resources tagged Project=$PROJECT" tagged_existing Project "$PROJECT"
+check "resources tagged Ticket=$TICKET" tagged_existing Ticket "$TICKET"
 check "EKS cluster $CLUSTER_NAME" awsr eks list-clusters --query "clusters[?@=='$CLUSTER_NAME']" --output text
 check "CloudFormation stacks" awsr cloudformation list-stacks \
   --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE CREATE_IN_PROGRESS DELETE_IN_PROGRESS DELETE_FAILED ROLLBACK_COMPLETE \
