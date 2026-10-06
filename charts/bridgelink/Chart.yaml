@@ -3,11 +3,11 @@ name: bridgelink
 description: A Helm chart for BridgeLink deployment
 type: application
 # Chart version follows SemVer and is bumped independently of appVersion (the BridgeLink release).
-version: 0.10.0
+version: 0.10.1
 appVersion: "26.9.0"
 icon: https://avatars.githubusercontent.com/u/116584698
 maintainers:
-  - name: InnovaCare Healthcare
+  - name: Innovar Healthcare
 keywords:
   - bridgelink
   - healthcare

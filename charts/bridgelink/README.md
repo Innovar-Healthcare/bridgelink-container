@@ -1,6 +1,6 @@
 # bridgelink
 
-![Version: 0.10.0](https://img.shields.io/badge/Version-0.10.0-informational?style=flat-square)
+![Version: 0.10.1](https://img.shields.io/badge/Version-0.10.1-informational?style=flat-square)
 ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square)
 ![AppVersion: 26.9.0](https://img.shields.io/badge/AppVersion-26.9.0-informational?style=flat-square)
 
@@ -16,7 +16,7 @@ BridgeLink is a healthcare integration platform that facilitates seamless commun
 
 | Name | Email | Url |
 | ---- | ------ | --- |
-| InnovaCare Healthcare |  |  |
+| Innovar Healthcare |  |  |
 
 ## Source Code
 
@@ -24,10 +24,11 @@ BridgeLink is a healthcare integration platform that facilitates seamless commun
 
 ## Prerequisites
 
-* Kubernetes 1.19+
+* Kubernetes 1.25 or later (Pod Security Admission, which the [Pod Security](#pod-security) section
+  relies on, became generally available in 1.25)
 * Helm 3.8+ (the first release with OCI registry support turned on by default)
-* PV provisioner support in the underlying infrastructure (for appdata and PostgreSQL persistence)
-* TLS certificates for secure communication (optional)
+* A storage class that can provision the appdata volume (and the bundled PostgreSQL's, if you use
+  it). On Amazon EKS that takes a step of its own: see [Amazon EKS](#amazon-eks).
 
 ## Installing the Chart
 
@@ -40,7 +41,7 @@ SERVER_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
 echo "$SERVER_ID"
 
 # Install the chart
-helm install bridgelink oci://ghcr.io/innovar-healthcare/charts/bridgelink --version 0.10.0 \
+helm install bridgelink oci://ghcr.io/innovar-healthcare/charts/bridgelink --version 0.10.1 \
   --set-string bridgelink.environment.SERVER_ID="$SERVER_ID"
 ```
 
@@ -62,7 +63,7 @@ bridgelink:
 ```
 
 ```bash
-helm install bridgelink oci://ghcr.io/innovar-healthcare/charts/bridgelink --version 0.10.0 -f values.yaml
+helm install bridgelink oci://ghcr.io/innovar-healthcare/charts/bridgelink --version 0.10.1 -f values.yaml
 ```
 
 ### From a checkout
@@ -73,6 +74,152 @@ chart directory in place of the OCI reference:
 ```bash
 helm install bridgelink charts/bridgelink --set-string bridgelink.environment.SERVER_ID="$SERVER_ID"
 ```
+
+## Amazon EKS
+
+[`examples/eks-values.yaml`](examples/eks-values.yaml) is a complete values file for EKS: Amazon RDS
+for PostgreSQL, the keystore on an EBS volume, MLLP behind an internal Network Load Balancer, and
+settings that pass the "restricted" Pod Security Standard. Its header lists the install commands.
+This section covers what the cluster needs before you install it.
+
+### Load balancer
+
+Install the [AWS Load Balancer Controller](https://kubernetes-sigs.github.io/aws-load-balancer-controller/)
+before setting any Service to `LoadBalancer`. Without it, EKS creates an internet-facing Classic
+Load Balancer. With it, the annotations in [Exposing BridgeLink](#exposing-bridgelink) give an
+internal NLB. Put channel ports on the listener Service ([Channel listener ports](#channel-listener-ports))
+and keep the admin API on `ClusterIP`, as the example does.
+
+BridgeLink runs in one availability zone, so the example turns on cross-zone load balancing. Without
+it, the NLB's addresses in the other zones have no target, and a sender that resolves one of them
+cannot connect.
+
+### MLLP connections and the 350-second idle timeout
+
+An NLB stops tracking a TCP connection that carries nothing for **350 seconds**. The next message
+sent on it gets a reset. MLLP senders usually keep one connection open, and an interface that goes
+quiet overnight crosses that limit. Keep the connection alive in one of these ways, the first if you
+can:
+
+- **TCP keepalive from BridgeLink.** Turn on **Keep Connection Open** in the channel's TCP Listener
+  settings, which also turns on TCP keepalive for its connections. Linux sends the first keepalive
+  after 7200 seconds, so also lower that for the pod:
+
+  ```yaml
+  bridgelink:
+    podSecurityContext:
+      sysctls:
+        - name: net.ipv4.tcp_keepalive_time
+          value: "300"
+  ```
+
+  This setting applies only to the BridgeLink pod. The "restricted" Pod Security Standard allows it
+  from Kubernetes 1.29. The same setting covers a TCP Sender with Keep Connection Open that sends
+  out through a NAT gateway, which also drops connections idle for 350 seconds.
+- **TCP keepalive from the sender**, at an interval under 350 seconds, or a sender that reconnects
+  when its connection is reset.
+- **A longer idle timeout on the NLB listener**, from 60 to 6000 seconds, set with an annotation on
+  the listener Service. It needs AWS Load Balancer Controller v2.9.0 or later, with the
+  `elasticloadbalancing:ModifyListenerAttributes` permission from the controller's current IAM
+  policy; an older controller ignores it. The suffix is the protocol and the Service port:
+
+  ```yaml
+  bridgelink:
+    listenerService:
+      annotations:
+        service.beta.kubernetes.io/aws-load-balancer-listener-attributes.TCP-6661: tcp.idle_timeout.seconds=3600
+  ```
+
+  Above 350 seconds, AWS requires the connection-tracking timeout on the nodes' network interfaces
+  to be at least as long. On sixth-generation Nitro instances it defaults to 350 seconds, so check
+  your instance types before you rely on this.
+
+### Storage
+
+appdata needs a volume (see [Keystore and appdata](#keystore-and-appdata)). On EKS:
+
+- Install the **Amazon EBS CSI driver** add-on. It provisions EBS volumes, and its controller needs
+  an IAM role to do so.
+- **Name a storage class.** EKS clusters created on 1.30 or later have no default storage class, so
+  a claim with an empty `storageClass` stays `Pending`. Create one and set
+  `bridgelink.persistence.storageClass` to it:
+
+  ```yaml
+  apiVersion: storage.k8s.io/v1
+  kind: StorageClass
+  metadata:
+    name: gp3
+  provisioner: ebs.csi.aws.com
+  parameters:
+    type: gp3
+    encrypted: "true"
+  volumeBindingMode: WaitForFirstConsumer
+  reclaimPolicy: Retain
+  allowVolumeExpansion: true
+  ```
+
+  `Retain` keeps the EBS volume if the claim is deleted, which protects the keystore.
+- An EBS volume stays in one availability zone, so BridgeLink can only run on nodes in that zone.
+  Keep at least one node there, or use EFS (see [Keystore and appdata](#keystore-and-appdata)).
+
+### Database
+
+Use Amazon RDS, not the bundled PostgreSQL: set `postgres.enabled: false` and point
+`MP_DATABASE_URL` at the RDS endpoint ([Database](#database)). Keep the password in a Secret,
+optionally synced from AWS Secrets Manager ([Passwords and Secrets](#passwords-and-secrets)).
+
+- `sslmode=require` encrypts the connection. To also verify the server, use `sslmode=verify-full`
+  with the RDS CA bundle for your region mounted in the pod; the example shows where.
+- The RDS security group must admit the BridgeLink pod on 5432. With the default Amazon VPC CNI, the
+  pod uses its node's security groups.
+- An RDS-managed master password rotates, and BridgeLink reads the password only when it starts.
+  Use a dedicated database user instead.
+
+### Keystore backup
+
+The keystore in appdata holds the key for every message stored with encryption on. Back up the EBS
+volume (EBS snapshots or AWS Backup) **and** the keystore passwords, which live in the Secret they
+are read from. One is useless without the other. See [Keystore and appdata](#keystore-and-appdata)
+for copying the keystore itself.
+
+### One replica
+
+The chart runs one BridgeLink pod, and upgrades stop it before starting the new one. See
+[Replicas and upgrades](#replicas-and-upgrades). For more than one server, see
+[Running several servers on one ID](#running-several-servers-on-one-id).
+
+### Mirroring images to Amazon ECR
+
+Nodes that cannot reach Docker Hub, or should not depend on it, can pull from your own ECR
+repositories. The images the chart can run are:
+
+| Value | Image | Needed |
+|---|---|---|
+| `bridgelink.image` | `innovarhealthcare/bridgelink` | Always |
+| `bridgelink.helperImage` | `busybox` | Only with `bridgelink.keystore.existingSecret` |
+| `webadmin.image` | `innovarhealthcare/bridgelink-webadmin` | Only with `webadmin.enabled` |
+| `postgres.image` | `postgres` | Only with `postgres.enabled`, which is on by default |
+
+The BridgeLink images are published for amd64 and arm64. Copy them with a tool that copies both,
+such as `crane copy` or `docker buildx imagetools create`. `docker pull`, `tag` and `push` copy only
+your machine's architecture:
+
+```bash
+REGISTRY=<account>.dkr.ecr.<region>.amazonaws.com
+aws ecr create-repository --repository-name bridgelink --region <region>
+aws ecr get-login-password --region <region> | docker login --username AWS --password-stdin "$REGISTRY"
+docker buildx imagetools create --tag "$REGISTRY/bridgelink:26.9.0" innovarhealthcare/bridgelink:26.9.0
+```
+
+```yaml
+bridgelink:
+  image:
+    repository: <account>.dkr.ecr.<region>.amazonaws.com/bridgelink
+    tag: "26.9.0"
+```
+
+Nodes pull from ECR in their own account through the node IAM role, which needs the
+`AmazonEC2ContainerRegistryPullOnly` (or `ReadOnly`) managed policy. No `imagePullSecrets` are needed.
 
 ## Uninstalling the Chart
 
@@ -89,7 +236,7 @@ helm uninstall bridgelink
 > release's BridgeLink service:
 >
 > ```bash
-> helm install bridgelink oci://ghcr.io/innovar-healthcare/charts/bridgelink --version 0.10.0 \
+> helm install bridgelink oci://ghcr.io/innovar-healthcare/charts/bridgelink --version 0.10.1 \
 >   --set-string bridgelink.environment.SERVER_ID="$SERVER_ID" \
 >   --set webadmin.enabled=true --set webadmin.acceptLicense=true
 > ```
@@ -110,22 +257,18 @@ helm uninstall bridgelink
 
 3. Launch the BridgeLink Administrator and configure:
    - Server URL: `https://127.0.0.1:8443`, or the load balancer address if you set one
-   - Username: `admin` (default)
-   - Password: See instructions below for obtaining the initial password
+   - Username: `admin`
+   - Password: `admin`
 
-   ```bash
-   # Get the initial admin password
-   kubectl get secret -n <namespace> bridgelink-secret -o jsonpath="{.data.ADMIN_PASSWORD}" | base64 -d
-   ```
+   That is the server's built-in first login. The chart does not set or store an admin password,
+   so change it as soon as you have logged in.
 
 ## Security Considerations
 
-1. **TLS Configuration**: By default, the chart generates self-signed certificates. For production, provide your own certificates:
-   ```yaml
-   tls:
-     enabled: true
-     secretName: your-tls-secret
-   ```
+1. **TLS certificate**: BridgeLink serves 8443 with the certificate in its keystore,
+   `appdata/keystore.jks`, which the server creates self-signed on first start. The chart has no
+   TLS setting of its own. To use your own certificate, replace it in that keystore and supply the
+   keystore from a Secret; see [Keystore and appdata](#keystore-and-appdata).
 
 2. **Database Security**:
    - Use strong passwords. The defaults in `values.yaml` are public.
@@ -143,19 +286,23 @@ helm uninstall bridgelink
 
 ## Architecture
 
-This chart deploys BridgeLink with the following components:
-- BridgeLink application server
-- PostgreSQL database (optional)
-- Persistent storage for data and configurations
-- Service accounts and RBAC resources
-- Ingress resources (optional)
-- Monitoring and metrics endpoints (optional)
+This chart deploys:
+- The BridgeLink server: a Deployment of one pod, and a Service for the admin API (8443, and 8080
+  unless you turn it off)
+- A PersistentVolumeClaim for appdata, which holds the keystore (unless `bridgelink.persistence.enabled`
+  is false)
+- A Secret holding the database and keystore passwords (unless you supply your own)
+- Optionally: a listener Service for channel ports, a ServiceAccount, the bundled PostgreSQL (on by
+  default, for evaluation), and WebAdmin
+
+It creates no Ingress, RBAC roles or metrics endpoints.
 
 ## Replicas and upgrades
 
-The chart runs **one** BridgeLink pod. `bridgelink.replicaCount` accepts only `0` or `1`: more than one
-active node needs the Channel Coordinator plugin and a separate server ID per pod, which this chart
-does not set up.
+This chart runs one BridgeLink pod: `bridgelink.replicaCount` accepts only `0` or `1`. A BridgeLink
+cluster runs several servers that share one server ID and use the Channel Coordinator plugin, so
+each polling channel (File, Database and SFTP readers) runs on one server at a time. See
+[Server ID](#server-id) for what a shared ID needs.
 
 Both the BridgeLink and the bundled PostgreSQL Deployments use `strategy: Recreate`, so `helm upgrade`
 stops the old pod before starting the new one. Expect a short outage during an upgrade. That is
@@ -215,6 +362,9 @@ Service. The ports then move to `<release>-bridgelink-listeners`:
 
 ```yaml
 bridgelink:
+  extraPorts:
+    - name: mllp-adt
+      containerPort: 6661
   listenerService:
     enabled: true
     type: LoadBalancer
@@ -235,13 +385,16 @@ default: a new install without one fails, and the error prints a freshly generat
 
 - **Record the ID and send it to us when you request a license.** BridgeLink licenses are issued
   against the server ID.
-- **Keep it for the life of the server.** Messages waiting in a queue are stored under the server ID,
-  and BridgeLink recovers and sends only the ones stamped with its own ID. A server that comes back
-  under a different ID leaves its queued messages unsent, and its license no longer matches.
+- **Keep it for the life of the server or cluster.** Messages waiting in a queue are stored under the
+  server ID, and BridgeLink recovers and sends only the ones stamped with its own ID. A server that
+  comes back under a different ID leaves its queued messages unsent, and its license no longer
+  matches.
 - **Reuse it when you replace the same server**: a restore, a migration to another cluster, or a
-  reinstall against the same database. Use a new ID only for a new server.
-- **Never run two live servers with the same ID against one database.** Both would treat the other's
-  queued messages as their own, so the same messages can be sent twice.
+  reinstall against the same database. Use a new ID only for a new, separate server or cluster.
+- **For an autoscaling cluster, give every server the same server ID**, so servers can be added and
+  removed without assigning new IDs. Turn off internal queuing (source and destination queues) in
+  the channels the cluster runs. A server sends the queued messages stamped with its own ID, so with
+  a shared ID and queuing on, more than one server would send them.
 
 To keep the ID out of values, read it from a Secret with `extraEnv`, which replaces the chart's
 variable of the same name:
@@ -257,6 +410,20 @@ bridgelink:
 Before chart 0.9.0, every install shared the default ID `7d760af2-680a-4a19-b9a2-c4685df61ebc`. A
 `helm upgrade` of a release that does not set an ID keeps that one, because the server already runs
 as it. See [Upgrading](#upgrading).
+
+### Running several servers on one ID
+
+On BridgeLink 26.9.0, servers that share one ID against one database need:
+
+- **RAW or METADATA message storage on every channel.** With DEVELOPMENT or PRODUCTION storage, each
+  server that starts recovers the ID's unfinished messages, which includes messages the other
+  servers are still processing. They are processed twice, and under load the new server does not
+  become ready.
+- **Internal queues off.** Use the Work Queue for work that has to wait.
+- **The Channel Coordinator for polling channels** (File, Database and SFTP readers), with the
+  channel's initial state set to Stopped, so the Coordinator decides where it runs. Each server
+  needs its own hostname. On Kubernetes the pod name already is one.
+- **Undeploy a channel on every server before removing all its messages or deleting it.**
 
 ## Database
 
@@ -691,7 +858,7 @@ not apply.
 | bridgelink.environment.MP_DATABASE_USERNAME | string | `""` | Database username. Leave empty to use `postgres.credentials.username` with the bundled PostgreSQL. |
 | bridgelink.environment.MP_KEYSTORE_KEYPASS | string | `"bridgelinkKeystore"` | Keystore key password. Stored in the chart's Secret, not the pod spec. Never change it after the first start: the server could no longer open its keystore. |
 | bridgelink.environment.MP_KEYSTORE_STOREPASS | string | `"bridgelinkKeypass"` | Keystore store password. Stored in the chart's Secret, not the pod spec. Never change it after the first start. |
-| bridgelink.environment.SERVER_ID | string | `""` | Server ID, a UUID. Required on a new install: the install fails without it and prints a freshly generated one to use. Record it: BridgeLink licenses are issued against it. Keep it for the life of the server, since queued messages are recovered only under the ID that stored them, and never run two servers with the same ID against one database. An upgrade that leaves it empty keeps `7d760af2-680a-4a19-b9a2-c4685df61ebc`, the ID every install shared before chart 0.9.0. See the README's "Server ID" section. |
+| bridgelink.environment.SERVER_ID | string | `""` | Server ID, a UUID. Required on a new install: the install fails without it and prints a freshly generated one to use. Record it: BridgeLink licenses are issued against it. Keep it for the life of the server or cluster, since queued messages are recovered only under the ID that stored them. Servers in one cluster share one ID. An upgrade that leaves it empty keeps `7d760af2-680a-4a19-b9a2-c4685df61ebc`, the ID every install shared before chart 0.9.0. See the README's "Server ID" section. |
 | bridgelink.extraEnv | list | `[]` | Extra environment variables for the BridgeLink container, as Kubernetes EnvVar entries, so `valueFrom` works. An entry here replaces any variable of the same name the chart sets, including `environment`, the database settings and the passwords. For passwords, `credentials.existingSecret` is usually simpler. |
 | bridgelink.extraPorts | list | `[]` | Extra ports for channel listeners (MLLP, HTTP, TCP), declared on the BridgeLink container and added to the BridgeLink Service, or to the listener Service when `listenerService.enabled`. Each entry: `name` (lowercase, at most 15 characters), `containerPort` (the port the channel listens on), and optionally `port` (the Service port, default `containerPort`) and `protocol` (default TCP). Adding, changing or removing an entry changes the pod, so BridgeLink restarts on upgrade. |
 | bridgelink.extraVolumeMounts | list | `[]` | Extra volume mounts for the BridgeLink container. Plugin zips are installed from `/opt/bridgelink/custom-extensions` |
@@ -719,7 +886,7 @@ not apply.
 | bridgelink.podLabels | object | `{}` | Extra labels for the BridgeLink pod. The chart's selector labels (`app`, `app.kubernetes.io/name`, `app.kubernetes.io/instance`) cannot be changed and are ignored here. |
 | bridgelink.podSecurityContext | object | `{"fsGroupChangePolicy":"OnRootMismatch","runAsNonRoot":true,"seccompProfile":{"type":"RuntimeDefault"}}` | Pod security context. `runAsUser`, `runAsGroup` and `fsGroup` default to the two values above and can be overridden here. The defaults meet the Kubernetes "restricted" Pod Security Standard; set one of the keys below to `null` to remove it. |
 | bridgelink.readinessProbe | string | `nil` | Readiness probe. Disabled by default for the same reason as startupProbe; see above. Note that until you enable it, a pod is considered Ready as soon as its container is running, which means Service traffic can reach BridgeLink while the engine is still deploying channels. |
-| bridgelink.replicaCount | int | `1` | Number of BridgeLink pods: 0 or 1. The schema rejects anything higher, because more than one active node needs the Channel Coordinator plugin and a server ID per pod, which this chart does not set up. Upgrades stop the old pod before starting the new one (`strategy: Recreate`). |
+| bridgelink.replicaCount | int | `1` | Number of BridgeLink pods: 0 or 1. This chart runs one pod; a BridgeLink cluster runs several servers that share one server ID and use the Channel Coordinator plugin (see the README's "Server ID" section). Upgrades stop the old pod before starting the new one (`strategy: Recreate`). |
 | bridgelink.resources.limits.cpu | string | `"2000m"` | CPU limit for BridgeLink pods |
 | bridgelink.resources.limits.memory | string | `"2Gi"` | Memory limit for BridgeLink pods |
 | bridgelink.resources.requests.cpu | string | `"500m"` | CPU request for BridgeLink pods |
@@ -781,34 +948,42 @@ not apply.
 
 ## Environment Variables
 
-The BridgeLink application can be configured using environment variables:
+Set these under `bridgelink.environment`, or under `bridgelink.extraEnv` to read one from a Secret.
+The image reads:
 
-### Core Configuration
-- `MP_DATABASE`: Database type (default: postgres)
-- `MP_DATABASE_URL`: Database connection URL
-- `MP_DATABASE_USERNAME`: Database username
-- `MP_DATABASE_PASSWORD`: Database password
-- `SERVER_ID`: Server ID, required on a new install; see [Server ID](#server-id)
-- `EXTENSIONS_DOWNLOAD`: Comma-separated URLs of plugin zips to install at every start; see [Plugins](#plugins)
+- `MP_<NAME>`: sets a `mirth.properties` key. The name is lowercased, `_` becomes `.` and `__`
+  becomes `-`, so `MP_DATABASE_URL` sets `database.url`. The database settings are covered in
+  [Database](#database).
+- `MP_VMOPTIONS`: JVM options, separated by commas, added to `blserver.vmoptions`. See
+  [Memory](#memory).
+- `SERVER_ID`: required on a new install; see [Server ID](#server-id).
+- `EXTENSIONS_DOWNLOAD`: URLs of plugin zips, separated by commas, installed at every start; see
+  [Plugins](#plugins).
+- `KEYSTORE_DOWNLOAD`: URL of a keystore to download into appdata at every start. A
+  [keystore Secret](#keystore-and-appdata) does the same job without a download.
+- `CUSTOM_PROPERTIES`, `CUSTOM_VMOPTIONS`: URL of a complete `mirth.properties` or
+  `blserver.vmoptions`, downloaded at every start to replace the image's copy. `MP_` variables
+  still apply on top of it.
+- `ALLOW_INSECURE`: `"true"` skips certificate and hostname checks on every download above.
+- `BL_HEALTH_ALWAYS_STATUS`: `"true"` makes the readiness probe keep checking the server's status
+  after the first success. See the probe notes in `values.yaml` before you set it.
 
-### Advanced Configuration
-- `JAVA_OPTS`: JVM options
-- `MAX_HEAP_SIZE`: Maximum heap size
-- `MIN_HEAP_SIZE`: Minimum heap size
-- `DEBUG_PORT`: Remote debugging port (if enabled)
-- `ENABLE_JMX`: Enable JMX monitoring
-- `JMX_PORT`: JMX port number
+## Memory
 
-## Monitoring
-
-The chart can expose metrics for Prometheus:
+BridgeLink's maximum heap is **256 MB** unless you set it, whatever `bridgelink.resources.limits.memory`
+is. Set it with `MP_VMOPTIONS`, leaving room under the memory limit for the JVM's own overhead and,
+if you turn on the exec probes, their short-lived JVMs (about 50-80 MB each):
 
 ```yaml
-metrics:
-  enabled: true
-  serviceMonitor:
-    enabled: true
+bridgelink:
+  environment:
+    MP_VMOPTIONS: "-Xmx1536m"
+  resources:
+    limits:
+      memory: 2Gi
 ```
+
+A changed value restarts BridgeLink on the next upgrade.
 
 ## Troubleshooting
 
@@ -823,17 +998,14 @@ metrics:
    - Check network policies
    - Validate database URL
 
-3. **Memory issues**:
-   - Review JVM settings
-   - Check container resource limits
-   - Monitor heap usage
+3. **Memory issues** (`java.lang.OutOfMemoryError` in the log):
+   - The heap is 256 MB unless you set it; see [Memory](#memory)
+   - Keep the heap below `bridgelink.resources.limits.memory`
 
 ## Support
 
-For support and documentation, visit:
-- [Official Documentation](https://docs.innovarhealthcare.com/bridgelink)
-- [GitHub Issues](https://github.com/Innovar-Healthcare/bridgelink-container/issues)
-- [Community Forums](https://community.innovarhealthcare.com)
+Report a problem with the chart or the images in
+[GitHub Issues](https://github.com/Innovar-Healthcare/bridgelink-container/issues).
 
 ----------------------------------------------
 Autogenerated from chart metadata using [helm-docs](https://github.com/norwoodj/helm-docs)
