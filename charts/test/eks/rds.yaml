@@ -1,0 +1,74 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Throwaway Amazon RDS for PostgreSQL instance for the BridgeLink Helm chart's EKS test. Single-AZ,
+  no backups, no deletion protection, deleted with the stack. Not a production database design.
+
+Parameters:
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Two subnets in different availability zones (an RDS subnet group needs two).
+  SecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: >-
+      A group the EKS nodes already share, so the nodes reach 5432 without a new group or rule
+      (eksctl's ClusterSharedNodeSecurityGroup allows all traffic between its members).
+  InstanceClass:
+    Type: String
+    Default: db.t4g.micro
+  EngineVersion:
+    Type: String
+    Default: "16"
+  Owner:
+    Type: String
+  Ticket:
+    Type: String
+  Project:
+    Type: String
+
+Resources:
+  SubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: !Sub "${AWS::StackName} chart test"
+      SubnetIds: !Ref SubnetIds
+      Tags:
+        - {Key: Owner, Value: !Ref Owner}
+        - {Key: Ticket, Value: !Ref Ticket}
+        - {Key: Project, Value: !Ref Project}
+        - {Key: Ephemeral, Value: "true"}
+
+  Database:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      Engine: postgres
+      EngineVersion: !Ref EngineVersion
+      DBInstanceClass: !Ref InstanceClass
+      AllocatedStorage: "20"
+      StorageType: gp3
+      StorageEncrypted: true
+      DBName: bridgelinkdb
+      MasterUsername: bridgelink
+      # RDS generates the password and keeps it in Secrets Manager; it never passes through a
+      # command line. The secret is deleted with the instance.
+      ManageMasterUserPassword: true
+      DBSubnetGroupName: !Ref SubnetGroup
+      VPCSecurityGroups: [!Ref SecurityGroupId]
+      PubliclyAccessible: false
+      MultiAZ: false
+      BackupRetentionPeriod: 0
+      DeleteAutomatedBackups: true
+      DeletionProtection: false
+      EnablePerformanceInsights: false
+      Tags:
+        - {Key: Owner, Value: !Ref Owner}
+        - {Key: Ticket, Value: !Ref Ticket}
+        - {Key: Project, Value: !Ref Project}
+        - {Key: Ephemeral, Value: "true"}
+
+Outputs:
+  Endpoint:
+    Value: !GetAtt Database.Endpoint.Address
+  MasterUserSecretArn:
+    Value: !GetAtt Database.MasterUserSecret.SecretArn

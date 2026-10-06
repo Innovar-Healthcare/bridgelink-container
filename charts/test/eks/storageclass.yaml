@@ -1,0 +1,18 @@
+# The gp3 StorageClass that examples/eks-values.yaml names. A template rendered by render.sh, so the
+# volumes it creates carry the run's tags. reclaimPolicy Delete because the cluster is thrown away;
+# the example recommends Retain for a real install, where the volume holds the keystore.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: gp3
+provisioner: ebs.csi.aws.com
+parameters:
+  type: gp3
+  encrypted: "true"
+  tagSpecification_1: "Owner=${OWNER}"
+  tagSpecification_2: "Ticket=${TICKET}"
+  tagSpecification_3: "Project=${PROJECT}"
+  tagSpecification_4: "Ephemeral=true"
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Delete
+allowVolumeExpansion: true
