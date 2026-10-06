@@ -96,10 +96,15 @@ bridgelink:
     annotations:
       service.beta.kubernetes.io/aws-load-balancer-scheme: internal
       service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+      # BridgeLink runs one pod, in one zone, so without cross-zone load balancing the NLB's address
+      # in every other zone has no target, and a sender that resolves one of those addresses cannot
+      # connect. Costs inter-zone data transfer, which is small at MLLP volumes.
+      service.beta.kubernetes.io/aws-load-balancer-attributes: load_balancing.cross_zone.enabled=true
       # Only if your subnets are not tagged kubernetes.io/role/internal-elb=1:
       # service.beta.kubernetes.io/aws-load-balancer-subnets: <subnet-a>,<subnet-b>
     # The networks that send MLLP. An internal NLB is reachable only inside the VPC and from networks
-    # routed to it.
+    # routed to it. It closes a connection idle for 350 seconds, so a sender that keeps its connection
+    # open needs to send within that time or reconnect.
     loadBalancerSourceRanges:
       - <sender CIDR>
 
