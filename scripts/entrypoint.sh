@@ -20,8 +20,8 @@ VMOPTIONS_FILE="/opt/bridgelink/blserver.vmoptions"
 SERVER_ID_FILE="/opt/bridgelink/appdata/server.id"
 KEYSTORE_FILE="/opt/bridgelink/appdata/keystore.jks"
 EXTENSIONS_DIR="/opt/bridgelink/extensions"
-CUSTOM_JARS_DIR="/opt/bridgelink/custom-jars"
-S3_CUSTOM_JARS_DIR="/opt/bridgelink/S3_custom-jars"
+# The folder BridgeLink's Default Resource reads, so channels that use that resource can load the jars.
+CUSTOM_JARS_DIR="/opt/bridgelink/custom-lib"
 APPDATA_DIR="/opt/bridgelink/appdata"
 
 # Function to update a property in the file
@@ -194,7 +194,7 @@ fi
 if [ -n "${CUSTOM_JARS_DOWNLOAD}" ]; then
   echo "Downloading jars from ${CUSTOM_JARS_DOWNLOAD}"
 
-  mkdir ${CUSTOM_JARS_DIR}
+  mkdir -p ${CUSTOM_JARS_DIR}
 
   cd ${CUSTOM_JARS_DIR}
 

@@ -55,7 +55,8 @@ public final class BridgeLinkBootstrap {
     static final Path   SERVER_ID_FILE   = Paths.get(HOME, "appdata", "server.id");
     static final Path   KEYSTORE_FILE    = Paths.get(HOME, "appdata", "keystore.jks");
     static final Path   EXTENSIONS_DIR   = Paths.get(HOME, "extensions");
-    static final Path   CUSTOM_JARS_DIR  = Paths.get(HOME, "custom-jars");
+    // The folder BridgeLink's Default Resource reads, so channels that use that resource can load the jars.
+    static final Path   CUSTOM_JARS_DIR  = Paths.get(HOME, "custom-lib");
     static final Path   APPDATA_DIR      = Paths.get(HOME, "appdata");
     static final Path   CUSTOM_EXT_DIR   = Paths.get(HOME, "custom-extensions");
     static final Path   LAUNCHER_JAR     = Paths.get(HOME, "mirth-server-launcher.jar");

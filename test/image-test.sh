@@ -62,6 +62,9 @@ WORK="$(mktemp -d)"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 PASS=0 FAIL=0
+# api, login and channel_json, shared with the chart tests. Its kubectl helpers go unused here.
+# shellcheck source-path=SCRIPTDIR source=../charts/test/lib/bl-api.sh
+. "$REPO_ROOT/charts/test/lib/bl-api.sh"
 
 # ---- helpers ----------------------------------------------------------------------------------
 ok()   { echo "  PASS: $1"; PASS=$((PASS+1)); }
@@ -223,6 +226,27 @@ reporter_check() { curl -kf -s -o /dev/null -m 5 "https://localhost:$1" 2>/dev/n
 api_code() {
   curl -k -s -o /dev/null -w '%{http_code}' \
        -H 'X-Requested-With: XMLHttpRequest' "https://localhost:$1/api/server/version"
+}
+
+# Deploys a channel whose deploy script calls blcustomjar.Marker, the class in the
+# CUSTOM_JARS_DOWNLOAD fixture, and prints what the class wrote: nothing when it did not load. The
+# channel uses the Default Resource, as new channels do, so this is the path a customer's channel
+# takes to the jars. The container must publish 8443.
+custom_jar_marker() {
+  local name="$1" id="9c1e2d3f-4a5b-4c6d-8e7f-0a1b2c3d4e5f" version
+  API="https://localhost:$(https_port "$name")/api"
+  [ "$(login)" = "200" ] || { echo "    (login to $name failed)" >&2; return 0; }
+  version="$(api GET /server/version)"
+  channel_json "$version" "$id" custom-jar-test \
+    | sed "s|\"deployScript\":\"return;\"|\"deployScript\":\"Packages.blcustomjar.Marker.write('/tmp/custom-jar-marker'); return;\"|" \
+    > "$WORK/cj-channel.json"
+  api POST /channels -H 'Content-Type: application/json' --data-binary @"$WORK/cj-channel.json" -o /dev/null
+  api POST "/channels/$id/_deploy" -o /dev/null
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    docker cp "$name:/tmp/custom-jar-marker" "$WORK/cj-marker-$name" >/dev/null 2>&1 && break
+    sleep 2
+  done
+  cat "$WORK/cj-marker-$name" 2>/dev/null
 }
 
 # ---- fixtures ---------------------------------------------------------------------------------
@@ -433,12 +457,35 @@ fi
 cp "$WORK/mp" "$WORK/httproot/custom.properties"; echo "custom.download.marker = downloaded" >> "$WORK/httproot/custom.properties"
 printf -- '-server\n-Xmx333m\n-Djava.awt.headless=true\n-Dcustom.vmopt.marker=downloaded\n' > "$WORK/httproot/custom.vmoptions"
 head -c 2048 /dev/urandom > "$WORK/httproot/keystore.jks"   # dummy bytes: tests the download path, not JKS validity
-python3 - "$WORK" <<'PY'
-import os, sys, zipfile
-w = sys.argv[1]; d = os.path.join(w, "cjar"); os.makedirs(d, exist_ok=True)
-open(os.path.join(d, "lib.txt"), "w").write("custom jar payload\n")
+# A real jar holding one class, inside a folder of the zip, so the Default Resource's recursive scan
+# is what finds it. --release 17 keeps the class loadable on every image's runtime.
+mkdir -p "$WORK/cjar/src/blcustomjar"
+cat > "$WORK/cjar/src/blcustomjar/Marker.java" <<'JAVA'
+package blcustomjar;
+
+public class Marker {
+    public static void write(String path) throws java.io.IOException {
+        java.nio.file.Files.write(java.nio.file.Paths.get(path),
+                "loaded from custom-lib".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    }
+}
+JAVA
+CUSTOM_JAR_BUILT=0
+if command -v javac >/dev/null \
+   && javac --release 17 -d "$WORK/cjar/classes" "$WORK/cjar/src/blcustomjar/Marker.java" >"$WORK/cjar.log" 2>&1; then
+  CUSTOM_JAR_BUILT=1
+fi
+python3 - "$WORK" "$CUSTOM_JAR_BUILT" <<'PY'
+import io, os, sys, zipfile
+w, built = sys.argv[1], sys.argv[2] == "1"
+jar = io.BytesIO()
+with zipfile.ZipFile(jar, "w") as j:
+    if built:
+        j.write(os.path.join(w, "cjar", "classes", "blcustomjar", "Marker.class"), "blcustomjar/Marker.class")
+    else:
+        j.writestr("placeholder.txt", "no host JDK to compile the marker class\n")
 with zipfile.ZipFile(os.path.join(w, "httproot", "custom-jars.zip"), "w") as z:
-    z.write(os.path.join(d, "lib.txt"), "mycustomjar/lib.txt")
+    z.writestr("mycustomjar/blcustomjar.jar", jar.getvalue())
 PY
 
 docker run -d --name fileserver --network "$NET" \
@@ -456,7 +503,7 @@ else
 fi
 
 info "5b. CUSTOM_PROPERTIES / CUSTOM_VMOPTIONS / CUSTOM_JARS_DOWNLOAD"
-run bl-knobs --network "$NET" \
+run bl-knobs --network "$NET" -p 8443 \
   -e CUSTOM_PROPERTIES="http://fileserver/custom.properties" \
   -e CUSTOM_VMOPTIONS="http://fileserver/custom.vmoptions" \
   -e CUSTOM_JARS_DOWNLOAD="http://fileserver/custom-jars.zip"
@@ -464,7 +511,21 @@ if wait_for_log bl-knobs; then
   docker cp bl-knobs:/opt/bridgelink/conf/mirth.properties "$WORK/mp3" >/dev/null 2>&1
   grep -q '^custom.download.marker = downloaded' "$WORK/mp3" && ok "CUSTOM_PROPERTIES overwrote mirth.properties" || bad "CUSTOM_PROPERTIES not applied"
   vmopt_has bl-knobs '-Dcustom.vmopt.marker=downloaded' && ok "CUSTOM_VMOPTIONS applied" || bad "CUSTOM_VMOPTIONS not applied"
-  docker cp bl-knobs:/opt/bridgelink/custom-jars/mycustomjar/lib.txt "$WORK/cj" >/dev/null 2>&1 && ok "CUSTOM_JARS_DOWNLOAD extracted" || bad "CUSTOM_JARS_DOWNLOAD not extracted"
+  docker cp bl-knobs:/opt/bridgelink/custom-lib/mycustomjar/blcustomjar.jar "$WORK/cj" >/dev/null 2>&1 \
+    && ok "CUSTOM_JARS_DOWNLOAD extracted into custom-lib" || bad "CUSTOM_JARS_DOWNLOAD not extracted into custom-lib"
+  if [ "$CUSTOM_JAR_BUILT" = "1" ]; then
+    [ "$(custom_jar_marker bl-knobs)" = "loaded from custom-lib" ] \
+      && ok "a channel loads a class from the CUSTOM_JARS_DOWNLOAD jar" \
+      || bad "a channel could not load the class from the CUSTOM_JARS_DOWNLOAD jar"
+    # The control: the same channel on a server without the download must not load the class, or
+    # the assertion above could pass for a reason that has nothing to do with CUSTOM_JARS_DOWNLOAD.
+    [ -z "$(custom_jar_marker bl-boot)" ] \
+      && ok "control: without CUSTOM_JARS_DOWNLOAD the channel cannot load the class" \
+      || bad "control: the class loaded on a server that never downloaded it"
+  else
+    echo "  SKIP: no host JDK to compile the marker class, so class loading was not checked"
+    cat "$WORK/cjar.log" 2>/dev/null
+  fi
 else
   bad "server did not start (custom knobs)"
 fi
