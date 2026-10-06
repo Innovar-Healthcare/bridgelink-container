@@ -1,0 +1,126 @@
+# BridgeLink on Amazon EKS: Amazon RDS for PostgreSQL, appdata (the keystore) on an EBS volume, MLLP
+# behind an internal Network Load Balancer, and settings that pass the "restricted" Pod Security
+# Standard. Replace every <placeholder>, then install with a server ID of its own:
+#
+#   kubectl create namespace bridgelink
+#   kubectl label namespace bridgelink pod-security.kubernetes.io/enforce=restricted
+#   kubectl -n bridgelink create secret generic bridgelink-db --from-file=password=<file holding it>
+#   kubectl -n bridgelink create secret generic bridgelink-keystore-passwords \
+#     --from-file=storepass=<(openssl rand -hex 24 | tr -d '\n') \
+#     --from-file=keypass=<(openssl rand -hex 24 | tr -d '\n')
+#   SERVER_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
+#   helm install bridgelink oci://ghcr.io/innovar-healthcare/charts/bridgelink --version <chart version> \
+#     -n bridgelink -f eks-values.yaml --set-string bridgelink.environment.SERVER_ID="$SERVER_ID"
+#
+# Reading passwords from files keeps them out of shell history and the process list. A file must
+# hold only the password, with no trailing newline, or the newline becomes part of it.
+#
+# Record the server ID: it is needed for a license and must stay the same for the life of the server
+# (see "Server ID" in the README). It is deliberately not in this file, so that two installs made
+# from it can never share one.
+#
+# What the cluster needs first:
+#   - The AWS Load Balancer Controller, for the internal NLB. Without it, a LoadBalancer Service on
+#     EKS becomes an internet-facing Classic ELB.
+#   - The Amazon EBS CSI driver and a StorageClass named gp3 (below). EKS has no default
+#     StorageClass, so an empty storageClass leaves the claim Pending.
+#   - Outbound access from the nodes to Docker Hub for the BridgeLink image (or a mirror in Amazon
+#     ECR, set under bridgelink.image), and to RDS on 5432.
+#
+#   apiVersion: storage.k8s.io/v1
+#   kind: StorageClass
+#   metadata:
+#     name: gp3
+#   provisioner: ebs.csi.aws.com
+#   parameters:
+#     type: gp3
+#     encrypted: "true"
+#   volumeBindingMode: WaitForFirstConsumer
+#   reclaimPolicy: Retain
+#   allowVolumeExpansion: true
+
+postgres:
+  # The bundled PostgreSQL is for evaluation only, and runs as root, so a restricted namespace
+  # rejects it anyway.
+  enabled: false
+
+bridgelink:
+  environment:
+    # Required, and set on the command line above. Empty here on purpose.
+    SERVER_ID: ""
+    MP_DATABASE: postgres
+    # sslmode=require encrypts the connection. To also check the server certificate, use
+    # sslmode=verify-full&sslrootcert=<path>, with the RDS CA bundle for your region mounted at that
+    # path (a ConfigMap through extraVolumes and extraVolumeMounts).
+    MP_DATABASE_URL: "jdbc:postgresql://<rds-endpoint>:5432/bridgelinkdb?sslmode=require"
+    MP_DATABASE_USERNAME: bridgelink
+
+  # Passwords from Secrets, so none appears in the Deployment. An extraEnv entry replaces the variable
+  # of the same name the chart would set. The keystore passwords protect the data-encryption key:
+  # keep them, and back them up with the keystore. Changing them later makes the existing keystore
+  # unreadable.
+  extraEnv:
+    - name: MP_DATABASE_PASSWORD
+      valueFrom:
+        secretKeyRef: {name: bridgelink-db, key: password}
+    - name: MP_KEYSTORE_STOREPASS
+      valueFrom:
+        secretKeyRef: {name: bridgelink-keystore-passwords, key: storepass}
+    - name: MP_KEYSTORE_KEYPASS
+      valueFrom:
+        secretKeyRef: {name: bridgelink-keystore-passwords, key: keypass}
+
+  # appdata holds keystore.jks, and with it the key that decrypts every message stored with
+  # encryption on. An EBS volume lives in one availability zone: the pod can move to another node in
+  # that zone, but if no node there can take it, the pod stays Pending until one can. Back the volume
+  # up (EBS snapshots or AWS Backup), together with the keystore passwords.
+  persistence:
+    enabled: true
+    storageClass: gp3
+    size: 1Gi
+
+  # The admin API (8443) stays inside the cluster; reach it with kubectl port-forward.
+  service:
+    type: ClusterIP
+
+  # The MLLP listener. A channel must listen on this port for it to answer.
+  extraPorts:
+    - name: mllp
+      containerPort: 6661
+
+  # A separate Service for the listener, as an internal NLB through the AWS Load Balancer Controller.
+  listenerService:
+    enabled: true
+    type: LoadBalancer
+    loadBalancerClass: service.k8s.aws/nlb
+    annotations:
+      service.beta.kubernetes.io/aws-load-balancer-scheme: internal
+      service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+      # BridgeLink runs one pod, in one zone, so without cross-zone load balancing the NLB's address
+      # in every other zone has no target, and a sender that resolves one of those addresses cannot
+      # connect. Costs inter-zone data transfer, which is small at MLLP volumes.
+      service.beta.kubernetes.io/aws-load-balancer-attributes: load_balancing.cross_zone.enabled=true
+      # Only if your subnets are not tagged kubernetes.io/role/internal-elb=1:
+      # service.beta.kubernetes.io/aws-load-balancer-subnets: <subnet-a>,<subnet-b>
+    # The networks that send MLLP. An internal NLB is reachable only inside the VPC and from networks
+    # routed to it. By default it closes a connection idle for 350 seconds (the listener attribute
+    # tcp.idle_timeout.seconds), so a sender that keeps its connection open must send within that
+    # time, reconnect, or have the timeout raised.
+    loadBalancerSourceRanges:
+      - <sender CIDR>
+
+  # Ready only once BridgeLink reports that it has started, so `helm --wait` and the load balancer's
+  # target registration wait for the engine rather than the JVM. Needs an image built with the
+  # health check (26.9.0 and later images have it).
+  startupProbe:
+    exec:
+      command: ["java", "-XX:TieredStopAtLevel=1", "-XX:+UseSerialGC", "-XX:-UsePerfData", "-Xmx32m", "-cp", "/opt/bridgelink/bootstrap", "BridgeLinkHealthcheck"]
+    periodSeconds: 10
+    failureThreshold: 30
+    timeoutSeconds: 5
+  readinessProbe:
+    exec:
+      command: ["java", "-XX:TieredStopAtLevel=1", "-XX:+UseSerialGC", "-XX:-UsePerfData", "-Xmx32m", "-cp", "/opt/bridgelink/bootstrap", "BridgeLinkHealthcheck"]
+    periodSeconds: 15
+    timeoutSeconds: 5
+    failureThreshold: 3

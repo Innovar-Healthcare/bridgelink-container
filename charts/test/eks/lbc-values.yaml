@@ -1,0 +1,15 @@
+# Values for the AWS Load Balancer Controller chart (eks/aws-load-balancer-controller). A template
+# rendered by render.sh. The service account and its IAM role are created by eksctl (cluster.yaml).
+clusterName: ${CLUSTER_NAME}
+region: ${REGION}
+vpcId: ${VPC_ID}
+serviceAccount:
+  create: false
+  name: aws-load-balancer-controller
+# Tags every load balancer, target group and security group the controller creates, so the stray
+# check after teardown finds them.
+defaultTags:
+  Owner: ${OWNER}
+  Ticket: ${TICKET}
+  Project: ${PROJECT}
+  Ephemeral: "true"

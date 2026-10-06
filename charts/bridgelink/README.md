@@ -1,6 +1,6 @@
 # bridgelink
 
-![Version: 0.9.2](https://img.shields.io/badge/Version-0.9.2-informational?style=flat-square)
+![Version: 0.9.3](https://img.shields.io/badge/Version-0.9.3-informational?style=flat-square)
 ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square)
 ![AppVersion: 26.9.0](https://img.shields.io/badge/AppVersion-26.9.0-informational?style=flat-square)
 
@@ -40,7 +40,7 @@ SERVER_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
 echo "$SERVER_ID"
 
 # Install the chart
-helm install bridgelink oci://ghcr.io/innovar-healthcare/charts/bridgelink --version 0.9.2 \
+helm install bridgelink oci://ghcr.io/innovar-healthcare/charts/bridgelink --version 0.9.3 \
   --set-string bridgelink.environment.SERVER_ID="$SERVER_ID"
 ```
 
@@ -62,7 +62,7 @@ bridgelink:
 ```
 
 ```bash
-helm install bridgelink oci://ghcr.io/innovar-healthcare/charts/bridgelink --version 0.9.2 -f values.yaml
+helm install bridgelink oci://ghcr.io/innovar-healthcare/charts/bridgelink --version 0.9.3 -f values.yaml
 ```
 
 ### From a checkout
@@ -89,7 +89,7 @@ helm uninstall bridgelink
 > release's BridgeLink service:
 >
 > ```bash
-> helm install bridgelink oci://ghcr.io/innovar-healthcare/charts/bridgelink --version 0.9.2 \
+> helm install bridgelink oci://ghcr.io/innovar-healthcare/charts/bridgelink --version 0.9.3 \
 >   --set-string bridgelink.environment.SERVER_ID="$SERVER_ID" \
 >   --set webadmin.enabled=true --set webadmin.acceptLicense=true
 > ```
