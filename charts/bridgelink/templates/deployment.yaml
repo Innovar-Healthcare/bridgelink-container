@@ -1,3 +1,4 @@
+{{- $creds := include "bridgelink.credentials" . | fromJson }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -26,9 +27,19 @@ spec:
         {{- with omit (.Values.bridgelink.podLabels | default dict) "app" "app.kubernetes.io/name" "app.kubernetes.io/instance" }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
-      {{- with .Values.bridgelink.podAnnotations }}
+      {{- /* Only the passwords BridgeLink reads: the bundled PostgreSQL's is not one of them. */}}
+      {{- $passwords := omit $creds.data "postgres.password" }}
+      {{- $annotations := omit (.Values.bridgelink.podAnnotations | default dict) "checksum/credentials" }}
+      {{- if or $passwords $annotations }}
       annotations:
+        {{- with $passwords }}
+        # Restarts BridgeLink when a password in the chart's Secret changes: a variable read from a
+        # Secret is set only when the container starts.
+        checksum/credentials: {{ toJson . | sha256sum }}
+        {{- end }}
+        {{- with $annotations }}
         {{- toYaml . | nindent 8 }}
+        {{- end }}
       {{- end }}
     spec:
       {{- /* Only when asked for, so a release that sets neither keeps an unchanged pod template. */}}
@@ -118,30 +129,13 @@ spec:
               value: {{ . | quote }}
             {{- end }}
             {{- end }}
-            {{- with include "bridgelink.databasePassword" . }}
-            {{- if not (has "MP_DATABASE_PASSWORD" $extra) }}
-            - name: MP_DATABASE_PASSWORD
-              value: {{ . | quote }}
+            {{- /* Passwords always come from a Secret; see bridgelink.credentials for which one. */}}
+            {{- range $name := list "MP_DATABASE_PASSWORD" "MP_KEYSTORE_STOREPASS" "MP_KEYSTORE_KEYPASS" }}
+            {{- with index $creds.env $name }}
+            {{- include "bridgelink.credentialEnv" (list $name .) | nindent 12 }}
             {{- end }}
             {{- end }}
-            {{- $skip := concat $extra (list "MP_DATABASE_URL" "MP_DATABASE_USERNAME" "MP_DATABASE_PASSWORD" "CUSTOM_VMOPTIONS_PATH") }}
-            {{- with .Values.bridgelink.keystore.existingSecret }}
-            {{- $skip = concat $skip (list "MP_KEYSTORE_STOREPASS" "MP_KEYSTORE_KEYPASS") }}
-            {{- if not (has "MP_KEYSTORE_STOREPASS" $extra) }}
-            - name: MP_KEYSTORE_STOREPASS
-              valueFrom:
-                secretKeyRef:
-                  name: {{ . }}
-                  key: keystore.storepass
-            {{- end }}
-            {{- if not (has "MP_KEYSTORE_KEYPASS" $extra) }}
-            - name: MP_KEYSTORE_KEYPASS
-              valueFrom:
-                secretKeyRef:
-                  name: {{ . }}
-                  key: keystore.keypass
-            {{- end }}
-            {{- end }}
+            {{- $skip := concat $extra (list "MP_DATABASE_URL" "MP_DATABASE_USERNAME" "MP_DATABASE_PASSWORD" "MP_KEYSTORE_STOREPASS" "MP_KEYSTORE_KEYPASS" "CUSTOM_VMOPTIONS_PATH") }}
             {{- /* SERVER_ID goes back in resolved, so it keeps its sorted position and an upgrade
             that does not set it renders the same pod template as before. Not evaluated when
             extraEnv supplies it: the helper fails a new install that has no ID. */}}

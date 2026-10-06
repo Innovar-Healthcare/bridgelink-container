@@ -1,6 +1,6 @@
 # bridgelink
 
-![Version: 0.9.3](https://img.shields.io/badge/Version-0.9.3-informational?style=flat-square)
+![Version: 0.10.0](https://img.shields.io/badge/Version-0.10.0-informational?style=flat-square)
 ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square)
 ![AppVersion: 26.9.0](https://img.shields.io/badge/AppVersion-26.9.0-informational?style=flat-square)
 
@@ -40,7 +40,7 @@ SERVER_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
 echo "$SERVER_ID"
 
 # Install the chart
-helm install bridgelink oci://ghcr.io/innovar-healthcare/charts/bridgelink --version 0.9.3 \
+helm install bridgelink oci://ghcr.io/innovar-healthcare/charts/bridgelink --version 0.10.0 \
   --set-string bridgelink.environment.SERVER_ID="$SERVER_ID"
 ```
 
@@ -62,7 +62,7 @@ bridgelink:
 ```
 
 ```bash
-helm install bridgelink oci://ghcr.io/innovar-healthcare/charts/bridgelink --version 0.9.3 -f values.yaml
+helm install bridgelink oci://ghcr.io/innovar-healthcare/charts/bridgelink --version 0.10.0 -f values.yaml
 ```
 
 ### From a checkout
@@ -89,7 +89,7 @@ helm uninstall bridgelink
 > release's BridgeLink service:
 >
 > ```bash
-> helm install bridgelink oci://ghcr.io/innovar-healthcare/charts/bridgelink --version 0.9.3 \
+> helm install bridgelink oci://ghcr.io/innovar-healthcare/charts/bridgelink --version 0.10.0 \
 >   --set-string bridgelink.environment.SERVER_ID="$SERVER_ID" \
 >   --set webadmin.enabled=true --set webadmin.acceptLicense=true
 > ```
@@ -128,9 +128,11 @@ helm uninstall bridgelink
    ```
 
 2. **Database Security**:
-   - Use strong passwords
+   - Use strong passwords. The defaults in `values.yaml` are public.
    - Enable SSL for database connections
-   - Consider using external secrets management
+   - Keep passwords in a Secret you manage, for example one synced from AWS Secrets Manager. No
+     password is ever written into a Deployment or ConfigMap. See
+     [Passwords and Secrets](#passwords-and-secrets).
 
 3. **Pod Security**: BridgeLink and WebAdmin meet the Kubernetes "restricted" Pod Security
    Standard. See [Pod Security](#pod-security).
@@ -278,15 +280,17 @@ bridgelink:
     MP_DATABASE_PASSWORD: "<password>"
 ```
 
-To keep the password, or the whole URL, out of values, read it from a Secret with `extraEnv`. An
-`extraEnv` entry replaces the variable of the same name the chart would set:
+The password never appears in the pod spec: the chart stores it in a Secret. To keep it out of
+values altogether, read it from a Secret you manage with `bridgelink.credentials.existingSecret`
+(see [Passwords and Secrets](#passwords-and-secrets)). To read the whole URL from a Secret, use
+`extraEnv`, whose entries replace the variable of the same name the chart would set:
 
 ```yaml
 bridgelink:
   extraEnv:
-    - name: MP_DATABASE_PASSWORD
+    - name: MP_DATABASE_URL
       valueFrom:
-        secretKeyRef: {name: bridgelink-db, key: password}
+        secretKeyRef: {name: bridgelink-db, key: url}
 ```
 
 `bridgelink.environment` accepts any variable the image reads, not only the ones listed in
@@ -295,6 +299,105 @@ bridgelink:
 
 With `postgres.enabled: false` and no `MP_DATABASE_URL`, the install fails with a message saying so.
 For the embedded Derby database instead, set `MP_DATABASE: derby` and `postgres.enabled: false`.
+
+## Passwords and Secrets
+
+No password is written into a Deployment or ConfigMap. BridgeLink's database password, its two
+keystore passwords and the bundled PostgreSQL's password reach their containers through
+`secretKeyRef`, so reading them takes permission to read Secrets. For each password, the first of
+these that applies is used:
+
+1. A `bridgelink.extraEnv` entry of the same name (`MP_DATABASE_PASSWORD`, `MP_KEYSTORE_STOREPASS`,
+   `MP_KEYSTORE_KEYPASS`).
+2. `bridgelink.credentials.existingSecret`, a Secret you manage.
+3. For the keystore passwords only, `bridgelink.keystore.existingSecret` (see
+   [Keystore and appdata](#keystore-and-appdata)).
+4. The chart's own Secret, `<release>-bridgelink-credentials`. It holds the values of
+   `bridgelink.environment.MP_DATABASE_PASSWORD`, `MP_KEYSTORE_STOREPASS`, `MP_KEYSTORE_KEYPASS` and
+   `postgres.credentials.password`, so values work as they always have.
+
+When a `helm upgrade` changes a password in the chart's Secret, BridgeLink restarts to pick it up:
+the pod carries a `checksum/credentials` annotation.
+
+### A Secret of your own
+
+```bash
+kubectl create secret generic bridgelink-credentials \
+  --from-file=database.password=<file holding it> \
+  --from-file=keystore.storepass=<(openssl rand -hex 24 | tr -d '\n') \
+  --from-file=keystore.keypass=<(openssl rand -hex 24 | tr -d '\n')
+```
+
+```yaml
+bridgelink:
+  credentials:
+    existingSecret: bridgelink-credentials
+    # The default key names. Change them to match a Secret you already have.
+    keys:
+      databasePassword: database.password
+      keystoreStorepass: keystore.storepass
+      keystoreKeypass: keystore.keypass
+```
+
+- The chart then stores none of these passwords, and creates no Secret of its own. The bundled
+  PostgreSQL, if enabled, is initialised with the same database password.
+- An empty key name leaves that one password to rules 3 and 4, for example a Secret holding only the
+  database password: `keystoreStorepass: ""` and `keystoreKeypass: ""`.
+- With Derby (`MP_DATABASE: derby`) the database password is not read.
+- If the Secret or a key is missing, the pod does not start, and `kubectl describe pod` reports
+  `CreateContainerConfigError` naming it.
+- Kubernetes reads a Secret only when a container starts. After changing the Secret, restart
+  BridgeLink: `kubectl rollout restart deployment/<release>-bridgelink-bl`. A rotating password, such
+  as an RDS-managed master password, therefore needs a restart after every rotation; a dedicated
+  database user with a password you rotate deliberately avoids that.
+- Never change the keystore passwords of a server that has started: they must keep opening its
+  keystore. Back them up with the keystore.
+
+### From AWS Secrets Manager
+
+With the [External Secrets Operator](https://external-secrets.io), an `ExternalSecret` builds the
+Secret from Secrets Manager entries (`SecretStore` setup, including its IAM role, is in their docs):
+
+```yaml
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: bridgelink-credentials
+spec:
+  refreshInterval: 1h
+  secretStoreRef: {kind: SecretStore, name: aws-secrets-manager}
+  target:
+    name: bridgelink-credentials
+  data:
+    - secretKey: database.password
+      remoteRef: {key: bridgelink/database, property: password}
+    - secretKey: keystore.storepass
+      remoteRef: {key: bridgelink/keystore, property: storepass}
+    - secretKey: keystore.keypass
+      remoteRef: {key: bridgelink/keystore, property: keypass}
+```
+
+With the [Secrets Store CSI driver](https://secrets-store-csi-driver.sigs.k8s.io) and its AWS
+provider, a `SecretProviderClass` with `secretObjects` syncs the entries into a Kubernetes Secret.
+Syncing is off unless the driver is installed with `syncSecret.enabled=true`. The driver creates
+that Secret only while a pod mounts the volume, so mount it in the BridgeLink pod, and give the pod
+an IAM role that can read the entries (`serviceAccount.annotations` for IRSA):
+
+```yaml
+bridgelink:
+  credentials:
+    existingSecret: bridgelink-credentials
+  extraVolumes:
+    - name: secrets-store
+      csi:
+        driver: secrets-store.csi.k8s.io
+        readOnly: true
+        volumeAttributes: {secretProviderClass: bridgelink}
+  extraVolumeMounts:
+    - name: secrets-store
+      mountPath: /mnt/secrets-store
+      readOnly: true
+```
 
 ## Keystore and appdata
 
@@ -312,7 +415,9 @@ content can no longer be read. Choose one of two ways to keep it:
 - **From a Secret** (`bridgelink.keystore.existingSecret`). The Secret holds `keystore.jks`,
   `keystore.storepass` and `keystore.keypass`. An init container copies the keystore into appdata on
   every start, so the Secret always wins over what is on the volume, and it works with persistence
-  off. The passwords replace `MP_KEYSTORE_STOREPASS` and `MP_KEYSTORE_KEYPASS`.
+  off. The passwords replace `MP_KEYSTORE_STOREPASS` and `MP_KEYSTORE_KEYPASS`, unless
+  `bridgelink.credentials.existingSecret` supplies them (see
+  [Passwords and Secrets](#passwords-and-secrets)); the keystore itself still comes from this Secret.
   The keystore must be one a BridgeLink server created, taken from its appdata (see below), so that
   it already holds the data-encryption key. A keystore you built with only a TLS certificate does
   not: the server adds a new key at every start, and encrypted content does not survive a restart.
@@ -323,8 +428,14 @@ With persistence off and no Secret, appdata is an emptyDir and every replaced po
 key. The install notes warn about this.
 
 **Back up the keystore and its passwords together.** One is useless without the other. The
-passwords are `bridgelink.environment.MP_KEYSTORE_STOREPASS` and `MP_KEYSTORE_KEYPASS`, or the
-Secret's. If you set both of those to empty, the image generates passwords on first start and saves
+passwords are in the Secret they are read from: your own, or the chart's, which holds
+`bridgelink.environment.MP_KEYSTORE_STOREPASS` and `MP_KEYSTORE_KEYPASS`. To read one back:
+
+```bash
+kubectl get secret <release>-bridgelink-credentials -o jsonpath='{.data.keystore\.storepass}' | base64 -d
+```
+
+The key password is `keystore\.keypass`. If you set both of those values to empty, the image generates passwords on first start and saves
 them next to the keystore in `appdata/keystore-passwords.properties`; back that file up too. Do not
 change the passwords after the first start: the server cannot open its keystore with new ones.
 
@@ -464,6 +575,17 @@ evaluation only; in a restricted namespace, use an external database.
 
 ## Upgrading
 
+**Chart 0.10.0** moves every password out of the pod spec:
+
+- **The database and keystore passwords move into a Secret**, `<release>-bridgelink-credentials`,
+  and reach the containers through `secretKeyRef`. Your values do not change, and neither do the
+  passwords. The upgrade restarts BridgeLink, and the bundled PostgreSQL, once.
+- **Anything that read a password from the Deployment must read the Secret instead**, for example a
+  backup script that saved the keystore passwords: see [Keystore and appdata](#keystore-and-appdata).
+- To keep the passwords in a Secret you manage instead, see
+  [Passwords and Secrets](#passwords-and-secrets). A release that already reads them through
+  `extraEnv` is unaffected.
+
 **Chart 0.9.0** stops shipping a default server ID:
 
 - **A new install must set `bridgelink.environment.SERVER_ID`.** Without it the install fails, and the
@@ -558,15 +680,19 @@ not apply.
 |-----|------|---------|-------------|
 | bridgelink.affinity | object | `{}` | Pod affinity for BridgeLink |
 | bridgelink.containerSecurityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}}` | Security context for the BridgeLink container and the keystore init container. The defaults meet the "restricted" Pod Security Standard. `readOnlyRootFilesystem` cannot be enabled: the image writes its configuration under /opt/bridgelink at startup. |
+| bridgelink.credentials.existingSecret | string | `""` | Name of a Secret of your own holding the database password and the keystore passwords, for example one created by External Secrets from AWS Secrets Manager. When set, those passwords are read from it and the chart stores none of them; the bundled PostgreSQL, if enabled, reads the database password from it too. It takes precedence over `keystore.existingSecret` for the keystore passwords; an `extraEnv` entry of the same name takes precedence over both. |
+| bridgelink.credentials.keys.databasePassword | string | `"database.password"` | Key holding the database password (`MP_DATABASE_PASSWORD`). Not read for Derby. |
+| bridgelink.credentials.keys.keystoreKeypass | string | `"keystore.keypass"` | Key holding the keystore key password (`MP_KEYSTORE_KEYPASS`) |
+| bridgelink.credentials.keys.keystoreStorepass | string | `"keystore.storepass"` | Key holding the keystore store password (`MP_KEYSTORE_STOREPASS`) |
 | bridgelink.environment.MP_CONFIGURATIONMAP_LOCATION | string | `"database"` | Configuration map location |
 | bridgelink.environment.MP_DATABASE | string | `"postgres"` | Database type (postgres, mysql, oracle, sqlserver) |
-| bridgelink.environment.MP_DATABASE_PASSWORD | string | `""` | Database password. Leave empty to use `postgres.credentials.password` with the bundled PostgreSQL. |
+| bridgelink.environment.MP_DATABASE_PASSWORD | string | `""` | Database password. Leave empty to use `postgres.credentials.password` with the bundled PostgreSQL. Stored in the chart's Secret, not the pod spec; ignored when `credentials.existingSecret` supplies it. |
 | bridgelink.environment.MP_DATABASE_URL | string | `""` | JDBC URL of the database, passed through unchanged, so any scheme, port and parameters work (for Amazon RDS, e.g. `jdbc:postgresql://<endpoint>:5432/bridgelinkdb?sslmode=require`). A value containing `{{` is rendered as a Helm template, as are the username and password below. Leave empty to use the bundled PostgreSQL. Required when `postgres.enabled` is false. For the embedded Derby database instead, set `MP_DATABASE: derby` and `postgres.enabled: false` and leave this empty. |
 | bridgelink.environment.MP_DATABASE_USERNAME | string | `""` | Database username. Leave empty to use `postgres.credentials.username` with the bundled PostgreSQL. |
-| bridgelink.environment.MP_KEYSTORE_KEYPASS | string | `"bridgelinkKeystore"` | Keystore key password |
-| bridgelink.environment.MP_KEYSTORE_STOREPASS | string | `"bridgelinkKeypass"` | Keystore store password |
+| bridgelink.environment.MP_KEYSTORE_KEYPASS | string | `"bridgelinkKeystore"` | Keystore key password. Stored in the chart's Secret, not the pod spec. Never change it after the first start: the server could no longer open its keystore. |
+| bridgelink.environment.MP_KEYSTORE_STOREPASS | string | `"bridgelinkKeypass"` | Keystore store password. Stored in the chart's Secret, not the pod spec. Never change it after the first start. |
 | bridgelink.environment.SERVER_ID | string | `""` | Server ID, a UUID. Required on a new install: the install fails without it and prints a freshly generated one to use. Record it: BridgeLink licenses are issued against it. Keep it for the life of the server, since queued messages are recovered only under the ID that stored them, and never run two servers with the same ID against one database. An upgrade that leaves it empty keeps `7d760af2-680a-4a19-b9a2-c4685df61ebc`, the ID every install shared before chart 0.9.0. See the README's "Server ID" section. |
-| bridgelink.extraEnv | list | `[]` | Extra environment variables for the BridgeLink container, as Kubernetes EnvVar entries, so `valueFrom` works (for example a password from a Secret). An entry here replaces any variable of the same name the chart sets, including `environment` and the database settings. |
+| bridgelink.extraEnv | list | `[]` | Extra environment variables for the BridgeLink container, as Kubernetes EnvVar entries, so `valueFrom` works. An entry here replaces any variable of the same name the chart sets, including `environment`, the database settings and the passwords. For passwords, `credentials.existingSecret` is usually simpler. |
 | bridgelink.extraPorts | list | `[]` | Extra ports for channel listeners (MLLP, HTTP, TCP), declared on the BridgeLink container and added to the BridgeLink Service, or to the listener Service when `listenerService.enabled`. Each entry: `name` (lowercase, at most 15 characters), `containerPort` (the port the channel listens on), and optionally `port` (the Service port, default `containerPort`) and `protocol` (default TCP). Adding, changing or removing an entry changes the pod, so BridgeLink restarts on upgrade. |
 | bridgelink.extraVolumeMounts | list | `[]` | Extra volume mounts for the BridgeLink container. Plugin zips are installed from `/opt/bridgelink/custom-extensions` |
 | bridgelink.extraVolumes | list | `[]` | Extra volumes for the BridgeLink pod, e.g. an EFS claim for file-based channels, or a claim holding plugin zips (see Plugins in the README) |
@@ -576,7 +702,7 @@ not apply.
 | bridgelink.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy |
 | bridgelink.image.repository | string | `"innovarhealthcare/bridgelink"` | BridgeLink container image repository |
 | bridgelink.image.tag | string | `"26.9.0"` | BridgeLink container image tag. Defaults to the Rocky image. For the hardened (DHI) image set `tag: 26.9.0-dhi` and `runAsUser: 65532` / `runAsGroup: 65532` (see below). |
-| bridgelink.keystore.existingSecret | string | `""` | Name of a Secret holding a keystore and its passwords, under the keys `keystore.jks`, `keystore.storepass` and `keystore.keypass`. When set, the keystore is copied into appdata at every start (the Secret wins over what is on the volume) and the passwords replace `MP_KEYSTORE_STOREPASS` and `MP_KEYSTORE_KEYPASS`. Works with or without `persistence`. The keystore must come from a BridgeLink server's appdata, so it already holds the data-encryption key: one with only a TLS certificate gets a new key at every start. See the README. |
+| bridgelink.keystore.existingSecret | string | `""` | Name of a Secret holding a keystore and its passwords, under the keys `keystore.jks`, `keystore.storepass` and `keystore.keypass`. When set, the keystore is copied into appdata at every start (the Secret wins over what is on the volume) and the passwords replace `MP_KEYSTORE_STOREPASS` and `MP_KEYSTORE_KEYPASS`, unless `credentials.existingSecret` supplies them. Works with or without `persistence`. The keystore must come from a BridgeLink server's appdata, so it already holds the data-encryption key: one with only a TLS certificate gets a new key at every start. See the README. |
 | bridgelink.listenerService.annotations | object | `{}` | Annotations for the listener Service (see `service.annotations`) |
 | bridgelink.listenerService.enabled | bool | `false` | Create the `<release>-bridgelink-listeners` Service and move `extraPorts` onto it, off the BridgeLink Service. Requires at least one `extraPorts` entry. |
 | bridgelink.listenerService.loadBalancerClass | string | `""` | Load balancer class for the listener Service. Used only when `type` is LoadBalancer. |
@@ -612,7 +738,7 @@ not apply.
 | imagePullSecrets | list | `[]` | Image pull secrets for every pod the chart creates (BridgeLink, WebAdmin, PostgreSQL), as a list of `{name: <secret>}`, e.g. for a private registry mirror. |
 | nameOverride | string | `""` | Override the name of the chart |
 | postgres.credentials.database | string | `"bridgelinkdb"` | PostgreSQL database name |
-| postgres.credentials.password | string | `"bridgelinktest"` | PostgreSQL password |
+| postgres.credentials.password | string | `"bridgelinktest"` | PostgreSQL password. Stored in the chart's Secret; ignored when `bridgelink.credentials.existingSecret` supplies the database password. |
 | postgres.credentials.username | string | `"bridgelinktest"` | PostgreSQL username |
 | postgres.enabled | bool | `true` | Deploy a bundled PostgreSQL for evaluation. It is a single pod on one zone-bound volume with no backups, so it is not suitable for production. For production set this to false and point BridgeLink at an external database such as Amazon RDS. TCP connections require a password. |
 | postgres.image.pullPolicy | string | `"IfNotPresent"` | PostgreSQL image pull policy |

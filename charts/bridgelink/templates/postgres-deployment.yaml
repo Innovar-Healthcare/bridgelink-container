@@ -41,8 +41,9 @@ spec:
             - containerPort: 5432
               protocol: TCP
           env:
-            - name: POSTGRES_PASSWORD
-              value: {{ .Values.postgres.credentials.password | quote }}
+            {{- with (include "bridgelink.credentials" . | fromJson).env.POSTGRES_PASSWORD }}
+            {{- include "bridgelink.credentialEnv" (list "POSTGRES_PASSWORD" .) | nindent 12 }}
+            {{- end }}
             - name: POSTGRES_USER
               value: {{ .Values.postgres.credentials.username | quote }}
             - name: POSTGRES_DB

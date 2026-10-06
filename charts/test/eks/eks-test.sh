@@ -14,7 +14,8 @@
 # Parameterized by env var:
 #   CHART_SOURCE   oci (default) installs oci://ghcr.io/innovar-healthcare/charts/bridgelink at
 #                  CHART_VERSION, which needs `helm registry login ghcr.io` while the package is
-#                  private. checkout installs charts/bridgelink from this checkout instead; say so
+#                  private, and a CHART_VERSION that knows every key the example sets
+#                  (0.10.0 or later, for bridgelink.credentials). checkout installs charts/bridgelink from this checkout instead; say so
 #                  in the results.
 #
 # Usage: charts/test/eks/eks-test.sh <env file>
@@ -31,7 +32,7 @@ CHART_SOURCE="${CHART_SOURCE:-oci}"
 export KUBECONFIG="$OUT_DIR/kubeconfig"
 NS="bl-eks"
 REL="bl"
-DB_USER="bridgelink_app"   # created by setup.sh; the Secret bridgelink-db holds its password
+DB_USER="bridgelink_app"   # created by setup.sh; its password is in Secret bridgelink-credentials
 TIMEOUT="15m"
 WORK="$(mktemp -d)"
 PASS=0 FAIL=0
@@ -82,9 +83,8 @@ done
 info "preflight"
 [ "$(kubectl get namespace "$NS" -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io/enforce}' 2>/dev/null)" = "restricted" ] \
   || { echo "namespace $NS is missing or does not enforce restricted; run setup.sh"; exit 2; }
-for s in bridgelink-db bridgelink-keystore-passwords; do
-  k get secret "$s" >/dev/null 2>&1 || { echo "Secret $s is missing in $NS; run setup.sh"; exit 2; }
-done
+k get secret bridgelink-credentials >/dev/null 2>&1 \
+  || { echo "Secret bridgelink-credentials is missing in $NS; run setup.sh"; exit 2; }
 RDS_HOST="$(awsr cloudformation describe-stacks --stack-name "$RDS_STACK" \
   --query "Stacks[0].Outputs[?OutputKey=='Endpoint'].OutputValue" --output text)"
 [ -n "$RDS_HOST" ] && [ "$RDS_HOST" != "None" ] || { echo "no Endpoint output on stack $RDS_STACK"; exit 2; }
@@ -148,7 +148,7 @@ spec:
         - {name: PGDATABASE, value: bridgelinkdb}
         - {name: PGSSLMODE, value: require}
         - name: PGPASSWORD
-          valueFrom: {secretKeyRef: {name: bridgelink-db, key: password}}
+          valueFrom: {secretKeyRef: {name: bridgelink-credentials, key: database.password}}
       securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: ["ALL"]}}
 ---
 apiVersion: v1

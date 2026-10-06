@@ -335,6 +335,52 @@
           "title": "helperImage",
           "type": "object"
         },
+        "credentials": {
+          "additionalProperties": false,
+          "description": "Passwords from a Secret of your own",
+          "properties": {
+            "existingSecret": {
+              "default": "",
+              "description": "Secret holding the database and keystore passwords; the chart then stores none of them",
+              "required": [],
+              "title": "existingSecret",
+              "type": "string"
+            },
+            "keys": {
+              "additionalProperties": false,
+              "description": "Key names in existingSecret; an empty name leaves that password to the chart",
+              "properties": {
+                "databasePassword": {
+                  "default": "database.password",
+                  "description": "Key holding the database password",
+                  "required": [],
+                  "title": "databasePassword",
+                  "type": "string"
+                },
+                "keystoreStorepass": {
+                  "default": "keystore.storepass",
+                  "description": "Key holding the keystore store password",
+                  "required": [],
+                  "title": "keystoreStorepass",
+                  "type": "string"
+                },
+                "keystoreKeypass": {
+                  "default": "keystore.keypass",
+                  "description": "Key holding the keystore key password",
+                  "required": [],
+                  "title": "keystoreKeypass",
+                  "type": "string"
+                }
+              },
+              "required": [],
+              "title": "keys",
+              "type": "object"
+            }
+          },
+          "required": [],
+          "title": "credentials",
+          "type": "object"
+        },
         "keystore": {
           "additionalProperties": false,
           "description": "A keystore supplied from a Secret",
