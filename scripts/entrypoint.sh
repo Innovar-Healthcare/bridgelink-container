@@ -30,8 +30,10 @@ update_property() {
   local property=$2
   local value=$3
   if [ ! -z "$value" ]; then
-    # Escape special characters
-    value_escaped=$(sed 's/[\/&]/\\&/g' <<<"$value")
+    # Escape what sed would read as syntax in the replacement below: the backslash, "&", and both
+    # delimiters used ("/" and "|"). An unescaped "|" ends the s||| expression early, sed fails, and
+    # the property keeps its old value -- an empty database password, for a generated one.
+    value_escaped=$(sed 's/[\/&|]/\\&/g' <<<"$value")
     # Check if the property is 'vmoptions' for updating the -Xmx value
     if [[ "$property" == "vmoptions" ]]; then
       # Append 'm' to the value (e.g., 256 becomes 256m)
@@ -50,6 +52,9 @@ update_property() {
       if grep -q "^[[:space:]]*${key_re}[[:space:]]*=" "$file"; then
         sed -i "s|^[[:space:]]*${key_re}[[:space:]]*=.*|${property} = ${value_escaped}|" "$file"
       else
+        # The escaped form on purpose: mirth.properties is read as a Java properties file, which
+        # drops a backslash before any other character, and keeping "\\" stops a "\n" or "\t" in a
+        # password being read as a newline or tab.
         echo "${property} = ${value_escaped}" >>"$file"
       fi
     fi
