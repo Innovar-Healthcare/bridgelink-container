@@ -594,7 +594,7 @@ A URL location of a zip file containing BridgeLink extension zip files. The exte
 <a name ="env-custom-jars-download"></a>
 #### `CUSTOM_JARS_DOWNLOAD`
 
-A URL location of a zip file containing JAR files, or several separated by commas. The zip is unpacked into the `custom-lib` folder on the BridgeLink server at every start, folders included. That folder is the server's Default Resource, so channels and connectors that use the Default Resource (new ones do) can use the classes in those jars. A channel set to use other resources only does not see them.
+A URL location of a zip file containing JAR files, or several separated by commas. The zip is unpacked into `/opt/bridgelink/custom-jars` at every start. That folder is not on any classpath. To use the jars, create a Directory Resource in BridgeLink (Settings > Resources) with the directory `/opt/bridgelink/custom-jars`, then select that resource on the channels that need it. The resource and the channels' choice of it are stored in the database, so this is done once. Only the channels that select the resource load the jars, which keeps one channel's libraries from conflicting with another's.
 
 <a name ="env-custom-properties"></a>
 #### `CUSTOM_PROPERTIES`

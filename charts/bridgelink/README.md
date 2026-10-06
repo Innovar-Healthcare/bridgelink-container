@@ -985,8 +985,9 @@ The image reads:
 - `KEYSTORE_DOWNLOAD`: URL of a keystore to download into appdata at every start. A
   [keystore Secret](#keystore-and-appdata) does the same job without a download.
 - `CUSTOM_JARS_DOWNLOAD`: URLs of zips of jar files, separated by commas, unpacked into
-  `/opt/bridgelink/custom-lib` at every start. Channels that use the Default Resource, as new
-  channels do, can use their classes.
+  `/opt/bridgelink/custom-jars` at every start. To use them, create a Directory Resource in
+  BridgeLink with that directory and select it on the channels that need it; both are stored in the
+  database.
 - `CUSTOM_PROPERTIES`, `CUSTOM_VMOPTIONS`: URL of a complete `mirth.properties` or
   `blserver.vmoptions`, downloaded at every start to replace the image's copy. `MP_` variables
   still apply on top of it.

@@ -65,8 +65,7 @@ RUN javac -d /opt/bridgelink/bootstrap /opt/bridgelink/bootstrap/BridgeLinkHealt
 
 # Create required directories for persistent data and set ownership
 RUN mkdir -p /opt/bridgelink/appdata && chown bridgelink:bridgelink /opt/bridgelink/appdata && \
-    mkdir -p /opt/bridgelink/custom-extensions && chown bridgelink:bridgelink /opt/bridgelink/custom-extensions && \
-    mkdir -p /opt/bridgelink/custom-lib && chown bridgelink:bridgelink /opt/bridgelink/custom-lib
+    mkdir -p /opt/bridgelink/custom-extensions && chown bridgelink:bridgelink /opt/bridgelink/custom-extensions
 
 # Clean up unnecessary files from the application directory. The CLI (blcommand) and manager
 # (blmanager) are meant to run outside the server container, so their launchers, jars, and libs
