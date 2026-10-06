@@ -26,11 +26,11 @@ env file kept **outside the repository**, so no account, network or address deta
   with an internet gateway but no NAT, which do not assign public IPs themselves; managed node
   groups refuse such subnets. eksctl's launch template for self-managed nodes does not request an
   address either, so `node-egress.sh` adds a launch template version that does and replaces the
-  nodes.
+  nodes. No security group in the cluster admits traffic from outside the VPC, apart from the
+  private endpoint's one rule for the operator's network.
 - **Volumes name their KMS key** (`EBS_KMS_KEY_ARN`). An account whose default EBS encryption key
   is customer-managed may not let Auto Scaling or the EBS CSI driver use it; nodes then die at
-  boot with `Client.InvalidKMSKey.InvalidState`. The AWS-managed key (`alias/aws/ebs`) avoids that. No security group in the cluster admits traffic from outside the
-  VPC, apart from the private endpoint's one rule for the operator's network.
+  boot with `Client.InvalidKMSKey.InvalidState`. The AWS-managed key (`alias/aws/ebs`) avoids that.
 - **The API endpoint is private.** eksctl needs a public endpoint while it creates the cluster,
   so it is created limited to the operator's /32 and switched to private straight afterwards.
   From then on `kubectl` reaches the private endpoint over the network routed into the VPC (a

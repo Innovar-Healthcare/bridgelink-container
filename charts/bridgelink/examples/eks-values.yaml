@@ -103,8 +103,9 @@ bridgelink:
       # Only if your subnets are not tagged kubernetes.io/role/internal-elb=1:
       # service.beta.kubernetes.io/aws-load-balancer-subnets: <subnet-a>,<subnet-b>
     # The networks that send MLLP. An internal NLB is reachable only inside the VPC and from networks
-    # routed to it. It closes a connection idle for 350 seconds, so a sender that keeps its connection
-    # open needs to send within that time or reconnect.
+    # routed to it. By default it closes a connection idle for 350 seconds (the listener attribute
+    # tcp.idle_timeout.seconds), so a sender that keeps its connection open must send within that
+    # time, reconnect, or have the timeout raised.
     loadBalancerSourceRanges:
       - <sender CIDR>
 

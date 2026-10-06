@@ -50,8 +50,8 @@ awsr secretsmanager get-secret-value --secret-id "$SECRET_ARN" --query SecretStr
       --dry-run=client -o yaml | kubectl apply -f -
 
 # BridgeLink connects as its own user, not the master: the usual practice, and it keeps the
-# RDS-generated master password (which can contain any punctuation) out of BridgeLink. The Rocky
-# image's entrypoint writes MP_* values with sed and drops any value containing "|".
+# RDS-generated master password (which can contain any punctuation) out of BridgeLink. Rocky images
+# built before the entrypoint escaped "|" drop any MP_* value containing one.
 echo "== database user $DB_USER, and Secret bridgelink-db with its generated password"
 if ! kubectl -n "$NS" get secret bridgelink-db >/dev/null 2>&1; then
   kubectl -n "$NS" create secret generic bridgelink-db \
@@ -81,7 +81,8 @@ spec:
         - sh
         - -c
         - |
-          psql -v ON_ERROR_STOP=1 -v pw="\$APP_PASSWORD" <<'SQL'
+          psql -v ON_ERROR_STOP=1 <<'SQL'
+          \set pw \`printf %s "\$APP_PASSWORD"\`
           SELECT 'CREATE ROLE $DB_USER LOGIN' WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '$DB_USER') \gexec
           ALTER ROLE $DB_USER WITH LOGIN PASSWORD :'pw';
           GRANT $DB_USER TO bridgelink;
@@ -89,13 +90,14 @@ spec:
           SQL
       securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: ["ALL"]}}
 EOF
-for _ in $(seq 1 60); do
-  phase="$(kubectl -n "$NS" get pod dbinit -o jsonpath='{.status.phase}')"
+phase=""
+for _ in $(seq 1 100); do   # up to 5 minutes, for a first image pull on fresh nodes
+  phase="$(kubectl -n "$NS" get pod dbinit -o jsonpath='{.status.phase}' 2>/dev/null || true)"
   case "$phase" in Succeeded|Failed) break ;; esac
   sleep 3
 done
-kubectl -n "$NS" logs dbinit
-kubectl -n "$NS" delete pod dbinit --wait=false >/dev/null
+kubectl -n "$NS" logs dbinit || true
+kubectl -n "$NS" delete pod dbinit --wait=false >/dev/null || true
 [ "$phase" = "Succeeded" ] || { echo "creating database user $DB_USER failed"; exit 1; }
 
 echo "== Secret bridgelink-keystore-passwords (generated once, kept on re-runs)"

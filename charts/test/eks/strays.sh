@@ -50,6 +50,7 @@ tagged_existing() {   # <tag key> <value>
     esac
     case "$s" in
       terminated|None|*NotFound*) ;;
+      *"An error occurred"*) echo "UNKNOWN $arn (could not check: $s)" ;;
       *) echo "$arn ($s)" ;;
     esac
   done

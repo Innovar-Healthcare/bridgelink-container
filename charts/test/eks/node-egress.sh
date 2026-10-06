@@ -13,6 +13,8 @@
 # replaced. The security groups are untouched; none admits traffic from outside the VPC. The
 # template, its versions and the groups are deleted with the cluster.
 #
+# A node group whose template already requests a public IP is left alone, so a re-run is a no-op.
+#
 # Usage: charts/test/eks/node-egress.sh <env file>
 set -euo pipefail
 
@@ -33,6 +35,10 @@ for ng in ng-a ng-b; do
   # shellcheck disable=SC2016  # $Latest is the literal version name, not a shell variable
   nic="$(awsr ec2 describe-launch-template-versions --launch-template-id "$lt" --versions '$Latest' \
     --query 'LaunchTemplateVersions[0].LaunchTemplateData.NetworkInterfaces[0]' --output json)"
+  if [ "$(jq -r '.AssociatePublicIpAddress // false' <<< "$nic")" = "true" ]; then
+    echo "$ng: launch template $lt already requests a public IP; nothing to do"
+    continue
+  fi
   data="$(jq -c '{NetworkInterfaces: [. + {AssociatePublicIpAddress: true}]}' <<< "$nic")"
   # shellcheck disable=SC2016
   version="$(awsr ec2 create-launch-template-version --launch-template-id "$lt" --source-version '$Latest' \
