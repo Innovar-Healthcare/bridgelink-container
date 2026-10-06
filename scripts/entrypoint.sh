@@ -52,6 +52,9 @@ update_property() {
       if grep -q "^[[:space:]]*${key_re}[[:space:]]*=" "$file"; then
         sed -i "s|^[[:space:]]*${key_re}[[:space:]]*=.*|${property} = ${value_escaped}|" "$file"
       else
+        # The escaped form on purpose: mirth.properties is read as a Java properties file, which
+        # drops a backslash before any other character, and keeping "\\" stops a "\n" or "\t" in a
+        # password being read as a newline or tab.
         echo "${property} = ${value_escaped}" >>"$file"
       fi
     fi
