@@ -30,8 +30,10 @@ update_property() {
   local property=$2
   local value=$3
   if [ ! -z "$value" ]; then
-    # Escape special characters
-    value_escaped=$(sed 's/[\/&]/\\&/g' <<<"$value")
+    # Escape what sed would read as syntax in the replacement below: the backslash, "&", and both
+    # delimiters used ("/" and "|"). An unescaped "|" ends the s||| expression early, sed fails, and
+    # the property keeps its old value -- an empty database password, for a generated one.
+    value_escaped=$(sed 's/[\/&|]/\\&/g' <<<"$value")
     # Check if the property is 'vmoptions' for updating the -Xmx value
     if [[ "$property" == "vmoptions" ]]; then
       # Append 'm' to the value (e.g., 256 becomes 256m)

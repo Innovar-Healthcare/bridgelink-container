@@ -378,6 +378,7 @@ info "3. Boot on $DEFAULT_DB + MP_/SERVER_ID/MP_VMOPTIONS injection"
 run bl-boot -p 8443 \
   -e SERVER_ID=11111111-2222-3333-4444-555555555555 \
   -e MP_KEYSTORE_STOREPASS=testStorePass123 \
+  -e 'MP_SERVER_API_ACCESSCONTROLEXPOSEHEADERS=a|b/c&d' \
   -e "MP_VMOPTIONS=512,-Dfoo.bar=baz"
 if wait_for_log bl-boot; then
   ok "server started"
@@ -387,6 +388,11 @@ if wait_for_log bl-boot; then
   grep -q '11111111-2222-3333-4444-555555555555' "$WORK/sid" && ok "SERVER_ID written" || bad "SERVER_ID missing"
   docker cp bl-boot:/opt/bridgelink/conf/mirth.properties "$WORK/mp" >/dev/null 2>&1
   grep -q '^keystore.storepass = testStorePass123' "$WORK/mp" && ok "MP_ injected" || bad "MP_ not injected"
+  # A key already in mirth.properties takes the sed path. Generated passwords (RDS-managed ones
+  # among them) contain punctuation, and "|" once left such a key at its default.
+  grep -qxF 'server.api.accesscontrolexposeheaders = a|b/c&d' "$WORK/mp" \
+    && ok "MP_ value with | / & replaces an existing key unchanged" \
+    || bad "MP_ value with | / & not written unchanged: $(grep '^server.api.accesscontrolexposeheaders' "$WORK/mp")"
   # A user-set keystore password -- here only one of the pair, which is still user-configured to
   # the server -- is the user's to manage: the container must not generate or save its own.
   if docker cp bl-boot:/opt/bridgelink/appdata/keystore-passwords.properties "$WORK/kpw-boot" >/dev/null 2>&1; then
