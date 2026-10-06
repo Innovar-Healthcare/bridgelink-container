@@ -91,91 +91,11 @@ dump() {
   done
 }
 
-# ---- BridgeLink REST API, through a port-forward to the release's Service ----------------------
-# A port-forward follows one pod, so it is restarted after every pod replacement.
-forward() {   # <release> [namespace]; sets API
-  local port="" i
-  [ -n "${PF_PID:-}" ] && { kill "$PF_PID" 2>/dev/null; wait "$PF_PID" 2>/dev/null; }
-  kubectl --context "kind-$CLUSTER" -n "${2:-$NS}" port-forward "svc/$1-bridgelink-bl" :8443 > "$WORK/pf.log" 2>&1 &
-  PF_PID=$!
-  for i in $(seq 1 30); do
-    port="$(sed -n 's/^Forwarding from 127\.0\.0\.1:\([0-9]*\) .*/\1/p' "$WORK/pf.log" | head -1)"
-    [ -n "$port" ] && break
-    sleep 1
-  done
-  API="https://127.0.0.1:${port:-0}/api"
-}
-api() {       # <method> <path> [curl args...]; the API rejects requests without X-Requested-With
-  local method="$1" path="$2"; shift 2
-  curl -sk -m 60 -b "$WORK/cookies" -c "$WORK/cookies" -H 'X-Requested-With: kind-test' \
-    -X "$method" "$API$path" "$@"
-}
-login() {     # prints the HTTP status; admin/admin works on a fresh install
-  rm -f "$WORK/cookies"
-  api POST /users/_login --data-urlencode username=admin --data-urlencode password=admin \
-    -o /dev/null -w '%{http_code}'
-}
-
-# Deletes the BridgeLink pod of release bl and waits for its replacement to be Ready. Prints
-# "<old> -> <new>", or nothing if no replacement became Ready.
-replace_pod() {
-  local old new="" i
-  old="$(k get pods -l "$BL_SELECTOR" -o jsonpath='{.items[0].metadata.name}')"
-  k delete pod "$old" --wait=true --timeout=3m >/dev/null
-  for i in $(seq 1 60); do
-    new="$(k get pods -l "$BL_SELECTOR" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)"
-    [ -n "$new" ] && [ "$new" != "$old" ] && break
-    sleep 2
-  done
-  [ -n "$new" ] && k wait --for=condition=Ready "pod/$new" --timeout="$TIMEOUT" >/dev/null && echo "$old -> $new"
-}
-
-# A channel that stores every message with encryption on. RAW in and out, so a message needs no
-# parsing. Shape from bridgelink-mcp's create_channel skeleton. The source is a Channel Reader, or an
-# HTTP Listener when a port is given. The HTTP Listener needs every field its constructor would set:
-# the server fills omitted ones with null, and the deploy then fails on a null binaryMimeTypes.
-channel_json() {   # <server version> <channel id> <name> [HTTP listener port]
-  local v="$1" id="$2" name="$3" port="${4:-}" transport props
-  local rid='{"@class":"linked-hash-map","entry":{"string":["Default Resource","[Default Resource]"]}}'
-  local raw='{"@class":"com.mirth.connect.plugins.datatypes.raw.RawDataTypeProperties","@version":"'"$v"'","batchProperties":{"@class":"com.mirth.connect.plugins.datatypes.raw.RawBatchProperties","@version":"'"$v"'","splitType":"JavaScript","batchScript":""}}'
-  local scp='{"@version":"'"$v"'","responseVariable":"None","respondAfterProcessing":true,"processBatch":false,"firstResponse":false,"processingThreads":1,"resourceIds":'"$rid"',"queueBufferSize":1000}'
-  if [ -n "$port" ]; then
-    transport="HTTP Listener"
-    props='{"@class":"com.mirth.connect.connectors.http.HttpReceiverProperties","@version":"'"$v"'","pluginProperties":null,
-   "listenerConnectorProperties":{"@version":"'"$v"'","host":"0.0.0.0","port":"'"$port"'"},"sourceConnectorProperties":'"$scp"',
-   "xmlBody":false,"parseMultipart":false,"includeMetadata":false,"binaryMimeTypes":"application/, image/, video/, audio/",
-   "binaryMimeTypesRegex":false,"responseContentType":"text/plain","responseDataTypeBinary":false,"responseStatusCode":"",
-   "responseHeaders":{"@class":"linked-hash-map"},"responseHeadersVariable":"","useResponseHeadersVariable":false,
-   "charset":"UTF-8","contextPath":"","timeout":"30000","staticResources":null}'
-  else
-    transport="Channel Reader"
-    props='{"@class":"com.mirth.connect.connectors.vm.VmReceiverProperties","@version":"'"$v"'","pluginProperties":null,"sourceConnectorProperties":'"$scp"'}'
-  fi
-  cat <<EOF
-{"channel":{"@version":"$v","id":"$id","nextMetaDataId":2,"name":"$name","description":"","revision":1,
- "sourceConnector":{"@version":"$v","metaDataId":0,"name":"sourceConnector",
-  "properties":$props,
-  "transformer":{"@version":"$v","elements":null,"inboundTemplate":{"@encoding":"base64"},"outboundTemplate":{"@encoding":"base64"},"inboundDataType":"RAW","outboundDataType":"RAW","inboundProperties":$raw,"outboundProperties":$raw},
-  "filter":{"@version":"$v","elements":null},"transportName":"$transport","mode":"SOURCE","enabled":true,"waitForPrevious":true},
- "destinationConnectors":{"connector":{"@version":"$v","metaDataId":1,"name":"Destination 1",
-  "properties":{"@class":"com.mirth.connect.connectors.vm.VmDispatcherProperties","@version":"$v","pluginProperties":null,
-   "destinationConnectorProperties":{"@version":"$v","queueEnabled":false,"sendFirst":false,"retryIntervalMillis":10000,"regenerateTemplate":false,"retryCount":0,"rotate":false,"includeFilterTransformer":false,"threadCount":1,"threadAssignmentVariable":null,"validateResponse":false,"resourceIds":$rid,"queueBufferSize":1000,"reattachAttachments":true},
-   "channelId":"none","channelTemplate":"\${message.encodedData}","mapVariables":null},
-  "transformer":{"@version":"$v","elements":null,"inboundDataType":"RAW","outboundDataType":"RAW","inboundProperties":$raw,"outboundProperties":$raw},
-  "responseTransformer":{"@version":"$v","elements":null,"inboundDataType":"RAW","outboundDataType":"RAW","inboundProperties":$raw,"outboundProperties":$raw},
-  "filter":{"@version":"$v","elements":null},"transportName":"Channel Writer","mode":"DESTINATION","enabled":true,"waitForPrevious":true}},
- "preprocessingScript":"return message;","postprocessingScript":"return;","deployScript":"return;","undeployScript":"return;",
- "properties":{"@version":"$v","clearGlobalChannelMap":true,"messageStorageMode":"DEVELOPMENT","encryptData":true,"encryptAttachments":false,"encryptCustomMetaData":false,
-  "removeContentOnCompletion":false,"removeOnlyFilteredOnCompletion":false,"removeAttachmentsOnCompletion":false,"initialState":"STARTED","storeAttachments":true,
-  "metaDataColumns":null,"attachmentProperties":{"@version":"$v","type":"None","properties":null},"resourceIds":$rid},
- "exportData":{"metadata":{"enabled":true,"pruningSettings":{"archiveEnabled":true,"pruneErroredMessages":false}},"dependentIds":null,"dependencyIds":null,"channelTags":null}}}
-EOF
-}
-
-# Prints 1 if the stored message comes back decrypted (its content contains MARKER), else 0.
-message_readable() {
-  api GET "/channels/$CHANNEL_ID/messages/$MSG_ID" -H 'Accept: application/json' | grep -c "$MARKER"
-}
+# ---- BridgeLink REST API: forward, api, login, channel_json, message_readable ------------------
+BL_NS="$NS"
+BL_KUBE_CONTEXT="kind-$CLUSTER"
+# shellcheck source-path=SCRIPTDIR source=lib/bl-api.sh
+. "$SCRIPT_DIR/lib/bl-api.sh"
 
 # Runs a command in a long-lived client pod, to reach the database over the pod network. Not
 # `kubectl run --rm -i`: a pod that exits before kubectl attaches loses its output, which made a
