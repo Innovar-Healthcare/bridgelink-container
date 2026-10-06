@@ -312,7 +312,7 @@ bridgelink:
     # -- Server ID, a UUID. Required on a new install: the install fails without it and prints a
     # freshly generated one to use. Record it: BridgeLink licenses are issued against it. Keep it for
     # the life of the server or cluster, since queued messages are recovered only under the ID that
-    # stored them. Servers in one cluster share one ID. An upgrade that leaves it empty keeps
+    # stored them. An autoscaling cluster shares one ID. An upgrade that leaves it empty keeps
     # `7d760af2-680a-4a19-b9a2-c4685df61ebc`, the ID every install shared before chart 0.9.0. See the
     # README's "Server ID" section.
     SERVER_ID: ""

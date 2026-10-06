@@ -186,7 +186,7 @@ for copying the keystore itself.
 
 The chart runs one BridgeLink pod, and upgrades stop it before starting the new one. See
 [Replicas and upgrades](#replicas-and-upgrades). For more than one server, see
-[Running several servers on one ID](#running-several-servers-on-one-id).
+[Running several servers](#running-several-servers).
 
 ### Mirroring images to Amazon ECR
 
@@ -301,8 +301,8 @@ It creates no Ingress, RBAC roles or metrics endpoints.
 
 This chart runs one BridgeLink pod: `bridgelink.replicaCount` accepts only `0` or `1`. A BridgeLink
 cluster runs several servers that share one server ID and use the Channel Coordinator plugin, so
-each polling channel (File, Database and SFTP readers) runs on one server at a time. See
-[Server ID](#server-id) for what a shared ID needs.
+each polling channel (File, Database and SFTP readers) runs on one server at a time. Servers can
+also each have their own ID; see [Running several servers](#running-several-servers) for both.
 
 Both the BridgeLink and the bundled PostgreSQL Deployments use `strategy: Recreate`, so `helm upgrade`
 stops the old pod before starting the new one. Expect a short outage during an upgrade. That is
@@ -411,19 +411,31 @@ Before chart 0.9.0, every install shared the default ID `7d760af2-680a-4a19-b9a2
 `helm upgrade` of a release that does not set an ID keeps that one, because the server already runs
 as it. See [Upgrading](#upgrading).
 
-### Running several servers on one ID
+### Running several servers
 
-On BridgeLink 26.9.0, servers that share one ID against one database need:
+Several BridgeLink servers can share one database. Give them one shared server ID, or one ID each.
 
-- **RAW or METADATA message storage on every channel.** With DEVELOPMENT or PRODUCTION storage, each
-  server that starts recovers the ID's unfinished messages, which includes messages the other
-  servers are still processing. They are processed twice, and under load the new server does not
-  become ready.
-- **Internal queues off.** Use the Work Queue for work that has to wait.
-- **The Channel Coordinator for polling channels** (File, Database and SFTP readers), with the
+| | One shared ID | One ID per server |
+|---|---|---|
+| Adding and removing servers | At any time, with no new IDs. Suits autoscaling. | A fixed set of servers. Each keeps its ID for life. |
+| License | One ID on the license | Every server's ID on the license |
+| Message storage (BridgeLink 26.9.0) | RAW or METADATA on every channel | Any mode |
+| Internal queues (source and destination) | Off. Use the Work Queue for work that has to wait. | Allowed. Each server sends its own queued messages. |
+| A server stops partway through messages | Those messages are not recovered. A sender that waits for an acknowledgement, as MLLP senders do, sends them again. | They wait until a server with that ID starts again. If none ever does, for example after a scale-in, they stay unprocessed. |
+
+The storage rule for a shared ID exists because, with DEVELOPMENT or PRODUCTION storage, each server
+that starts recovers the ID's unfinished messages, including messages the other servers are still
+processing. They are processed twice, and under load the new server does not become ready.
+
+Either way:
+
+- **Polling channels need the Channel Coordinator** (File, Database and SFTP readers), with the
   channel's initial state set to Stopped, so the Coordinator decides where it runs. Each server
   needs its own hostname. On Kubernetes the pod name already is one.
 - **Undeploy a channel on every server before removing all its messages or deleting it.**
+
+On Kubernetes, one ID per server needs a stable identity for each server, such as one release per
+server. A Deployment's pods are interchangeable and cannot keep separate IDs.
 
 ## Database
 
@@ -858,7 +870,7 @@ not apply.
 | bridgelink.environment.MP_DATABASE_USERNAME | string | `""` | Database username. Leave empty to use `postgres.credentials.username` with the bundled PostgreSQL. |
 | bridgelink.environment.MP_KEYSTORE_KEYPASS | string | `"bridgelinkKeystore"` | Keystore key password. Stored in the chart's Secret, not the pod spec. Never change it after the first start: the server could no longer open its keystore. |
 | bridgelink.environment.MP_KEYSTORE_STOREPASS | string | `"bridgelinkKeypass"` | Keystore store password. Stored in the chart's Secret, not the pod spec. Never change it after the first start. |
-| bridgelink.environment.SERVER_ID | string | `""` | Server ID, a UUID. Required on a new install: the install fails without it and prints a freshly generated one to use. Record it: BridgeLink licenses are issued against it. Keep it for the life of the server or cluster, since queued messages are recovered only under the ID that stored them. Servers in one cluster share one ID. An upgrade that leaves it empty keeps `7d760af2-680a-4a19-b9a2-c4685df61ebc`, the ID every install shared before chart 0.9.0. See the README's "Server ID" section. |
+| bridgelink.environment.SERVER_ID | string | `""` | Server ID, a UUID. Required on a new install: the install fails without it and prints a freshly generated one to use. Record it: BridgeLink licenses are issued against it. Keep it for the life of the server or cluster, since queued messages are recovered only under the ID that stored them. An autoscaling cluster shares one ID. An upgrade that leaves it empty keeps `7d760af2-680a-4a19-b9a2-c4685df61ebc`, the ID every install shared before chart 0.9.0. See the README's "Server ID" section. |
 | bridgelink.extraEnv | list | `[]` | Extra environment variables for the BridgeLink container, as Kubernetes EnvVar entries, so `valueFrom` works. An entry here replaces any variable of the same name the chart sets, including `environment`, the database settings and the passwords. For passwords, `credentials.existingSecret` is usually simpler. |
 | bridgelink.extraPorts | list | `[]` | Extra ports for channel listeners (MLLP, HTTP, TCP), declared on the BridgeLink container and added to the BridgeLink Service, or to the listener Service when `listenerService.enabled`. Each entry: `name` (lowercase, at most 15 characters), `containerPort` (the port the channel listens on), and optionally `port` (the Service port, default `containerPort`) and `protocol` (default TCP). Adding, changing or removing an entry changes the pod, so BridgeLink restarts on upgrade. |
 | bridgelink.extraVolumeMounts | list | `[]` | Extra volume mounts for the BridgeLink container. Plugin zips are installed from `/opt/bridgelink/custom-extensions` |
