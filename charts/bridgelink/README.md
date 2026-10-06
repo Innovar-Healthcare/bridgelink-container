@@ -1,6 +1,6 @@
 # bridgelink
 
-![Version: 0.9.1](https://img.shields.io/badge/Version-0.9.1-informational?style=flat-square)
+![Version: 0.9.2](https://img.shields.io/badge/Version-0.9.2-informational?style=flat-square)
 ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square)
 ![AppVersion: 26.9.0](https://img.shields.io/badge/AppVersion-26.9.0-informational?style=flat-square)
 
@@ -25,26 +25,29 @@ BridgeLink is a healthcare integration platform that facilitates seamless commun
 ## Prerequisites
 
 * Kubernetes 1.19+
-* Helm 3.0+
+* Helm 3.8+ (the first release with OCI registry support turned on by default)
 * PV provisioner support in the underlying infrastructure (for appdata and PostgreSQL persistence)
 * TLS certificates for secure communication (optional)
 
 ## Installing the Chart
 
-To install the chart with the release name `bridgelink`:
+The chart is published as an OCI package on GitHub Container Registry. To install it with the
+release name `bridgelink`:
 
 ```bash
-# Add the BridgeLink Helm repository
-helm repo add bridgelink https://innovar-healthcare.github.io/bridgelink-helm-charts
-helm repo update
-
 # Generate a server ID once, and record it: BridgeLink licenses are issued against it
 SERVER_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
 echo "$SERVER_ID"
 
 # Install the chart
-helm install bridgelink bridgelink/bridgelink --set-string bridgelink.environment.SERVER_ID="$SERVER_ID"
+helm install bridgelink oci://ghcr.io/innovar-healthcare/charts/bridgelink --version 0.9.2 \
+  --set-string bridgelink.environment.SERVER_ID="$SERVER_ID"
 ```
+
+There is no `helm repo add` step: Helm pulls an OCI chart directly by its reference. Always pass
+`--version`, on upgrades too, so a release changes only when you choose to move it. In Argo CD or
+Flux, pin the same version. Published versions are never replaced, and the available versions are
+listed on the package's page on GitHub.
 
 A new install without `bridgelink.environment.SERVER_ID` fails, and the error prints a freshly
 generated ID you can use. See [Server ID](#server-id) before choosing one.
@@ -59,7 +62,16 @@ bridgelink:
 ```
 
 ```bash
-helm install bridgelink bridgelink/bridgelink -f values.yaml
+helm install bridgelink oci://ghcr.io/innovar-healthcare/charts/bridgelink --version 0.9.2 -f values.yaml
+```
+
+### From a checkout
+
+To install the chart from a clone of this repository, for example to test a change to it, use the
+chart directory in place of the OCI reference:
+
+```bash
+helm install bridgelink charts/bridgelink --set-string bridgelink.environment.SERVER_ID="$SERVER_ID"
 ```
 
 ## Uninstalling the Chart
@@ -77,7 +89,8 @@ helm uninstall bridgelink
 > release's BridgeLink service:
 >
 > ```bash
-> helm install bridgelink bridgelink/bridgelink --set-string bridgelink.environment.SERVER_ID="$SERVER_ID" \
+> helm install bridgelink oci://ghcr.io/innovar-healthcare/charts/bridgelink --version 0.9.2 \
+>   --set-string bridgelink.environment.SERVER_ID="$SERVER_ID" \
 >   --set webadmin.enabled=true --set webadmin.acceptLicense=true
 > ```
 >

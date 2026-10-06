@@ -271,8 +271,10 @@ start it for you, already pointed at the bundled server. It is off by default:
 BL_ACCEPT_LICENSE=1 docker compose --profile webadmin up
 BL_ACCEPT_LICENSE=1 docker compose -f docker-compose.dhi.yml --profile webadmin up
 
-# Helm chart (charts/bridgelink/)
-helm install bridgelink charts/bridgelink \
+# Helm chart. charts/bridgelink/README.md gives the current chart version, how to choose a
+# server ID, and how to install from a checkout instead.
+helm install bridgelink oci://ghcr.io/innovar-healthcare/charts/bridgelink --version "$CHART_VERSION" \
+  --set-string bridgelink.environment.SERVER_ID="$SERVER_ID" \
   --set webadmin.enabled=true --set webadmin.acceptLicense=true
 ```
 
@@ -916,8 +918,8 @@ enabled by default**:
 * **startup** and **readiness** (`null` by default, opt-in) `exec` the same probe the `HEALTHCHECK`
   uses, because they must distinguish *ready* from *still starting*, and only the response body says
   which. They are off by default because that probe exists only in images built from this repo at or
-  after the change that added it, and this chart is installed from a checkout rather than a published
-  chart repo — so a default assuming a newer image would restart-loop for anyone on `main`.
+  after the change that added it, and any chart version can be installed against an older image tag
+  — so a default assuming a newer image would restart-loop those installs.
   `values.yaml` carries the exact block to paste in, and the chart prints a reminder to verify your
   image when you enable them.
 
