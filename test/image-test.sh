@@ -62,6 +62,9 @@ WORK="$(mktemp -d)"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 PASS=0 FAIL=0
+# api, login and channel_json, shared with the chart tests. Its kubectl helpers go unused here.
+# shellcheck source-path=SCRIPTDIR source=../charts/test/lib/bl-api.sh
+. "$REPO_ROOT/charts/test/lib/bl-api.sh"
 
 # ---- helpers ----------------------------------------------------------------------------------
 ok()   { echo "  PASS: $1"; PASS=$((PASS+1)); }
@@ -223,6 +226,62 @@ reporter_check() { curl -kf -s -o /dev/null -m 5 "https://localhost:$1" 2>/dev/n
 api_code() {
   curl -k -s -o /dev/null -w '%{http_code}' \
        -H 'X-Requested-With: XMLHttpRequest' "https://localhost:$1/api/server/version"
+}
+
+# Adds a Directory Resource for /opt/bridgelink/custom-jars, as a user would in Settings > Resources.
+# The endpoint replaces the whole list, so the current list is read and the resource appended to it.
+# Prints the HTTP status of the save. The container must publish 8443.
+add_custom_jars_resource() {
+  local name="$1" version
+  API="https://localhost:$(https_port "$name")/api"
+  [ "$(login)" = "200" ] || { echo "login-failed"; return 0; }
+  version="$(api GET /server/version)"
+  api GET /server/resources -H 'Accept: application/json' \
+    | python3 -c '
+import json, sys
+version = sys.argv[1]
+doc = json.load(sys.stdin)
+key = "com.mirth.connect.plugins.directoryresource.DirectoryResourceProperties"
+items = doc["list"][key]
+items = items if isinstance(items, list) else [items]
+items.append({"@version": version, "pluginPointName": "Directory Resource", "type": "Directory",
+              "id": "custom-jars", "name": "Custom jars", "description": "",
+              "includeWithGlobalScripts": False, "loadParentFirst": False,
+              "directory": "/opt/bridgelink/custom-jars", "directoryRecursion": True})
+doc["list"][key] = items
+json.dump(doc, sys.stdout)' "$version" > "$WORK/cj-resources.json"
+  api PUT /server/resources -H 'Content-Type: application/json' --data-binary @"$WORK/cj-resources.json" \
+    -o /dev/null -w '%{http_code}'
+}
+
+# Deploys a channel whose deploy script calls blcustomjar.Marker, the class in the
+# CUSTOM_JARS_DOWNLOAD fixture, and prints what the class wrote: nothing when it did not load.
+# Args: container, channel id, the resource the channel selects ("custom-jars", or "" for the
+# Default Resource only, as a new channel has).
+custom_jar_marker() {
+  local name="$1" id="$2" resource="$3" version code marker="/tmp/custom-jar-marker-$2"
+  API="https://localhost:$(https_port "$name")/api"
+  # A sentinel rather than nothing, so a failed login fails the control below instead of passing it.
+  [ "$(login)" = "200" ] || { echo "login-failed"; return 0; }
+  version="$(api GET /server/version)"
+  # A short name: the server refuses one over 40 characters with a bare HTTP 500.
+  channel_json "$version" "$id" "cj-test-${id:0:8}" \
+    | sed "s|\"deployScript\":\"return;\"|\"deployScript\":\"Packages.blcustomjar.Marker.write('$marker'); return;\"|" \
+    | if [ -n "$resource" ]; then
+        sed "s|\"Default Resource\",\"\\[Default Resource\\]\"|\"$resource\",\"Custom jars\"|g"
+      else
+        cat
+      fi > "$WORK/cj-channel-$id.json"
+  code="$(api POST /channels -H 'Content-Type: application/json' --data-binary @"$WORK/cj-channel-$id.json" \
+    -o /dev/null -w '%{http_code}')"
+  # A sentinel again: a channel that was never created must not count as one that could not load.
+  [ "$code" = "200" ] || { echo "create-failed-$code"; return 0; }
+  api POST "/channels/$id/_deploy" -o /dev/null
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    docker cp "$name:$marker" "$WORK/cj-marker-$id" >/dev/null 2>&1 && break
+    sleep 2
+  done
+  cat "$WORK/cj-marker-$id" 2>/dev/null
 }
 
 # ---- fixtures ---------------------------------------------------------------------------------
@@ -433,12 +492,35 @@ fi
 cp "$WORK/mp" "$WORK/httproot/custom.properties"; echo "custom.download.marker = downloaded" >> "$WORK/httproot/custom.properties"
 printf -- '-server\n-Xmx333m\n-Djava.awt.headless=true\n-Dcustom.vmopt.marker=downloaded\n' > "$WORK/httproot/custom.vmoptions"
 head -c 2048 /dev/urandom > "$WORK/httproot/keystore.jks"   # dummy bytes: tests the download path, not JKS validity
-python3 - "$WORK" <<'PY'
-import os, sys, zipfile
-w = sys.argv[1]; d = os.path.join(w, "cjar"); os.makedirs(d, exist_ok=True)
-open(os.path.join(d, "lib.txt"), "w").write("custom jar payload\n")
+# A real jar holding one class, inside a folder of the zip, so the resource's recursive scan is what
+# finds it. --release 17 keeps the class loadable on every image's runtime.
+mkdir -p "$WORK/cjar/src/blcustomjar"
+cat > "$WORK/cjar/src/blcustomjar/Marker.java" <<'JAVA'
+package blcustomjar;
+
+public class Marker {
+    public static void write(String path) throws java.io.IOException {
+        java.nio.file.Files.write(java.nio.file.Paths.get(path),
+                "loaded from custom-jars".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    }
+}
+JAVA
+CUSTOM_JAR_BUILT=0
+if command -v javac >/dev/null \
+   && javac --release 17 -d "$WORK/cjar/classes" "$WORK/cjar/src/blcustomjar/Marker.java" >"$WORK/cjar.log" 2>&1; then
+  CUSTOM_JAR_BUILT=1
+fi
+python3 - "$WORK" "$CUSTOM_JAR_BUILT" <<'PY'
+import io, os, sys, zipfile
+w, built = sys.argv[1], sys.argv[2] == "1"
+jar = io.BytesIO()
+with zipfile.ZipFile(jar, "w") as j:
+    if built:
+        j.write(os.path.join(w, "cjar", "classes", "blcustomjar", "Marker.class"), "blcustomjar/Marker.class")
+    else:
+        j.writestr("placeholder.txt", "no host JDK to compile the marker class\n")
 with zipfile.ZipFile(os.path.join(w, "httproot", "custom-jars.zip"), "w") as z:
-    z.write(os.path.join(d, "lib.txt"), "mycustomjar/lib.txt")
+    z.writestr("mycustomjar/blcustomjar.jar", jar.getvalue())
 PY
 
 docker run -d --name fileserver --network "$NET" \
@@ -456,7 +538,7 @@ else
 fi
 
 info "5b. CUSTOM_PROPERTIES / CUSTOM_VMOPTIONS / CUSTOM_JARS_DOWNLOAD"
-run bl-knobs --network "$NET" \
+run bl-knobs --network "$NET" -p 8443 \
   -e CUSTOM_PROPERTIES="http://fileserver/custom.properties" \
   -e CUSTOM_VMOPTIONS="http://fileserver/custom.vmoptions" \
   -e CUSTOM_JARS_DOWNLOAD="http://fileserver/custom-jars.zip"
@@ -464,7 +546,24 @@ if wait_for_log bl-knobs; then
   docker cp bl-knobs:/opt/bridgelink/conf/mirth.properties "$WORK/mp3" >/dev/null 2>&1
   grep -q '^custom.download.marker = downloaded' "$WORK/mp3" && ok "CUSTOM_PROPERTIES overwrote mirth.properties" || bad "CUSTOM_PROPERTIES not applied"
   vmopt_has bl-knobs '-Dcustom.vmopt.marker=downloaded' && ok "CUSTOM_VMOPTIONS applied" || bad "CUSTOM_VMOPTIONS not applied"
-  docker cp bl-knobs:/opt/bridgelink/custom-jars/mycustomjar/lib.txt "$WORK/cj" >/dev/null 2>&1 && ok "CUSTOM_JARS_DOWNLOAD extracted" || bad "CUSTOM_JARS_DOWNLOAD not extracted"
+  docker cp bl-knobs:/opt/bridgelink/custom-jars/mycustomjar/blcustomjar.jar "$WORK/cj" >/dev/null 2>&1 \
+    && ok "CUSTOM_JARS_DOWNLOAD extracted into custom-jars" || bad "CUSTOM_JARS_DOWNLOAD not extracted into custom-jars"
+  if [ "$CUSTOM_JAR_BUILT" = "1" ]; then
+    # The documented route: a Directory Resource on custom-jars, selected on the channel.
+    CODE="$(add_custom_jars_resource bl-knobs)"
+    [ "$CODE" = "204" ] || bad "saving the custom-jars resource returned '$CODE'"
+    [ "$(custom_jar_marker bl-knobs 9c1e2d3f-4a5b-4c6d-8e7f-0a1b2c3d4e5f custom-jars)" = "loaded from custom-jars" ] \
+      && ok "a channel that selects a resource on custom-jars loads a class from the downloaded jar" \
+      || bad "a channel that selects a resource on custom-jars could not load the class"
+    # The control, on the same server: a channel with only the Default Resource, as a new channel
+    # has, must not see the jar. This is also what keeps the download off every other channel.
+    [ -z "$(custom_jar_marker bl-knobs 0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d "")" ] \
+      && ok "control: a channel that does not select the resource cannot load the class" \
+      || bad "control: a channel without the resource loaded the class"
+  else
+    echo "  SKIP: no host JDK to compile the marker class, so class loading was not checked"
+    cat "$WORK/cjar.log" 2>/dev/null
+  fi
 else
   bad "server did not start (custom knobs)"
 fi

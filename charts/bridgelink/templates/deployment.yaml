@@ -104,9 +104,6 @@ spec:
           volumeMounts:
             - name: appdata
               mountPath: /opt/bridgelink/appdata
-            - name: blserver-vmoptions
-              mountPath: /opt/bridgelink/secrets/vmoptions
-              subPath: blserver-vmoptions
             {{- with .Values.bridgelink.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -135,13 +132,19 @@ spec:
             {{- include "bridgelink.credentialEnv" (list $name .) | nindent 12 }}
             {{- end }}
             {{- end }}
-            {{- $skip := concat $extra (list "MP_DATABASE_URL" "MP_DATABASE_USERNAME" "MP_DATABASE_PASSWORD" "MP_KEYSTORE_STOREPASS" "MP_KEYSTORE_KEYPASS" "CUSTOM_VMOPTIONS_PATH") }}
+            {{- $skip := concat $extra (list "MP_DATABASE_URL" "MP_DATABASE_USERNAME" "MP_DATABASE_PASSWORD" "MP_KEYSTORE_STOREPASS" "MP_KEYSTORE_KEYPASS") }}
             {{- /* SERVER_ID goes back in resolved, so it keeps its sorted position and an upgrade
             that does not set it renders the same pod template as before. Not evaluated when
             extraEnv supplies it: the helper fails a new install that has no ID. */}}
-            {{- $env := omit .Values.bridgelink.environment "SERVER_ID" }}
+            {{- $env := omit .Values.bridgelink.environment "SERVER_ID" "MP_VMOPTIONS" }}
             {{- if not (has "SERVER_ID" $extra) }}
             {{- $_ := set $env "SERVER_ID" (include "bridgelink.serverId" .) }}
+            {{- end }}
+            {{- /* MP_VMOPTIONS goes back with the heap worked out from the memory limit. */}}
+            {{- if not (has "MP_VMOPTIONS" $extra) }}
+            {{- with include "bridgelink.vmoptions" . }}
+            {{- $_ := set $env "MP_VMOPTIONS" . }}
+            {{- end }}
             {{- end }}
             {{- /* Keys resolved above are skipped here to avoid duplicates. */}}
             {{- range $key, $value := $env }}
@@ -149,10 +152,6 @@ spec:
             - name: {{ $key }}
               value: {{ $value | quote }}
             {{- end }}
-            {{- end }}
-            {{- if not (has "CUSTOM_VMOPTIONS_PATH" $extra) }}
-            - name: CUSTOM_VMOPTIONS_PATH
-              value: /opt/bridgelink/secrets/vmoptions
             {{- end }}
             {{- with .Values.bridgelink.extraEnv }}
             {{- toYaml . | nindent 12 }}
@@ -189,9 +188,6 @@ spec:
               - key: keystore.jks
                 path: keystore.jks
         {{- end }}
-        - name: blserver-vmoptions
-          secret:
-            secretName: {{ include "bridgelink.fullname" . }}-vmoptions
         {{- with .Values.bridgelink.extraVolumes }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

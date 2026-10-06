@@ -279,6 +279,14 @@ k get deploy -o yaml | grep -qE 'bridgelinkKeystore|bridgelinkKeypass' \
   && bad "a keystore password is in plain text in a Deployment" || ok "no keystore password in any Deployment"
 
 # ---- 3. encrypted content survives pod replacement --------------------------------------------
+# The running JVM's maximum heap in MB, as BridgeLink reports it.
+max_heap_mib() {
+  api GET /system/stats -H 'Accept: application/json' | grep -oE '"maxMemoryBytes":[0-9]+' \
+    | grep -oE '[0-9]+$' | awk '{ printf "%d", $1 / 1048576 }'
+}
+# True when <got> MB is <want> MB or up to 10% under it: some collectors report the heap minus a
+# survivor space.
+heap_is() { [ -n "$1" ] && [ "$1" -le "$2" ] && [ "$1" -ge $(( $2 * 9 / 10 )) ]; }
 info "3. a message stored encrypted is still readable after the BridgeLink pod is replaced"
 # The data-encryption key exists only in appdata/keystore.jks. If appdata does not survive the pod,
 # the replacement generates a new key and the message below can no longer be decrypted.
@@ -296,6 +304,10 @@ CODE="$(login)"
 GOT_ID="$(api GET /server/id | grep -oE '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}' | head -1)"
 [ "$GOT_ID" = "$BL_ID" ] && ok "the upgraded server still reports server ID $BL_ID" \
   || bad "the upgraded server reports server ID '$GOT_ID', want $BL_ID"
+# The heap is heapPercentage (75) of the default 2Gi limit, not the image's own 256 MB default.
+HEAP="$(max_heap_mib)"
+heap_is "$HEAP" 1536 && ok "the JVM's maximum heap is ${HEAP} MB, 75% of the 2Gi memory limit" \
+  || bad "the JVM's maximum heap is '${HEAP}' MB, want about 1536 (75% of the 2Gi limit)"
 VERSION="$(api GET /server/version)"
 channel_json "$VERSION" "$CHANNEL_ID" kind-test-encrypted > "$WORK/channel.json"
 CODE="$(api POST /channels -H 'Content-Type: application/json' --data-binary @"$WORK/channel.json" -o "$WORK/out" -w '%{http_code}')"
@@ -357,7 +369,7 @@ kr create secret generic bl-keystore >/dev/null --from-file=keystore.jks="$WORK/
 [ -s "$WORK/keystore.jks" ] && ok "copied the keystore off the claim into Secret bl-keystore ($(wc -c < "$WORK/keystore.jks" | tr -d ' ') bytes)" \
   || bad "could not read the keystore off the claim"
 if h upgrade bl "$CHART" -f "$WORK/common.yaml" ${SETS[@]+"${SETS[@]}"} ${ID_SETS[@]+"${ID_SETS[@]}"} \
-     --set-string bridgelink.resources.requests.cpu=251m \
+     --set-string bridgelink.resources.requests.cpu=251m --set-string bridgelink.environment.MP_VMOPTIONS=512 \
      --set bridgelink.persistence.enabled=false --set bridgelink.keystore.existingSecret=bl-keystore \
      --wait --timeout "$TIMEOUT" >/dev/null; then
   ok "upgraded to keystore.existingSecret with persistence off, and BridgeLink Ready"
@@ -374,6 +386,9 @@ k logs "$POD" -c keystore 2>&1 | grep -q "Copied keystore.jks" && ok "the init c
 forward bl; login >/dev/null
 [ "$(message_readable)" -ge 1 ] && ok "message readable with the keystore from the Secret" \
   || bad "message unreadable with the keystore from the Secret"
+HEAP="$(max_heap_mib)"
+heap_is "$HEAP" 512 && ok "MP_VMOPTIONS overrides the chart's heap (${HEAP} MB)" \
+  || bad "the heap is '${HEAP}' MB with MP_VMOPTIONS=512, want about 512"
 REPLACED="$(replace_pod)"
 if [ -n "$REPLACED" ]; then
   forward bl; login >/dev/null
@@ -391,7 +406,7 @@ LISTENER_ID="8b3e1f5a-2c4d-4e6f-9a1b-3c5d7e9f0b2d"
 LISTEN_PORT=6661
 LISTENER_SVC="bl-bridgelink-listeners"
 if h upgrade bl "$CHART" -f "$WORK/common.yaml" ${SETS[@]+"${SETS[@]}"} ${ID_SETS[@]+"${ID_SETS[@]}"} \
-     --set-string bridgelink.resources.requests.cpu=251m \
+     --set-string bridgelink.resources.requests.cpu=251m --set-string bridgelink.environment.MP_VMOPTIONS=512 \
      --set bridgelink.persistence.enabled=false --set bridgelink.keystore.existingSecret=bl-keystore \
      --set-json "bridgelink.extraPorts=[{\"name\":\"http-listen\",\"containerPort\":$LISTEN_PORT}]" \
      --set bridgelink.listenerService.enabled=true --wait --timeout "$TIMEOUT" >/dev/null; then

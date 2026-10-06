@@ -1,6 +1,6 @@
 # bridgelink
 
-![Version: 0.10.1](https://img.shields.io/badge/Version-0.10.1-informational?style=flat-square)
+![Version: 0.11.0](https://img.shields.io/badge/Version-0.11.0-informational?style=flat-square)
 ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square)
 ![AppVersion: 26.9.0](https://img.shields.io/badge/AppVersion-26.9.0-informational?style=flat-square)
 
@@ -41,7 +41,7 @@ SERVER_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
 echo "$SERVER_ID"
 
 # Install the chart
-helm install bridgelink oci://ghcr.io/innovar-healthcare/charts/bridgelink --version 0.10.1 \
+helm install bridgelink oci://ghcr.io/innovar-healthcare/charts/bridgelink --version 0.11.0 \
   --set-string bridgelink.environment.SERVER_ID="$SERVER_ID"
 ```
 
@@ -63,7 +63,7 @@ bridgelink:
 ```
 
 ```bash
-helm install bridgelink oci://ghcr.io/innovar-healthcare/charts/bridgelink --version 0.10.1 -f values.yaml
+helm install bridgelink oci://ghcr.io/innovar-healthcare/charts/bridgelink --version 0.11.0 -f values.yaml
 ```
 
 ### From a checkout
@@ -236,7 +236,7 @@ helm uninstall bridgelink
 > release's BridgeLink service:
 >
 > ```bash
-> helm install bridgelink oci://ghcr.io/innovar-healthcare/charts/bridgelink --version 0.10.1 \
+> helm install bridgelink oci://ghcr.io/innovar-healthcare/charts/bridgelink --version 0.11.0 \
 >   --set-string bridgelink.environment.SERVER_ID="$SERVER_ID" \
 >   --set webadmin.enabled=true --set webadmin.acceptLicense=true
 > ```
@@ -754,6 +754,16 @@ evaluation only; in a restricted namespace, use an external database.
 
 ## Upgrading
 
+**Chart 0.11.0** sizes BridgeLink's heap from its memory limit:
+
+- **The maximum heap rises from 256 MB to 75% of `bridgelink.resources.limits.memory`**, 1536 MB
+  with the default 2Gi limit. The pod uses more memory after the upgrade, and the upgrade restarts
+  BridgeLink once. See [Memory](#memory).
+- **A release that sets the heap through `MP_VMOPTIONS` keeps it**, as does one that sets
+  `CUSTOM_VMOPTIONS`. To keep 256 MB, set `bridgelink.heapPercentage: null`.
+- **The `<release>-bridgelink-vmoptions` Secret is removed.** BridgeLink never read it, so nothing
+  that depended on it worked.
+
 **Chart 0.10.0** moves every password out of the pod spec:
 
 - **The database and keystore passwords move into a Secret**, `<release>-bridgelink-credentials`,
@@ -875,6 +885,7 @@ not apply.
 | bridgelink.extraPorts | list | `[]` | Extra ports for channel listeners (MLLP, HTTP, TCP), declared on the BridgeLink container and added to the BridgeLink Service, or to the listener Service when `listenerService.enabled`. Each entry: `name` (lowercase, at most 15 characters), `containerPort` (the port the channel listens on), and optionally `port` (the Service port, default `containerPort`) and `protocol` (default TCP). Adding, changing or removing an entry changes the pod, so BridgeLink restarts on upgrade. |
 | bridgelink.extraVolumeMounts | list | `[]` | Extra volume mounts for the BridgeLink container. Plugin zips are installed from `/opt/bridgelink/custom-extensions` |
 | bridgelink.extraVolumes | list | `[]` | Extra volumes for the BridgeLink pod, e.g. an EFS claim for file-based channels, or a claim holding plugin zips (see Plugins in the README) |
+| bridgelink.heapPercentage | int | `75` | Maximum Java heap, as a percentage of `resources.limits.memory`: 75 gives 1536 MB in 2Gi. The rest is for the JVM's own memory and, if you turn them on, the exec probes. Ignored when `MP_VMOPTIONS` sets the heap itself or `CUSTOM_VMOPTIONS` is set. Set to null to keep the image's default of 256 MB. |
 | bridgelink.helperImage.pullPolicy | string | `"IfNotPresent"` | Helper image pull policy |
 | bridgelink.helperImage.repository | string | `"busybox"` | Helper image repository. Needs `/bin/sh`, `cp` and `mv`. |
 | bridgelink.helperImage.tag | string | `"1.37.0"` | Helper image tag. Pinned: a moving tag would change what runs without a chart change. |
@@ -973,6 +984,10 @@ The image reads:
   [Plugins](#plugins).
 - `KEYSTORE_DOWNLOAD`: URL of a keystore to download into appdata at every start. A
   [keystore Secret](#keystore-and-appdata) does the same job without a download.
+- `CUSTOM_JARS_DOWNLOAD`: URLs of zips of jar files, separated by commas, unpacked into
+  `/opt/bridgelink/custom-jars` at every start. To use them, create a Directory Resource in
+  BridgeLink with that directory and select it on the channels that need it; both are stored in the
+  database.
 - `CUSTOM_PROPERTIES`, `CUSTOM_VMOPTIONS`: URL of a complete `mirth.properties` or
   `blserver.vmoptions`, downloaded at every start to replace the image's copy. `MP_` variables
   still apply on top of it.
@@ -982,18 +997,25 @@ The image reads:
 
 ## Memory
 
-BridgeLink's maximum heap is **256 MB** unless you set it, whatever `bridgelink.resources.limits.memory`
-is. Set it with `MP_VMOPTIONS`, leaving room under the memory limit for the JVM's own overhead and,
-if you turn on the exec probes, their short-lived JVMs (about 50-80 MB each):
+BridgeLink's maximum heap is `bridgelink.heapPercentage` (default 75) percent of
+`bridgelink.resources.limits.memory`: 1536 MB with the default 2Gi limit. The rest of the limit is
+for the JVM's own memory and, if you turn on the exec probes, their short-lived JVMs (about 50-80 MB
+each). Raise the limit and the heap follows. The heap is larger than the default memory request
+(1Gi), so on a busy node set `bridgelink.resources.requests.memory` close to the limit; otherwise the
+scheduler can place the pod where its memory is not there to use.
+
+To set the heap yourself, put it in `MP_VMOPTIONS`, either as a number of MB or as `-Xmx`. The chart
+then leaves the heap alone. Other options in `MP_VMOPTIONS` are added alongside the chart's heap:
 
 ```yaml
 bridgelink:
   environment:
-    MP_VMOPTIONS: "-Xmx1536m"
-  resources:
-    limits:
-      memory: 2Gi
+    MP_VMOPTIONS: "1536"
 ```
+
+The chart also leaves the heap alone when `CUSTOM_VMOPTIONS` is set, and when there is no memory
+limit; the image's default of 256 MB then applies. `-XX:MaxRAMPercentage` in `MP_VMOPTIONS` has no
+effect, because the image always sets a maximum heap and that takes precedence.
 
 A changed value restarts BridgeLink on the next upgrade.
 

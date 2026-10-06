@@ -20,6 +20,8 @@ VMOPTIONS_FILE="/opt/bridgelink/blserver.vmoptions"
 SERVER_ID_FILE="/opt/bridgelink/appdata/server.id"
 KEYSTORE_FILE="/opt/bridgelink/appdata/keystore.jks"
 EXTENSIONS_DIR="/opt/bridgelink/extensions"
+# Not on any classpath. A channel reaches these jars through a Directory Resource that points at this
+# folder and is selected on that channel.
 CUSTOM_JARS_DIR="/opt/bridgelink/custom-jars"
 S3_CUSTOM_JARS_DIR="/opt/bridgelink/S3_custom-jars"
 APPDATA_DIR="/opt/bridgelink/appdata"
@@ -194,7 +196,7 @@ fi
 if [ -n "${CUSTOM_JARS_DOWNLOAD}" ]; then
   echo "Downloading jars from ${CUSTOM_JARS_DOWNLOAD}"
 
-  mkdir ${CUSTOM_JARS_DIR}
+  mkdir -p ${CUSTOM_JARS_DIR}
 
   cd ${CUSTOM_JARS_DIR}
 

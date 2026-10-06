@@ -182,6 +182,18 @@
           ],
           "title": "resources"
         },
+        "heapPercentage": {
+          "default": 75,
+          "description": "Maximum Java heap as a percentage of resources.limits.memory; null keeps the image's default",
+          "maximum": 95,
+          "minimum": 1,
+          "required": [],
+          "title": "heapPercentage",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
         "service": {
           "additionalProperties": false,
           "properties": {

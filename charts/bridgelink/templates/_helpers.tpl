@@ -169,6 +169,53 @@ anything else is its string form, so `false` stays "false" as it always rendered
 {{- end }}
 
 {{/*
+The maximum heap in MiB: bridgelink.heapPercentage of resources.limits.memory, rounded down. Renders
+nothing when either is unset. The image's own vmoptions carry -Xmx256m, which beats any
+-XX:MaxRAMPercentage, so the chart works the size out here and passes it as a plain -Xmx instead.
+*/}}
+{{- define "bridgelink.heapMi" -}}
+{{- $pct := .Values.bridgelink.heapPercentage -}}
+{{- $limit := include "bridgelink.envString" (dig "limits" "memory" nil (.Values.bridgelink.resources | default dict)) | trim -}}
+{{- if and (not (kindIs "invalid" $pct)) $limit -}}
+{{- if not (regexMatch "^[0-9]+(\\.[0-9]+)?(Ki|Mi|Gi|Ti|k|M|G|T)?$" $limit) -}}
+{{- fail (printf "bridgelink.resources.limits.memory %q is not a size the chart can read to work out the heap (use a form such as 2Gi or 2048Mi). Set the heap yourself with bridgelink.environment.MP_VMOPTIONS (for example \"1536\" for 1536 MB), or set bridgelink.heapPercentage to null to keep the image's default." $limit) -}}
+{{- end -}}
+{{- $number := regexReplaceAll "[A-Za-z]+$" $limit "" | float64 -}}
+{{- $units := dict "" 1.0 "Ki" 1024.0 "Mi" 1048576.0 "Gi" 1073741824.0 "Ti" 1099511627776.0 "k" 1000.0 "M" 1000000.0 "G" 1000000000.0 "T" 1000000000000.0 -}}
+{{- $bytes := mulf $number (get $units (regexFind "[A-Za-z]+$" $limit)) -}}
+{{- $heap := int64 (floor (divf (mulf $bytes (float64 $pct)) (mulf 100.0 1048576.0))) -}}
+{{- if lt $heap 64 -}}
+{{- fail (printf "bridgelink.resources.limits.memory %q leaves a heap of %d MB, too small for BridgeLink to start. A plain number is bytes: write 2Gi or 2048Mi, not 2048. Or set the heap yourself with bridgelink.environment.MP_VMOPTIONS." $limit $heap) -}}
+{{- end -}}
+{{- $heap -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+The MP_VMOPTIONS the chart sets: the heap from bridgelink.heapMi as a bare number of MB, which the
+image writes over its -Xmx line, followed by bridgelink.environment.MP_VMOPTIONS. The heap is left
+out when that value already sets one (a bare number, -Xmx or -XX:MaxHeapSize), and when
+CUSTOM_VMOPTIONS is set: the image applies MP_VMOPTIONS after downloading that file, so the number
+would replace the file's -Xmx.
+*/}}
+{{- define "bridgelink.vmoptions" -}}
+{{- $user := include "bridgelink.envString" .Values.bridgelink.environment.MP_VMOPTIONS | trim -}}
+{{- $setsHeap := false -}}
+{{- range splitList "," $user -}}
+{{- $opt := trim . -}}
+{{- if or (regexMatch "^[0-9]+$" $opt) (hasPrefix "-Xmx" $opt) (hasPrefix "-XX:MaxHeapSize" $opt) -}}
+{{- $setsHeap = true -}}
+{{- end -}}
+{{- end -}}
+{{- $custom := or (include "bridgelink.envString" .Values.bridgelink.environment.CUSTOM_VMOPTIONS) (include "bridgelink.inExtraEnv" (list $ "CUSTOM_VMOPTIONS")) -}}
+{{- $heap := "" -}}
+{{- if not (or $setsHeap $custom) -}}
+{{- $heap = include "bridgelink.heapMi" . -}}
+{{- end -}}
+{{- join "," (compact (list $heap $user)) -}}
+{{- end }}
+
+{{/*
 Where each password comes from, as JSON: {"env": {VAR: {"secret", "key"}}, "data": {key: value}}.
 "env" covers MP_DATABASE_PASSWORD, MP_KEYSTORE_STOREPASS, MP_KEYSTORE_KEYPASS and the bundled
 PostgreSQL's POSTGRES_PASSWORD; "data" is what the chart's own Secret holds. A password is never

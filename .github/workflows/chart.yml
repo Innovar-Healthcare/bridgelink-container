@@ -230,6 +230,60 @@ jobs:
           print('an upgrade keeps the old default; explicit and extraEnv IDs are used as given')
           PY
 
+      - name: The heap follows the memory limit, and MP_VMOPTIONS still overrides it
+        run: |
+          set -euo pipefail
+          # The image's vmoptions carry -Xmx256m, and an explicit -Xmx beats -XX:MaxRAMPercentage, so
+          # the chart works the heap out from the limit and passes it as a bare number of MB, which
+          # every published image writes over its -Xmx line. Before this the chart mounted a vmoptions
+          # file the image never read, and every install ran on 256 MB inside a 2Gi limit.
+          vmo() {   # prints MP_VMOPTIONS as rendered, or <unset>
+            helm template bl charts/bridgelink $SID "$@" | python3 -c '
+          import sys, yaml
+          docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
+          dep = [d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"].endswith("-bl")][0]
+          c = [x for x in dep["spec"]["template"]["spec"]["containers"] if x["name"] == "bridgelink"][0]
+          env = [e for e in c.get("env", []) if e["name"] == "MP_VMOPTIONS"]
+          assert len(env) <= 1, "MP_VMOPTIONS rendered %d times" % len(env)
+          print(env[0]["value"] if env else "<unset>")'
+          }
+          check() {  # <want> <helm args...>
+            local want="$1"; shift
+            got="$(vmo "$@")" || { echo "::error::rendering with [$*] failed"; exit 1; }
+            [ "$got" = "$want" ] || { echo "::error::MP_VMOPTIONS with [$*] is '$got', want '$want'"; exit 1; }
+            echo "[$*] -> $got"
+          }
+          check 1536
+          check 768  --set bridgelink.resources.limits.memory=1Gi
+          check 1152 --set bridgelink.resources.limits.memory=1536Mi
+          check 1430 --set bridgelink.resources.limits.memory=2G
+          check 1024 --set bridgelink.heapPercentage=50
+          # Other options keep the computed heap; one that sets the heap replaces it.
+          check "1536,-Dfoo=bar" --set-string bridgelink.environment.MP_VMOPTIONS=-Dfoo=bar
+          check "-Xmx3g,-Dfoo=bar" --set-string 'bridgelink.environment.MP_VMOPTIONS=-Xmx3g\,-Dfoo=bar'
+          check 512 --set-string bridgelink.environment.MP_VMOPTIONS=512
+          # CUSTOM_VMOPTIONS is applied first, so a computed number would replace that file's -Xmx.
+          check "<unset>" --set-string bridgelink.environment.CUSTOM_VMOPTIONS=https://example.com/v
+          check "<unset>" --set 'bridgelink.extraEnv[0].name=CUSTOM_VMOPTIONS' --set 'bridgelink.extraEnv[0].value=https://example.com/v'
+          # An extraEnv entry replaces the chart's variable outright: one entry, its value, no heap added.
+          check 900 --set 'bridgelink.extraEnv[0].name=MP_VMOPTIONS' --set-string 'bridgelink.extraEnv[0].value=900'
+          check "<unset>" --set bridgelink.heapPercentage=null
+          check "<unset>" --set bridgelink.resources.limits.memory=null
+          # A plain number is bytes, so 2048 meaning megabytes would be a 0 MB heap the JVM refuses.
+          if helm template bl charts/bridgelink $SID --set-string bridgelink.resources.limits.memory=2048 > /tmp/heap.txt 2>&1; then
+            echo "::error::a 2048-byte memory limit rendered a heap"; exit 1
+          fi
+          grep -q "too small" /tmp/heap.txt || { echo "::error::the failure does not say the heap is too small"; cat /tmp/heap.txt; exit 1; }
+          # A size the chart cannot read fails with a way out, rather than guessing.
+          if helm template bl charts/bridgelink $SID --set-string bridgelink.resources.limits.memory=2e9 > /tmp/heap.txt 2>&1; then
+            echo "::error::an unreadable memory limit rendered"; exit 1
+          fi
+          grep -q "MP_VMOPTIONS" /tmp/heap.txt || { echo "::error::the failure does not point at MP_VMOPTIONS"; cat /tmp/heap.txt; exit 1; }
+          # The vmoptions Secret the image never read must not come back.
+          ! grep -qE "CUSTOM_VMOPTIONS_PATH|-vmoptions$|secrets/vmoptions" /tmp/rendered.yaml \
+            || { echo "::error::the unused vmoptions Secret, mount or variable is rendered again"; exit 1; }
+          echo "heap sizing OK"
+
       - name: Database settings in values reach the container
         run: |
           set -euo pipefail
