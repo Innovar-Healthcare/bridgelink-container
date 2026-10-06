@@ -235,7 +235,8 @@ api_code() {
 custom_jar_marker() {
   local name="$1" id="9c1e2d3f-4a5b-4c6d-8e7f-0a1b2c3d4e5f" version
   API="https://localhost:$(https_port "$name")/api"
-  [ "$(login)" = "200" ] || { echo "    (login to $name failed)" >&2; return 0; }
+  # A sentinel rather than nothing, so a failed login fails the control below instead of passing it.
+  [ "$(login)" = "200" ] || { echo "login-failed"; return 0; }
   version="$(api GET /server/version)"
   channel_json "$version" "$id" custom-jar-test \
     | sed "s|\"deployScript\":\"return;\"|\"deployScript\":\"Packages.blcustomjar.Marker.write('/tmp/custom-jar-marker'); return;\"|" \

@@ -183,7 +183,11 @@ nothing when either is unset. The image's own vmoptions carry -Xmx256m, which be
 {{- $number := regexReplaceAll "[A-Za-z]+$" $limit "" | float64 -}}
 {{- $units := dict "" 1.0 "Ki" 1024.0 "Mi" 1048576.0 "Gi" 1073741824.0 "Ti" 1099511627776.0 "k" 1000.0 "M" 1000000.0 "G" 1000000000.0 "T" 1000000000000.0 -}}
 {{- $bytes := mulf $number (get $units (regexFind "[A-Za-z]+$" $limit)) -}}
-{{- printf "%d" (int64 (floor (divf (mulf $bytes (float64 $pct)) (mulf 100.0 1048576.0)))) -}}
+{{- $heap := int64 (floor (divf (mulf $bytes (float64 $pct)) (mulf 100.0 1048576.0))) -}}
+{{- if lt $heap 64 -}}
+{{- fail (printf "bridgelink.resources.limits.memory %q leaves a heap of %d MB, too small for BridgeLink to start. A plain number is bytes: write 2Gi or 2048Mi, not 2048. Or set the heap yourself with bridgelink.environment.MP_VMOPTIONS." $limit $heap) -}}
+{{- end -}}
+{{- $heap -}}
 {{- end -}}
 {{- end }}
 

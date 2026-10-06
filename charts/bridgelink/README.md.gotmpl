@@ -895,7 +895,9 @@ The image reads:
 BridgeLink's maximum heap is `bridgelink.heapPercentage` (default 75) percent of
 `bridgelink.resources.limits.memory`: 1536 MB with the default 2Gi limit. The rest of the limit is
 for the JVM's own memory and, if you turn on the exec probes, their short-lived JVMs (about 50-80 MB
-each). Raise the limit and the heap follows.
+each). Raise the limit and the heap follows. The heap is larger than the default memory request
+(1Gi), so on a busy node set `bridgelink.resources.requests.memory` close to the limit; otherwise the
+scheduler can place the pod where its memory is not there to use.
 
 To set the heap yourself, put it in `MP_VMOPTIONS`, either as a number of MB or as `-Xmx`. The chart
 then leaves the heap alone. Other options in `MP_VMOPTIONS` are added alongside the chart's heap:

@@ -249,7 +249,7 @@ jobs:
           }
           check() {  # <want> <helm args...>
             local want="$1"; shift
-            got="$(vmo "$@")"
+            got="$(vmo "$@")" || { echo "::error::rendering with [$*] failed"; exit 1; }
             [ "$got" = "$want" ] || { echo "::error::MP_VMOPTIONS with [$*] is '$got', want '$want'"; exit 1; }
             echo "[$*] -> $got"
           }
@@ -266,9 +266,14 @@ jobs:
           check "<unset>" --set-string bridgelink.environment.CUSTOM_VMOPTIONS=https://example.com/v
           check "<unset>" --set 'bridgelink.extraEnv[0].name=CUSTOM_VMOPTIONS' --set 'bridgelink.extraEnv[0].value=https://example.com/v'
           # An extraEnv entry replaces the chart's variable outright: one entry, its value, no heap added.
-          check 900 --set 'bridgelink.extraEnv[0].name=MP_VMOPTIONS' --set 'bridgelink.extraEnv[0].value=900'
+          check 900 --set 'bridgelink.extraEnv[0].name=MP_VMOPTIONS' --set-string 'bridgelink.extraEnv[0].value=900'
           check "<unset>" --set bridgelink.heapPercentage=null
           check "<unset>" --set bridgelink.resources.limits.memory=null
+          # A plain number is bytes, so 2048 meaning megabytes would be a 0 MB heap the JVM refuses.
+          if helm template bl charts/bridgelink $SID --set-string bridgelink.resources.limits.memory=2048 > /tmp/heap.txt 2>&1; then
+            echo "::error::a 2048-byte memory limit rendered a heap"; exit 1
+          fi
+          grep -q "too small" /tmp/heap.txt || { echo "::error::the failure does not say the heap is too small"; cat /tmp/heap.txt; exit 1; }
           # A size the chart cannot read fails with a way out, rather than guessing.
           if helm template bl charts/bridgelink $SID --set-string bridgelink.resources.limits.memory=2e9 > /tmp/heap.txt 2>&1; then
             echo "::error::an unreadable memory limit rendered"; exit 1
