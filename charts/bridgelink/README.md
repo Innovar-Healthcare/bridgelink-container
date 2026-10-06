@@ -341,9 +341,8 @@ kubectl create secret generic bridgelink-keystore --from-file=keystore.jks \
 
 Plugins come as extension zips. At every start, the image unpacks the zips you give it into
 `/opt/bridgelink/extensions`. The chart has two ways to give them, both set in values, and they can
-be combined. Commercial plugins also need the License Manager plugin, installed the same way.
-Their licenses are checked against the server ID, so set it before you request a license (see
-[Server ID](#server-id)).
+be combined. Plugin licenses are checked against the server ID, so set it before you request a
+license (see [Server ID](#server-id)).
 
 Each zip must be built for the BridgeLink version the image runs. A zip built for another version
 unpacks, then is not loaded, and the log says
@@ -356,7 +355,7 @@ List one or more URLs, separated by commas, in `EXTENSIONS_DOWNLOAD`:
 ```yaml
 bridgelink:
   environment:
-    EXTENSIONS_DOWNLOAD: "https://my-bucket.s3.amazonaws.com/license-manager.zip?X-Amz-...,https://my-bucket.s3.amazonaws.com/my-plugin.zip?X-Amz-..."
+    EXTENSIONS_DOWNLOAD: "https://my-bucket.s3.amazonaws.com/my-plugin.zip?X-Amz-...,https://my-bucket.s3.amazonaws.com/other-plugin.zip?X-Amz-..."
 ```
 
 - **The pod downloads the zips again at every start.** It needs outbound access to the host. From
@@ -406,8 +405,8 @@ kubectl run plugin-copy --image=busybox:1.37.0 --restart=Never --overrides='{"sp
     "securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}},
     "volumeMounts":[{"name":"plugins","mountPath":"/plugins"}]}]}}'
 kubectl wait --for=condition=Ready pod/plugin-copy --timeout=3m
-kubectl cp license-manager.zip plugin-copy:/plugins/license-manager.zip
 kubectl cp my-plugin.zip plugin-copy:/plugins/my-plugin.zip
+kubectl cp other-plugin.zip plugin-copy:/plugins/other-plugin.zip
 kubectl delete pod plugin-copy
 ```
 
