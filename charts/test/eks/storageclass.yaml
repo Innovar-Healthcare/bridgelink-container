@@ -1,6 +1,8 @@
 # The gp3 StorageClass that examples/eks-values.yaml names. A template rendered by render.sh, so the
 # volumes it creates carry the run's tags. reclaimPolicy Delete because the cluster is thrown away;
-# the example recommends Retain for a real install, where the volume holds the keystore.
+# the example recommends Retain for a real install, where the volume holds the keystore. The key is
+# named for the same reason as in cluster.yaml: the EBS CSI driver's role may not be allowed to use
+# the account's default key.
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
@@ -9,6 +11,7 @@ provisioner: ebs.csi.aws.com
 parameters:
   type: gp3
   encrypted: "true"
+  kmsKeyId: "${EBS_KMS_KEY_ARN}"
   tagSpecification_1: "Owner=${OWNER}"
   tagSpecification_2: "Ticket=${TICKET}"
   tagSpecification_3: "Project=${PROJECT}"

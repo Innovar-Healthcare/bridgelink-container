@@ -13,7 +13,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 VARS="PROFILE REGION VPC_ID VPC_CIDR AZ_A SUBNET_A AZ_B SUBNET_B OPERATOR_PUBLIC_CIDR
       OPERATOR_PRIVATE_CIDR OWNER TICKET PROJECT CLUSTER_NAME K8S_VERSION RDS_STACK
-      LBC_CHART_VERSION CHART_VERSION OUT_DIR"
+      LBC_CHART_VERSION CHART_VERSION OUT_DIR EBS_KMS_KEY_ARN"
 missing=""
 for v in $VARS; do [ -n "${!v:-}" ] || missing="$missing $v"; done
 [ -z "$missing" ] || { echo "unset in $ENV_FILE:$missing"; exit 2; }

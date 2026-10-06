@@ -31,6 +31,7 @@ CHART_SOURCE="${CHART_SOURCE:-oci}"
 export KUBECONFIG="$OUT_DIR/kubeconfig"
 NS="bl-eks"
 REL="bl"
+DB_USER="bridgelink_app"   # created by setup.sh; the Secret bridgelink-db holds its password
 TIMEOUT="15m"
 WORK="$(mktemp -d)"
 PASS=0 FAIL=0
@@ -100,6 +101,7 @@ bridgelink:
   environment:
     SERVER_ID: "$SERVER_ID"
     MP_DATABASE_URL: "jdbc:postgresql://$RDS_HOST:5432/bridgelinkdb?sslmode=require"
+    MP_DATABASE_USERNAME: "$DB_USER"
   listenerService:
     loadBalancerSourceRanges: [$SOURCES]
     annotations:
@@ -142,7 +144,7 @@ spec:
       command: ["sleep", "14400"]
       env:
         - {name: PGHOST, value: "$RDS_HOST"}
-        - {name: PGUSER, value: bridgelink}
+        - {name: PGUSER, value: "$DB_USER"}
         - {name: PGDATABASE, value: bridgelinkdb}
         - {name: PGSSLMODE, value: require}
         - name: PGPASSWORD
@@ -174,9 +176,9 @@ GOT_ID="$(api GET /server/id | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-
 TABLES="$(SQL "select count(*) from information_schema.tables where table_name='d_channels'")"
 [ "$TABLES" = "1" ] && ok "BridgeLink created its schema in RDS" || bad "no d_channels table in RDS: $TABLES"
 TLS="$(SQL "select count(*) from pg_stat_ssl s join pg_stat_activity a using (pid)
-            where a.usename='bridgelink' and a.application_name <> 'psql' and s.ssl")"
+            where a.usename='$DB_USER' and a.application_name <> 'psql' and s.ssl")"
 PLAIN_CONN="$(SQL "select count(*) from pg_stat_ssl s join pg_stat_activity a using (pid)
-                  where a.usename='bridgelink' and a.application_name <> 'psql' and not s.ssl")"
+                  where a.usename='$DB_USER' and a.application_name <> 'psql' and not s.ssl")"
 [ "${TLS:-0}" -gt 0 ] 2>/dev/null && [ "$PLAIN_CONN" = "0" ] \
   && ok "all $TLS BridgeLink connections to RDS use TLS" \
   || bad "BridgeLink connections to RDS: $TLS with TLS, $PLAIN_CONN without"
@@ -220,32 +222,55 @@ if [ -n "${LB_ARN:-}" ]; then
   done
   [ "$HEALTH" = "healthy" ] && ok "the NLB target (the BridgeLink pod) is healthy" || bad "NLB target health: '$HEALTH'"
 fi
-BODY="MSH|^~\\&|EKSTEST|CHART|BL|BL|$(date -u +%Y%m%d%H%M%S)||ADT^A01|$MARKER|P|2.5"$'\r'"PID|1||$MARKER"$'\r'
-send_mllp_from_pod() {   # through the NLB's hostname, from a pod: traffic from inside the VPC
-  k exec sender -- sh -c 'printf "\013%s\034\015" "$1" | nc -w 10 "$2" 6661' sh "$BODY" "$LB_HOST" >/dev/null 2>&1
+hl7() {   # <marker>: an ADT message carrying the marker
+  printf 'MSH|^~\\&|EKSTEST|CHART|BL|BL|%s||ADT^A01|%s|P|2.5\rPID|1||%s\r' "$(date -u +%Y%m%d%H%M%S)" "$1" "$1"
 }
 message_count() {
   api GET "/channels/$CHANNEL_ID/messages/count" -H 'Accept: application/json' | grep -o '[0-9][0-9]*' | head -1
 }
-send_mllp_from_pod
-MSG_ID=1
-GOT=0
-for _ in $(seq 1 20); do
-  GOT="$(message_readable)"
-  [ "${GOT:-0}" -ge 1 ] && break
-  sleep 3
-done
-[ "${GOT:-0}" -ge 1 ] && ok "the MLLP message sent through the NLB reached the channel and reads back" \
-  || bad "no message with the marker reached the channel (messages: $(message_count))"
+# The NLB reports a target healthy before every one of its nodes routes to it, so a message sent
+# straight away can vanish. Each attempt is a new connection; the attempts and the time until the
+# first message arrived are reported, as evidence of how long a new listener takes to carry traffic.
+send_until_arrives() {   # <marker> <sender function>: sets MSG_ID, TRIES and SECS
+  local before n t0
+  before="$(message_count)"; t0="$(date +%s)"; MSG_ID=""; TRIES=0
+  while [ "$TRIES" -lt 12 ]; do
+    TRIES=$((TRIES + 1))
+    "$2" "$1"
+    for _ in $(seq 1 10); do
+      n="$(message_count)"
+      if [ "${n:-0}" -gt "${before:-0}" ]; then MSG_ID="$n"; SECS=$(( $(date +%s) - t0 )); return 0; fi
+      sleep 2
+    done
+  done
+  SECS=$(( $(date +%s) - t0 )); return 1
+}
+from_pod() {   # from a pod, through the NLB's hostname: traffic from inside the VPC
+  k exec sender -- sh -c 'printf "\013%s\034\015" "$1" | nc -w 5 "$2" 6661' sh "$(hl7 "$1")" "$LB_HOST" >/dev/null 2>&1
+}
+from_here() {  # from this machine, over the network routed to the VPC (the VPN), never a public endpoint
+  printf '\013%s\034\015' "$(hl7 "$1")" | nc -w 5 "$LB_HOST" 6661 >/dev/null 2>&1
+}
+readable_with() { api GET "/channels/$CHANNEL_ID/messages/$1" -H 'Accept: application/json' | grep -c "$2"; }
+
+if send_until_arrives "$MARKER" from_pod && [ "$(readable_with "$MSG_ID" "$MARKER")" -ge 1 ]; then
+  ok "an MLLP message from inside the VPC reached the channel through the NLB (message $MSG_ID)"
+  note "first delivery from inside the VPC: attempt $TRIES, ${SECS}s after the target was healthy"
+else
+  bad "no MLLP message from inside the VPC arrived ($TRIES attempts over ${SECS}s; messages: $(message_count))"
+fi
+POD_MSG_ID="$MSG_ID"
 
 if [ -n "${SENDER_CIDR:-}" ] && [ -n "$LB_HOST" ]; then
-  # From this machine, over the network routed to the VPC (the VPN), never a public endpoint.
-  printf '\013%s\034\015' "$BODY" | nc -w 10 "$LB_HOST" 6661 >/dev/null 2>&1
-  sleep 5
-  N="$(message_count)"
-  [ "${N:-0}" -ge 2 ] && ok "an MLLP message from this machine through the NLB reached the channel ($N messages)" \
-    || bad "the MLLP message from this machine did not arrive (messages: $N)"
+  VPN_MARKER="eks-test-vpn-$RANDOM$RANDOM"
+  if send_until_arrives "$VPN_MARKER" from_here && [ "$(readable_with "$MSG_ID" "$VPN_MARKER")" -ge 1 ]; then
+    ok "an MLLP message from this machine over the VPN reached the channel through the NLB (attempt $TRIES)"
+  else
+    bad "no MLLP message from this machine arrived ($TRIES attempts over ${SECS}s; messages: $(message_count))"
+  fi
 fi
+# The persistence checks below follow the message sent from inside the VPC.
+MSG_ID="$POD_MSG_ID"
 
 # ---- 5. stored encrypted ----------------------------------------------------------------------
 info "5. the message is stored encrypted in RDS"
@@ -319,9 +344,9 @@ read -r POD _ _ <<< "$(pod_where)"
 k delete pod "$POD" --wait=true --timeout=3m >/dev/null
 sleep 60
 PENDING="$(k get pods -l "$BL_SELECTOR" -o jsonpath='{.items[0].status.phase}')"
-REASON="$(k get events --field-selector reason=FailedScheduling -o jsonpath='{range .items[*]}{.message}{"\n"}{end}' | grep -c "volume node affinity conflict")"
+REASON="$(k get events --field-selector reason=FailedScheduling -o jsonpath='{range .items[*]}{.message}{"\n"}{end}' | grep -cE "volume node affinity conflict|didn't match PersistentVolume's node affinity")"
 [ "$PENDING" = "Pending" ] && [ "${REASON:-0}" -ge 1 ] \
-  && ok "pod stays Pending with \"volume node affinity conflict\" while the other zone has a free node" \
+  && ok "pod stays Pending, its volume's node affinity excluding the free node in the other zone" \
   || bad "expected a Pending pod with a volume node affinity conflict; phase $PENDING, matching events $REASON"
 kubectl uncordon -l "topology.kubernetes.io/zone=$CORDONED_ZONE" >/dev/null
 CORDONED_ZONE=""

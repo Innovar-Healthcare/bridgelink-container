@@ -4,8 +4,9 @@
 # README): the gp3 StorageClass, the AWS Load Balancer Controller, the namespace that enforces the
 # "restricted" Pod Security Standard, and the two Secrets the example values read. Safe to re-run.
 #
-# Passwords never reach a command line or the terminal: the database password goes from Secrets
-# Manager straight into the Secret, and the keystore passwords are generated into it.
+# Passwords never reach a command line or the terminal: the RDS master password goes from Secrets
+# Manager straight into a Secret, and BridgeLink's database password and the keystore passwords are
+# generated into theirs.
 #
 # Usage: charts/test/eks/setup.sh <env file>
 # Requires: aws, kubectl, helm, jq, openssl, and the files render.sh wrote into OUT_DIR.
@@ -16,6 +17,7 @@ ENV_FILE="${1:?usage: setup.sh <env file>}"
 . "$ENV_FILE"
 export KUBECONFIG="$OUT_DIR/kubeconfig"
 NS="bl-eks"
+DB_USER="bridgelink_app"
 awsr() { aws --profile "$PROFILE" --region "$REGION" "$@"; }
 stack_output() {
   awsr cloudformation describe-stacks --stack-name "$RDS_STACK" \
@@ -38,13 +40,63 @@ kubectl label namespace "$NS" --overwrite \
   pod-security.kubernetes.io/warn=restricted \
   pod-security.kubernetes.io/audit=restricted
 
-echo "== Secret bridgelink-db, from the RDS-managed password"
+echo "== Secret rds-master, from the RDS-managed master password"
 SECRET_ARN="$(stack_output MasterUserSecretArn)"
+RDS_HOST="$(stack_output Endpoint)"
 [ -n "$SECRET_ARN" ] && [ "$SECRET_ARN" != "None" ] || { echo "no MasterUserSecretArn on stack $RDS_STACK"; exit 1; }
 awsr secretsmanager get-secret-value --secret-id "$SECRET_ARN" --query SecretString --output text \
   | jq -j .password \
-  | kubectl -n "$NS" create secret generic bridgelink-db --from-file=password=/dev/stdin \
+  | kubectl -n "$NS" create secret generic rds-master --from-file=password=/dev/stdin \
       --dry-run=client -o yaml | kubectl apply -f -
+
+# BridgeLink connects as its own user, not the master: the usual practice, and it keeps the
+# RDS-generated master password (which can contain any punctuation) out of BridgeLink. The Rocky
+# image's entrypoint writes MP_* values with sed and drops any value containing "|".
+echo "== database user $DB_USER, and Secret bridgelink-db with its generated password"
+if ! kubectl -n "$NS" get secret bridgelink-db >/dev/null 2>&1; then
+  kubectl -n "$NS" create secret generic bridgelink-db \
+    --from-file=password=<(openssl rand -hex 24 | tr -d '\n')
+fi
+kubectl -n "$NS" delete pod dbinit --ignore-not-found --wait=true >/dev/null
+cat <<EOF | kubectl -n "$NS" apply -f - >/dev/null
+apiVersion: v1
+kind: Pod
+metadata: {name: dbinit}
+spec:
+  restartPolicy: Never
+  securityContext: {runAsNonRoot: true, runAsUser: 70, runAsGroup: 70, seccompProfile: {type: RuntimeDefault}}
+  containers:
+    - name: psql
+      image: postgres:16-alpine
+      env:
+        - {name: PGHOST, value: "$RDS_HOST"}
+        - {name: PGUSER, value: bridgelink}
+        - {name: PGDATABASE, value: bridgelinkdb}
+        - {name: PGSSLMODE, value: require}
+        - name: PGPASSWORD
+          valueFrom: {secretKeyRef: {name: rds-master, key: password}}
+        - name: APP_PASSWORD
+          valueFrom: {secretKeyRef: {name: bridgelink-db, key: password}}
+      command:
+        - sh
+        - -c
+        - |
+          psql -v ON_ERROR_STOP=1 -v pw="\$APP_PASSWORD" <<'SQL'
+          SELECT 'CREATE ROLE $DB_USER LOGIN' WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '$DB_USER') \gexec
+          ALTER ROLE $DB_USER WITH LOGIN PASSWORD :'pw';
+          GRANT $DB_USER TO bridgelink;
+          ALTER DATABASE bridgelinkdb OWNER TO $DB_USER;
+          SQL
+      securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: ["ALL"]}}
+EOF
+for _ in $(seq 1 60); do
+  phase="$(kubectl -n "$NS" get pod dbinit -o jsonpath='{.status.phase}')"
+  case "$phase" in Succeeded|Failed) break ;; esac
+  sleep 3
+done
+kubectl -n "$NS" logs dbinit
+kubectl -n "$NS" delete pod dbinit --wait=false >/dev/null
+[ "$phase" = "Succeeded" ] || { echo "creating database user $DB_USER failed"; exit 1; }
 
 echo "== Secret bridgelink-keystore-passwords (generated once, kept on re-runs)"
 if ! kubectl -n "$NS" get secret bridgelink-keystore-passwords >/dev/null 2>&1; then

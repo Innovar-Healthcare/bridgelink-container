@@ -8,10 +8,15 @@
 #   - Self-managed node groups with a public IP on each node, because the subnets have no NAT and
 #     do not assign public IPs themselves (managed node groups refuse such subnets). No security
 #     group in this cluster accepts traffic from outside the VPC; the address is for egress only.
+#     eksctl's launch template does not request the address, so node-egress.sh adds it.
 #   - The API endpoint is private plus a public endpoint limited to one /32 while eksctl creates the
 #     cluster. eksctl needs the public endpoint during creation; the README switches it off
 #     straight afterwards. extraCIDRs lets the network the operator comes from reach the private
 #     endpoint on 443.
+#   - Volumes name their KMS key (EBS_KMS_KEY_ARN) instead of relying on the account's default EBS
+#     encryption key. Nodes launch through Auto Scaling, whose service role can use a
+#     customer-managed default key only if that key's policy allows it; when it does not, every node
+#     is terminated at boot with Client.InvalidKMSKey.InvalidState.
 #   - Two nodes in zone A and one in zone B, so the test can move the pod within a zone and show
 #     that an EBS volume cannot follow it to another one.
 apiVersion: eksctl.io/v1alpha5
@@ -73,6 +78,7 @@ nodeGroups:
     volumeSize: 20
     volumeType: gp3
     volumeEncrypted: true
+    volumeKmsKeyID: ${EBS_KMS_KEY_ARN}
     disableIMDSv1: true
     propagateASGTags: true
     iam:
@@ -93,6 +99,7 @@ nodeGroups:
     volumeSize: 20
     volumeType: gp3
     volumeEncrypted: true
+    volumeKmsKeyID: ${EBS_KMS_KEY_ARN}
     disableIMDSv1: true
     propagateASGTags: true
     iam:
