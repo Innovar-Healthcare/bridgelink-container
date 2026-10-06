@@ -3,12 +3,15 @@
 # Separate from build-images.yml on purpose. GitHub path filters are WORKFLOW-scoped, not per-job,
 # so putting charts/** in that workflow would fire the full multi-arch image builds (and consume the
 # release BINARY_URL) on a chart-only PR. Here a chart change gets a real check in well under a
-# minute, with no registry login, no BINARY_URL and no secrets.
+# minute, with no BINARY_URL.
 #
 # The chart had no CI of any kind before this: nothing ran helm lint, which is how
 # values.schema.json came to declare additionalProperties: false while deployment.yaml templated
 # livenessProbe/readinessProbe — the templates were unreachable and any attempt to set a probe was
 # rejected, with nothing to catch it.
+#
+# On main, the publish job at the bottom then pushes the chart to GHCR once both gates pass. It is
+# the only job here that logs in to a registry to push, and it never runs on a pull request.
 
 name: chart
 
@@ -36,6 +39,8 @@ jobs:
       SID: --set-string bridgelink.environment.SERVER_ID=3f0c2a9e-5b1d-4c7e-8a6f-0d9e1b2c3a4f
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # the version-bump check compares against the base branch
       # Pinned: the action's default is whatever Helm release is newest, so the major version, and
       # with it client-side vs server-side apply, would change under this gate without a commit.
       - uses: azure/setup-helm@v4
@@ -43,7 +48,33 @@ jobs:
           version: v4.3.0
       - name: helm lint
         run: helm lint charts/bridgelink $SID
-  
+
+      - name: A chart change bumps the chart version
+        # Every version that reaches main is published, and a published version is never replaced
+        # (the publish job below refuses). So a PR that changes the chart without bumping the
+        # version would merge and then fail to publish. Catch it here instead, while it is a PR.
+        if: github.event_name == 'pull_request'
+        env:
+          BASE: origin/${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet "$BASE"...HEAD -- charts/bridgelink; then
+            echo "chart files unchanged; no version bump needed"
+            exit 0
+          fi
+          old=$(git show "$BASE:charts/bridgelink/Chart.yaml" | sed -n 's/^version: *//p')
+          new=$(sed -n 's/^version: *//p' charts/bridgelink/Chart.yaml)
+          if [ "$old" = "$new" ]; then
+            echo "::error file=charts/bridgelink/Chart.yaml::charts/bridgelink changed but version is still $new; bump it"
+            exit 1
+          fi
+          # Higher, not just different: a lower version may already be published with other content.
+          if [ "$(printf '%s\n%s\n' "$old" "$new" | sort -V | tail -n1)" != "$new" ]; then
+            echo "::error file=charts/bridgelink/Chart.yaml::chart version $new is lower than $old on the base branch"
+            exit 1
+          fi
+          echo "chart version $old -> $new"
+
       - name: helm template (defaults)
         run: helm template bl charts/bridgelink $SID > /tmp/rendered.yaml
   
@@ -61,9 +92,10 @@ jobs:
           c = cs[0]
 
           # The exec probes must stay OFF by default. They run a probe binary that exists only in
-          # images built from this repo at or after IRT-2015, and this chart is installed straight
-          # from a checkout -- so defaulting them on means a kubelet restart loop for anyone on main
-          # whose image predates it. Enabling them is a documented opt-in (see values.yaml).
+          # images built from this repo after the probe was added, and any chart version can be
+          # installed against an older image tag -- so defaulting them on means a kubelet restart
+          # loop for anyone whose image predates it. Enabling them is a documented opt-in (see
+          # values.yaml).
           for p in ('startupProbe', 'readinessProbe'):
               assert p not in c, (
                   f'{p} is enabled by default. It execs BridgeLinkHealthcheck, which older published '
@@ -882,3 +914,122 @@ jobs:
           UPGRADE_FROM: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || '' }}
           PULL_IMAGES: "1"   # pull on the host (logged in above) and load into kind
         run: bash charts/test/kind-test.sh
+
+  publish:
+    # Publishes the chart as an OCI package at oci://ghcr.io/innovar-healthcare/charts/bridgelink,
+    # so customers install a version they can pin instead of a git checkout. Runs on main only,
+    # after both gates above pass, and never from a pull request or a fork.
+    #
+    # The release is the merge that changes `version` in Chart.yaml; the version-bump check in the
+    # chart job makes every chart change do that. A published version is never replaced: `helm push`
+    # overwrites an OCI tag without asking, so this job asks the registry first. A version that is
+    # already there with the same content is a no-op (a push that only touched this workflow, or a
+    # re-run). With different content the job fails rather than overwrite it.
+    #
+    # The first push creates the package as private. An org admin makes it public once, in the
+    # package's settings on GitHub; until then an anonymous `helm pull` is denied.
+    needs: [chart, kind]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'Innovar-Healthcare/bridgelink-container'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    # Two quick merges must not both decide a version is absent and then both push it. GitHub keeps
+    # one running and one pending job per group, so a third merge in that window cancels the pending
+    # one and its version is never pushed. Re-run that cancelled workflow run to publish it.
+    concurrency:
+      group: chart-publish
+      cancel-in-progress: false
+    env:
+      SID: --set-string bridgelink.environment.SERVER_ID=3f0c2a9e-5b1d-4c7e-8a6f-0d9e1b2c3a4f
+      REGISTRY: ghcr.io
+      NAMESPACE: innovar-healthcare/charts   # OCI references must be lowercase
+      CHART: bridgelink
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: v4.3.0
+
+      - name: Package and lint the archive
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version: *//p' "charts/$CHART/Chart.yaml")
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          helm package "charts/$CHART" -d dist
+          # Lint the archive customers receive, not the source directory: .helmignore applies here.
+          helm lint "dist/$CHART-$version.tgz" $SID
+
+      - name: Log in to GHCR
+        run: echo "$GH_TOKEN" | helm registry login "$REGISTRY" -u "$GITHUB_ACTOR" --password-stdin
+
+      - name: Is this version already published?
+        id: exists
+        run: |
+          set -euo pipefail
+          # Ask the registry directly. 200 means published and 404 means not; anything else is an
+          # error. Reading an error as "absent" would let the push below overwrite a release. An
+          # authenticated caller gets 404 even before the package exists, so a 403 here means this
+          # token cannot read the package: fix its access, do not treat it as absent.
+          token=$(curl -fsS -u "$GITHUB_ACTOR:$GH_TOKEN" \
+            "https://$REGISTRY/token?service=$REGISTRY&scope=repository:$NAMESPACE/$CHART:pull" | jq -r .token)
+          code=$(curl -sS -o manifest.json -w '%{http_code}' \
+            -H "Authorization: Bearer $token" \
+            -H 'Accept: application/vnd.oci.image.manifest.v1+json' \
+            "https://$REGISTRY/v2/$NAMESPACE/$CHART/manifests/$VERSION")
+          case "$code" in
+            200) echo "published=true" >> "$GITHUB_OUTPUT"; echo "$CHART $VERSION is already published" ;;
+            404) echo "published=false" >> "$GITHUB_OUTPUT"; echo "$CHART $VERSION is not published yet" ;;
+            *)   echo "::error::registry answered HTTP $code for $CHART $VERSION; not publishing"
+                 cat manifest.json; exit 1 ;;
+          esac
+
+      - name: Refuse to replace a published version
+        if: steps.exists.outputs.published == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p cmp/published cmp/ours
+          helm pull "oci://$REGISTRY/$NAMESPACE/$CHART" --version "$VERSION" -d cmp
+          tar -xzf "cmp/$CHART-$VERSION.tgz" -C cmp/published
+          tar -xzf "dist/$CHART-$VERSION.tgz" -C cmp/ours
+          # Chart.yaml is re-serialized by `helm package`, so compare it as data rather than text:
+          # a different Helm release formatting it differently is not a content change.
+          python3 -c "import yaml" 2>/dev/null || python3 -m pip install --quiet pyyaml
+          if diff -r --exclude=Chart.yaml cmp/published cmp/ours && python3 - <<'PY'
+          import os, sys, yaml
+          chart = os.environ['CHART']
+          a = yaml.safe_load(open(f'cmp/published/{chart}/Chart.yaml'))
+          b = yaml.safe_load(open(f'cmp/ours/{chart}/Chart.yaml'))
+          sys.exit(0 if a == b else 1)
+          PY
+          then
+            echo "::notice::$CHART $VERSION is already published with this content; nothing to do"
+          else
+            echo "::error file=charts/$CHART/Chart.yaml::charts/$CHART differs from the published $VERSION; bump version in Chart.yaml"
+            exit 1
+          fi
+
+      - name: Push
+        if: steps.exists.outputs.published == 'false'
+        run: |
+          set -euo pipefail
+          helm push "dist/$CHART-$VERSION.tgz" "oci://$REGISTRY/$NAMESPACE" 2>&1 | tee push.log
+          {
+            echo "### Published $CHART $VERSION"
+            echo
+            echo "- Reference: \`oci://$REGISTRY/$NAMESPACE/$CHART --version $VERSION\`"
+            echo "- $(grep -i '^Digest:' push.log)"
+            echo "- Commit: \`$GITHUB_SHA\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Read the published version back from the registry
+        run: |
+          set -euo pipefail
+          ref="oci://$REGISTRY/$NAMESPACE/$CHART"
+          mkdir -p verify   # helm pull -d does not create the directory
+          helm pull "$ref" --version "$VERSION" -d verify
+          helm show chart "$ref" --version "$VERSION" | tee chart.txt
+          grep -qx "version: $VERSION" chart.txt || { echo "::error::published chart does not report version $VERSION"; exit 1; }
+          helm template bl "$ref" --version "$VERSION" $SID > /dev/null
+          echo "$ref $VERSION pulls, reports its version and renders"

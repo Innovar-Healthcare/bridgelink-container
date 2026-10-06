@@ -169,10 +169,9 @@ bridgelink:
   # binary at /opt/bridgelink/bootstrap/BridgeLinkHealthcheck, which exists only in images built from
   # this repo at or after the commit that added it. Enabling them against an older
   # published image gives a container that cannot run the probe, a startup probe that exhausts its
-  # failureThreshold, and a kubelet restart loop. Since this chart is installed straight from a
-  # checkout rather than a published chart repo, a default that assumes an unreleased image would
-  # break `scripts/deploy-minikube.sh` for anyone on main. livenessProbe has no such dependency: it
-  # is a plain HTTPS GET that works against every image.
+  # failureThreshold, and a kubelet restart loop. Any chart version can be installed against an
+  # older image tag, so a default that assumes the probe is present would break those installs.
+  # livenessProbe has no such dependency: it is a plain HTTPS GET that works against every image.
   #
   # ENABLE the exec probes once your image carries the probe (the image's own `docker inspect`
   # Healthcheck field is present iff it does). Paste into your values file:
