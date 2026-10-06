@@ -247,7 +247,14 @@ jobs:
           EOF
           helm template bl charts/bridgelink $SID -f /tmp/external-db.yaml > /tmp/external.yaml
           python3 - <<'PY'
-          import yaml
+          import base64, yaml
+          def resolve(docs, e):
+              # A password is a secretKeyRef into the chart's own Secret: follow it to the value.
+              ref = e.get('valueFrom', {}).get('secretKeyRef')
+              if not ref:
+                  return e.get('value')
+              sec = [d for d in docs if d['kind'] == 'Secret' and d['metadata']['name'] == ref['name']]
+              return base64.b64decode(sec[0]['data'][ref['key']]).decode() if sec else ref
           def bl_env(path):
               docs = [d for d in yaml.safe_load_all(open(path)) if d]
               dep = [d for d in docs if d['kind'] == 'Deployment' and d['metadata']['name'].endswith('-bl')][0]
@@ -255,7 +262,7 @@ jobs:
               names = [e['name'] for e in c['env']]
               dupes = sorted({n for n in names if names.count(n) > 1})
               assert not dupes, f'{path}: duplicate env names {dupes}'
-              return docs, {e['name']: e.get('value') for e in c['env']}
+              return docs, {e['name']: resolve(docs, e) for e in c['env']}
 
           docs, env = bl_env('/tmp/external.yaml')
           want = yaml.safe_load(open('/tmp/external-db.yaml'))['bridgelink']['environment']
@@ -296,12 +303,18 @@ jobs:
           EOF
           helm template bl charts/bridgelink $SID -f /tmp/legacy-db.yaml > /tmp/legacy.yaml
           python3 - <<'PY'
-          import yaml
+          import base64, yaml
+          def resolve(docs, e):
+              ref = e.get('valueFrom', {}).get('secretKeyRef')
+              if not ref:
+                  return e.get('value')
+              sec = [d for d in docs if d['kind'] == 'Secret' and d['metadata']['name'] == ref['name']]
+              return base64.b64decode(sec[0]['data'][ref['key']]).decode() if sec else ref
           def bl_env(path):
               docs = [d for d in yaml.safe_load_all(open(path)) if d]
               dep = [d for d in docs if d['kind'] == 'Deployment' and d['metadata']['name'].endswith('-bl')][0]
               c = [x for x in dep['spec']['template']['spec']['containers'] if x['name'] == 'bridgelink'][0]
-              return {e['name']: e.get('value') for e in c['env']}
+              return {e['name']: resolve(docs, e) for e in c['env']}
           env = bl_env('/tmp/derby.yaml')
           leaked = [k for k in ('MP_DATABASE_URL', 'MP_DATABASE_USERNAME', 'MP_DATABASE_PASSWORD') if k in env]
           assert not leaked, f'derby with postgres.enabled=false still injected {leaked}'
@@ -334,17 +347,24 @@ jobs:
           assert ann.get('checksum/config'), 'Postgres pod template has no checksum/config annotation'
           print('Postgres restarts when its config changes')
           PY
-          # With a password required, Postgres and BridgeLink must receive the same credentials. An
-          # unquoted env value would turn "#" into a YAML comment and initialise a different password.
+          # With a password required, Postgres and BridgeLink must receive the same credentials. A value
+          # rendered without quoting or encoding would turn "#" into a YAML comment and initialise a
+          # different password.
           helm template bl charts/bridgelink $SID --set-string 'postgres.credentials.password=s3cret #1' \
             --set-string postgres.credentials.username=yes --set-string postgres.credentials.database=0755 \
             > /tmp/pgcreds.yaml
           python3 - <<'PY'
-          import yaml
+          import base64, yaml
           docs = [d for d in yaml.safe_load_all(open('/tmp/pgcreds.yaml')) if d]
+          def resolve(e):
+              ref = e.get('valueFrom', {}).get('secretKeyRef')
+              if not ref:
+                  return e.get('value')
+              sec = [d for d in docs if d['kind'] == 'Secret' and d['metadata']['name'] == ref['name']][0]
+              return base64.b64decode(sec['data'][ref['key']]).decode()
           def env(suffix):
               dep = [d for d in docs if d['kind'] == 'Deployment' and d['metadata']['name'].endswith(suffix)][0]
-              return {e['name']: e.get('value') for e in dep['spec']['template']['spec']['containers'][0]['env']}
+              return {e['name']: resolve(e) for e in dep['spec']['template']['spec']['containers'][0]['env']}
           pg, bl = env('-postgres'), env('-bl')
           want = {'POSTGRES_PASSWORD': 's3cret #1', 'POSTGRES_USER': 'yes', 'POSTGRES_DB': '0755'}
           for k, v in want.items():
@@ -353,6 +373,129 @@ jobs:
           assert bl['MP_DATABASE_USERNAME'] == pg['POSTGRES_USER'], 'BridgeLink and Postgres usernames differ'
           print('Postgres and BridgeLink receive identical credentials')
           PY
+
+      - name: Passwords never appear in the pod spec
+        run: |
+          set -euo pipefail
+          # Anyone who can read a Deployment or ConfigMap must not learn a password from it. By default
+          # the chart stores them in a Secret of its own; with credentials.existingSecret it stores none
+          # and reads each one from that Secret, under key names the values choose.
+          PW=(--set-string 'bridgelink.environment.MP_DATABASE_PASSWORD=db-Pw#1'
+              --set-string 'bridgelink.environment.MP_KEYSTORE_STOREPASS=store-Pw#2'
+              --set-string 'bridgelink.environment.MP_KEYSTORE_KEYPASS=key-Pw#3'
+              --set-string 'postgres.credentials.password=pg-Pw#4')
+          T() { out="$1"; shift; helm template bl charts/bridgelink $SID "$@" > "/tmp/pw-$out.yaml"; }
+          T default "${PW[@]}"
+          T existing "${PW[@]}" --set bridgelink.credentials.existingSecret=mine
+          T keys "${PW[@]}" --set postgres.enabled=false \
+            --set-string 'bridgelink.environment.MP_DATABASE_URL=jdbc:postgresql://db:5432/bl' \
+            --set bridgelink.credentials.existingSecret=mine --set bridgelink.credentials.keys.databasePassword=db \
+            --set bridgelink.credentials.keys.keystoreStorepass=sp --set bridgelink.credentials.keys.keystoreKeypass=kp
+          T keystore "${PW[@]}" --set bridgelink.keystore.existingSecret=ks
+          T both "${PW[@]}" --set bridgelink.keystore.existingSecret=ks --set bridgelink.credentials.existingSecret=mine \
+            --set-string bridgelink.credentials.keys.keystoreKeypass=
+          T derby --set postgres.enabled=false --set bridgelink.environment.MP_DATABASE=derby \
+            --set bridgelink.credentials.existingSecret=mine
+          T extra "${PW[@]}" --set bridgelink.credentials.existingSecret=mine \
+            --set-json 'bridgelink.extraEnv=[{"name":"MP_KEYSTORE_STOREPASS","valueFrom":{"secretKeyRef":{"name":"other","key":"x"}}}]'
+          T plain
+          T changed --set-string 'bridgelink.environment.MP_KEYSTORE_KEYPASS=changed-Pw#5'
+          T annotated --set-string 'bridgelink.podAnnotations.checksum/credentials=mine' \
+            --set-string 'bridgelink.podAnnotations.example\.com/a=b'
+          python3 - <<'PY'
+          import base64, yaml
+          # Not 'bridgelinktest': the bundled default uses it as the username too, which is not secret.
+          PASSWORDS = ['db-Pw#1', 'store-Pw#2', 'key-Pw#3', 'pg-Pw#4', 'changed-Pw#5',
+                       'bridgelinkKeystore', 'bridgelinkKeypass']
+          VARS = ('MP_DATABASE_PASSWORD', 'MP_KEYSTORE_STOREPASS', 'MP_KEYSTORE_KEYPASS', 'POSTGRES_PASSWORD')
+          CHART = 'bl-bridgelink-credentials'
+          def load(name):
+              path = f'/tmp/pw-{name}.yaml'
+              docs = [d for d in yaml.safe_load_all(open(path)) if d]
+              for d in docs:
+                  if d['kind'] == 'Secret':
+                      continue
+                  text = yaml.safe_dump(d)
+                  for pw in PASSWORDS:
+                      assert pw not in text and base64.b64encode(pw.encode()).decode() not in text, \
+                          f'{name}: {d["kind"]} {d["metadata"]["name"]} carries the password {pw!r}'
+              refs = {}
+              for d in docs:
+                  if d['kind'] != 'Deployment':
+                      continue
+                  short = d['metadata']['name'].rsplit('-', 1)[1]
+                  for c in d['spec']['template']['spec']['containers']:
+                      names = [e['name'] for e in c.get('env', [])]
+                      assert len(names) == len(set(names)), f'{name}: duplicate env names {names}'
+                      for e in c.get('env', []):
+                          if e['name'] in VARS:
+                              assert 'value' not in e, f'{name}: {short} sets {e["name"]} as a plain value'
+                              refs[(short, e['name'])] = e['valueFrom']['secretKeyRef']
+              sec = [d for d in docs if d['kind'] == 'Secret' and d['metadata']['name'] == CHART]
+              data = {k: base64.b64decode(v).decode() for k, v in sec[0]['data'].items()} if sec else {}
+              bl = [d for d in docs if d['kind'] == 'Deployment' and d['metadata']['name'] == 'bl-bridgelink-bl'][0]
+              ann = bl['spec']['template']['metadata'].get('annotations') or {}
+              return refs, data, ann
+          def r(name, key):
+              return {'name': name, 'key': key}
+
+          refs, data, ann = load('default')
+          assert refs == {('bl', 'MP_DATABASE_PASSWORD'): r(CHART, 'database.password'),
+                          ('bl', 'MP_KEYSTORE_STOREPASS'): r(CHART, 'keystore.storepass'),
+                          ('bl', 'MP_KEYSTORE_KEYPASS'): r(CHART, 'keystore.keypass'),
+                          ('postgres', 'POSTGRES_PASSWORD'): r(CHART, 'postgres.password')}, refs
+          assert data == {'database.password': 'db-Pw#1', 'keystore.storepass': 'store-Pw#2',
+                          'keystore.keypass': 'key-Pw#3', 'postgres.password': 'pg-Pw#4'}, data
+          assert ann.get('checksum/credentials'), 'the chart Secret must be checksummed on the pod'
+
+          # existingSecret: everything from it, the bundled Postgres included, and no chart Secret.
+          refs, data, ann = load('existing')
+          assert refs == {('bl', 'MP_DATABASE_PASSWORD'): r('mine', 'database.password'),
+                          ('bl', 'MP_KEYSTORE_STOREPASS'): r('mine', 'keystore.storepass'),
+                          ('bl', 'MP_KEYSTORE_KEYPASS'): r('mine', 'keystore.keypass'),
+                          ('postgres', 'POSTGRES_PASSWORD'): r('mine', 'database.password')}, refs
+          assert not data and 'checksum/credentials' not in ann, 'existingSecret must leave no chart Secret'
+
+          refs, data, _ = load('keys')
+          assert refs == {('bl', 'MP_DATABASE_PASSWORD'): r('mine', 'db'),
+                          ('bl', 'MP_KEYSTORE_STOREPASS'): r('mine', 'sp'),
+                          ('bl', 'MP_KEYSTORE_KEYPASS'): r('mine', 'kp')}, refs
+          assert not data, data
+
+          # keystore.existingSecret alone keeps its fixed keys, as before credentials existed.
+          refs, data, _ = load('keystore')
+          assert refs[('bl', 'MP_KEYSTORE_STOREPASS')] == r('ks', 'keystore.storepass'), refs
+          assert refs[('bl', 'MP_KEYSTORE_KEYPASS')] == r('ks', 'keystore.keypass'), refs
+          assert refs[('bl', 'MP_DATABASE_PASSWORD')] == r(CHART, 'database.password'), refs
+          assert set(data) == {'database.password', 'postgres.password'}, data
+
+          # credentials.existingSecret wins over keystore.existingSecret; an empty key name hands
+          # that one password back to the next source.
+          refs, data, _ = load('both')
+          assert refs[('bl', 'MP_KEYSTORE_STOREPASS')] == r('mine', 'keystore.storepass'), refs
+          assert refs[('bl', 'MP_KEYSTORE_KEYPASS')] == r('ks', 'keystore.keypass'), refs
+          assert not data, data
+
+          refs, data, _ = load('derby')
+          assert ('bl', 'MP_DATABASE_PASSWORD') not in refs, 'Derby has no database password to read'
+          assert refs[('bl', 'MP_KEYSTORE_KEYPASS')] == r('mine', 'keystore.keypass'), refs
+
+          # extraEnv wins over both Secrets, and the chart does not set the variable a second time.
+          refs, _, _ = load('extra')
+          assert refs[('bl', 'MP_KEYSTORE_STOREPASS')] == r('other', 'x'), refs
+
+          # The checksum follows the passwords and nothing else, so an unrelated upgrade never
+          # restarts BridgeLink. A podAnnotations entry cannot replace it.
+          plain, changed = load('plain')[2], load('changed')[2]
+          assert plain['checksum/credentials'] != changed['checksum/credentials'], \
+              'changing a password must change the checksum'
+          ann = load('annotated')[2]
+          assert ann['checksum/credentials'] == plain['checksum/credentials'] and ann['example.com/a'] == 'b', ann
+          print('no password in any Deployment or ConfigMap; every source resolves as documented')
+          PY
+          # Stable across renders: helm template twice gives one checksum.
+          helm template bl charts/bridgelink $SID > /tmp/pw-again.yaml
+          diff <(grep checksum/credentials /tmp/pw-plain.yaml) <(grep checksum/credentials /tmp/pw-again.yaml)
 
       - name: Rendered manifests have no duplicate keys
         run: |
@@ -556,7 +699,8 @@ jobs:
           PY
           # Open where Kubernetes defines the shape, strict where the chart does: a misspelt chart
           # key must still fail the install rather than be silently ignored.
-          for bad in bridgelink.persistance.enabled=true serviceAccount.crate=true bridgelink.image.tagg=x; do
+          for bad in bridgelink.persistance.enabled=true serviceAccount.crate=true bridgelink.image.tagg=x \
+                     bridgelink.credentials.existingSecrt=x bridgelink.credentials.keys.dbPassword=x; do
             if helm template bl charts/bridgelink $SID --set "$bad" > /tmp/typo.txt 2>&1; then
               echo "::error::the schema accepted the misspelt key in $bad"; exit 1
             fi

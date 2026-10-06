@@ -4,16 +4,18 @@
 #
 #   kubectl create namespace bridgelink
 #   kubectl label namespace bridgelink pod-security.kubernetes.io/enforce=restricted
-#   kubectl -n bridgelink create secret generic bridgelink-db --from-file=password=<file holding it>
-#   kubectl -n bridgelink create secret generic bridgelink-keystore-passwords \
-#     --from-file=storepass=<(openssl rand -hex 24 | tr -d '\n') \
-#     --from-file=keypass=<(openssl rand -hex 24 | tr -d '\n')
+#   kubectl -n bridgelink create secret generic bridgelink-credentials \
+#     --from-file=database.password=<file holding it> \
+#     --from-file=keystore.storepass=<(openssl rand -hex 24 | tr -d '\n') \
+#     --from-file=keystore.keypass=<(openssl rand -hex 24 | tr -d '\n')
 #   SERVER_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
 #   helm install bridgelink oci://ghcr.io/innovar-healthcare/charts/bridgelink --version <chart version> \
 #     -n bridgelink -f eks-values.yaml --set-string bridgelink.environment.SERVER_ID="$SERVER_ID"
 #
 # Reading passwords from files keeps them out of shell history and the process list. A file must
-# hold only the password, with no trailing newline, or the newline becomes part of it.
+# hold only the password, with no trailing newline, or the newline becomes part of it. To keep them
+# in AWS Secrets Manager instead, have External Secrets or the Secrets Store CSI driver create
+# bridgelink-credentials (see "Passwords and Secrets" in the README).
 #
 # Record the server ID: it is needed for a license and must stay the same for the life of the server
 # (see "Server ID" in the README). It is deliberately not in this file, so that two installs made
@@ -55,20 +57,12 @@ bridgelink:
     MP_DATABASE_URL: "jdbc:postgresql://<rds-endpoint>:5432/bridgelinkdb?sslmode=require"
     MP_DATABASE_USERNAME: bridgelink
 
-  # Passwords from Secrets, so none appears in the Deployment. An extraEnv entry replaces the variable
-  # of the same name the chart would set. The keystore passwords protect the data-encryption key:
-  # keep them, and back them up with the keystore. Changing them later makes the existing keystore
-  # unreadable.
-  extraEnv:
-    - name: MP_DATABASE_PASSWORD
-      valueFrom:
-        secretKeyRef: {name: bridgelink-db, key: password}
-    - name: MP_KEYSTORE_STOREPASS
-      valueFrom:
-        secretKeyRef: {name: bridgelink-keystore-passwords, key: storepass}
-    - name: MP_KEYSTORE_KEYPASS
-      valueFrom:
-        secretKeyRef: {name: bridgelink-keystore-passwords, key: keypass}
+  # The database password and the keystore passwords, read from the Secret created above under the
+  # keys database.password, keystore.storepass and keystore.keypass, so none is in your values. The
+  # keystore passwords protect the data-encryption key: keep them, and back them up with the
+  # keystore. Changing them later makes the existing keystore unreadable.
+  credentials:
+    existingSecret: bridgelink-credentials
 
   # appdata holds keystore.jks, and with it the key that decrypts every message stored with
   # encryption on. An EBS volume lives in one availability zone: the pod can move to another node in

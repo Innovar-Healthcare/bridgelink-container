@@ -151,6 +151,87 @@ tpl, so they resolve to what they always meant; any value without "{{" is never 
 {{- end }}
 
 {{/*
+"true" when an extraEnv entry sets the named variable. Takes (list $ "NAME").
+*/}}
+{{- define "bridgelink.inExtraEnv" -}}
+{{- $name := index . 1 -}}
+{{- range (index . 0).Values.bridgelink.extraEnv -}}
+{{- if eq .name $name -}}true{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+A value as the container receives it: a missing or null value is empty,
+anything else is its string form, so `false` stays "false" as it always rendered.
+*/}}
+{{- define "bridgelink.envString" -}}
+{{- if not (kindIs "invalid" .) -}}{{- toString . -}}{{- end -}}
+{{- end }}
+
+{{/*
+Where each password comes from, as JSON: {"env": {VAR: {"secret", "key"}}, "data": {key: value}}.
+"env" covers MP_DATABASE_PASSWORD, MP_KEYSTORE_STOREPASS, MP_KEYSTORE_KEYPASS and the bundled
+PostgreSQL's POSTGRES_PASSWORD; "data" is what the chart's own Secret holds. A password is never
+rendered into a pod spec. For each BridgeLink variable, the first of these that applies wins:
+
+  1. an extraEnv entry of the same name (the chart then sets nothing);
+  2. credentials.existingSecret, under the key named in credentials.keys, unless that name is empty
+     (the database password is not read for Derby, which has none);
+  3. for the keystore passwords, keystore.existingSecret under its fixed key names;
+  4. the value from bridgelink.environment (or postgres.credentials), stored in the chart's Secret.
+     An empty value is left out, and the image then treats the variable as unset.
+
+POSTGRES_PASSWORD reads the same key as the database password from credentials.existingSecret, so
+BridgeLink and the bundled PostgreSQL always agree, and otherwise postgres.credentials.password.
+*/}}
+{{- define "bridgelink.credentials" -}}
+{{- $keys := .Values.bridgelink.credentials.keys | default dict -}}
+{{- $existing := .Values.bridgelink.credentials.existingSecret -}}
+{{- $keystoreSecret := .Values.bridgelink.keystore.existingSecret -}}
+{{- $chart := printf "%s-credentials" (include "bridgelink.fullname" .) -}}
+{{- $environment := .Values.bridgelink.environment -}}
+{{- $derby := eq (lower (toString (default "" $environment.MP_DATABASE))) "derby" -}}
+{{- $dbKey := toString ($keys.databasePassword | default "") -}}
+{{- $env := dict -}}
+{{- $data := dict -}}
+{{- $vars := list (dict "name" "MP_DATABASE_PASSWORD" "key" (ternary "" $dbKey $derby) "keystoreKey" "" "chartKey" "database.password" "value" (include "bridgelink.databasePassword" .)) -}}
+{{- $vars = append $vars (dict "name" "MP_KEYSTORE_STOREPASS" "key" (toString ($keys.keystoreStorepass | default "")) "keystoreKey" "keystore.storepass" "chartKey" "keystore.storepass" "value" (include "bridgelink.envString" $environment.MP_KEYSTORE_STOREPASS)) -}}
+{{- $vars = append $vars (dict "name" "MP_KEYSTORE_KEYPASS" "key" (toString ($keys.keystoreKeypass | default "")) "keystoreKey" "keystore.keypass" "chartKey" "keystore.keypass" "value" (include "bridgelink.envString" $environment.MP_KEYSTORE_KEYPASS)) -}}
+{{- range $vars -}}
+{{- if include "bridgelink.inExtraEnv" (list $ .name) -}}
+{{- else if and $existing .key -}}
+{{- $_ := set $env .name (dict "secret" $existing "key" .key) -}}
+{{- else if and $keystoreSecret .keystoreKey -}}
+{{- $_ := set $env .name (dict "secret" $keystoreSecret "key" .keystoreKey) -}}
+{{- else if .value -}}
+{{- $_ := set $env .name (dict "secret" $chart "key" .chartKey) -}}
+{{- $_ := set $data .chartKey .value -}}
+{{- end -}}
+{{- end -}}
+{{- if .Values.postgres.enabled -}}
+{{- if and $existing $dbKey -}}
+{{- $_ := set $env "POSTGRES_PASSWORD" (dict "secret" $existing "key" $dbKey) -}}
+{{- else if include "bridgelink.envString" .Values.postgres.credentials.password -}}
+{{- $_ := set $env "POSTGRES_PASSWORD" (dict "secret" $chart "key" "postgres.password") -}}
+{{- $_ := set $data "postgres.password" (include "bridgelink.envString" .Values.postgres.credentials.password) -}}
+{{- end -}}
+{{- end -}}
+{{- toJson (dict "env" $env "data" $data) -}}
+{{- end }}
+
+{{/*
+One env entry reading a password from a Secret. Takes (list "NAME" $entry), where $entry is a
+non-empty value of bridgelink.credentials' "env".
+*/}}
+{{- define "bridgelink.credentialEnv" -}}
+- name: {{ index . 0 }}
+  valueFrom:
+    secretKeyRef:
+      name: {{ (index . 1).secret | quote }}
+      key: {{ (index . 1).key | quote }}
+{{- end }}
+
+{{/*
 The server ID every install shared before chart 0.9.0, when values.yaml set it by default. Existing
 servers run as it and may be licensed against it.
 */}}

@@ -5,10 +5,11 @@
 # it: that BridgeLink becomes ready, that an upgrade never runs two BridgeLink pods at once, that a
 # message stored encrypted stays readable after the pod is replaced (keystore on the claim, then from
 # a Secret), that a channel listener on an extra port answers through the listener Service, that the
-# bundled PostgreSQL really runs the config the chart ships, that BridgeLink, with WebAdmin and the
-# standard Kubernetes options set (service account, pull secret, extra env from a Secret, extra
-# volume), runs in a namespace enforcing the "restricted" Pod Security Standard against an external
-# database, that the Services survive type changes on upgrade and print their load balancer
+# bundled PostgreSQL really runs the config the chart ships, that no password is ever in a
+# Deployment, that BridgeLink, with WebAdmin and the standard Kubernetes options set (service
+# account, pull secret, passwords from a Secret of its own, extra volume), runs in a namespace
+# enforcing the "restricted" Pod Security Standard against an external database,
+# that the Services survive type changes on upgrade and print their load balancer
 # hostname in the install notes, that a new install without a server ID is refused while an
 # upgraded server keeps the ID it had, and that a plugin installs both from a download URL
 # (EXTENSIONS_DOWNLOAD) and from a claim mounted at custom-extensions.
@@ -264,6 +265,18 @@ elif [ "$MAX" -le 1 ]; then
 else
   bad "$MAX live BridgeLink pods existed at once during the upgrade"; grep ' .* ' "$WORK/pods.log" | head -5
 fi
+# Every password reaches the pod from the chart's Secret. An upgrade from a chart that set them as
+# plain values must carry them over unchanged, or the server could not open its own keystore and the
+# upgrade above would not have become Ready.
+REFS=""
+for v in MP_DATABASE_PASSWORD MP_KEYSTORE_STOREPASS MP_KEYSTORE_KEYPASS; do
+  REFS="$REFS$(k get deploy bl-bridgelink-bl -o jsonpath="{.spec.template.spec.containers[0].env[?(@.name==\"$v\")].valueFrom.secretKeyRef.name}") "
+done
+[ "$REFS" = "bl-bridgelink-credentials bl-bridgelink-credentials bl-bridgelink-credentials " ] \
+  && ok "the database and keystore passwords come from Secret bl-bridgelink-credentials" \
+  || bad "the passwords do not all come from the chart's Secret: '$REFS'"
+k get deploy -o yaml | grep -qE 'bridgelinkKeystore|bridgelinkKeypass' \
+  && bad "a keystore password is in plain text in a Deployment" || ok "no keystore password in any Deployment"
 
 # ---- 3. encrypted content survives pod replacement --------------------------------------------
 info "3. a message stored encrypted is still readable after the BridgeLink pod is replaced"
@@ -332,13 +345,15 @@ k run ksread --image="$HELPER_IMAGE" --restart=Never --overrides='{"spec":{
 k wait --for=condition=Ready pod/ksread --timeout=2m >/dev/null
 k exec ksread -- cat /appdata/keystore.jks > "$WORK/keystore.jks"
 k delete pod ksread --wait=false >/dev/null
-ENV_OF() { k get deploy bl-bridgelink-bl -o jsonpath="{.spec.template.spec.containers[0].env[?(@.name==\"$1\")].value}"; }
-STOREPASS="$(ENV_OF MP_KEYSTORE_STOREPASS)" KEYPASS="$(ENV_OF MP_KEYSTORE_KEYPASS)"
-for ns in "$NS" "$NS_R"; do   # step 7 uses it in the restricted namespace
-  kubectl --context "kind-$CLUSTER" -n "$ns" create secret generic bl-keystore >/dev/null \
-    --from-file=keystore.jks="$WORK/keystore.jks" \
-    --from-literal=keystore.storepass="$STOREPASS" --from-literal=keystore.keypass="$KEYPASS"
-done
+SECRET_OF() { k get secret bl-bridgelink-credentials -o jsonpath="{.data.${1//./\\.}}" | base64 -d; }
+STOREPASS="$(SECRET_OF keystore.storepass)" KEYPASS="$(SECRET_OF keystore.keypass)"
+[ -n "$STOREPASS" ] && [ -n "$KEYPASS" ] || bad "could not read the keystore passwords from Secret bl-bridgelink-credentials"
+k create secret generic bl-keystore >/dev/null --from-file=keystore.jks="$WORK/keystore.jks" \
+  --from-literal=keystore.storepass="$STOREPASS" --from-literal=keystore.keypass="$KEYPASS"
+# Step 7 uses the same keystore in the restricted namespace, with wrong passwords on purpose: the
+# right ones come from credentials.existingSecret there, which must take precedence.
+kr create secret generic bl-keystore >/dev/null --from-file=keystore.jks="$WORK/keystore.jks" \
+  --from-literal=keystore.storepass=wrong-on-purpose --from-literal=keystore.keypass=wrong-on-purpose
 [ -s "$WORK/keystore.jks" ] && ok "copied the keystore off the claim into Secret bl-keystore ($(wc -c < "$WORK/keystore.jks" | tr -d ' ') bytes)" \
   || bad "could not read the keystore off the claim"
 if h upgrade bl "$CHART" -f "$WORK/common.yaml" ${SETS[@]+"${SETS[@]}"} ${ID_SETS[@]+"${ID_SETS[@]}"} \
@@ -480,11 +495,14 @@ k rollout status deploy/rds-standin --timeout=3m >/dev/null || { bad "stand-in d
 # Installed in the restricted namespace with every pod shape the chart has: the keystore init
 # container (keystore.existingSecret), the appdata claim, and WebAdmin. The bundled PostgreSQL is not
 # restricted-compliant and is documented as such. The test accepts the WebAdmin license for itself.
-# It also carries the standard Kubernetes options. The database password in `environment` is wrong
-# on purpose: only the extraEnv entry from the Secret is right, so a working database connection
-# proves extraEnv replaced it. The pull secret names a registry no image comes from, so it is never
-# used for a pull.
-kr create secret generic ext-db --from-literal=password="p@ss,w0rd #1" >/dev/null
+# It also carries the standard Kubernetes options. Every password comes from ext-credentials, under
+# key names of the test's choosing. The database password in `environment` and the keystore
+# passwords in bl-keystore are wrong on purpose, so a working database connection and a server that
+# opens its keystore prove credentials.existingSecret took precedence over both. The pull secret
+# names a registry no image comes from, so it is never used for a pull.
+EXT_DB_PW="p@ss,w0rd #1"
+kr create secret generic ext-credentials --from-literal=db="$EXT_DB_PW" \
+  --from-literal=store="$STOREPASS" --from-literal=key="$KEYPASS" >/dev/null
 kr create secret docker-registry ext-pull --docker-server=registry.example.com \
   --docker-username=unused --docker-password=unused >/dev/null
 # Plugins, both ways the README documents, one plugin each so the API shows which way worked.
@@ -535,11 +553,11 @@ serviceAccount:
 bridgelink:
   keystore:
     existingSecret: bl-keystore
+  credentials:
+    existingSecret: ext-credentials
+    keys: {databasePassword: db, keystoreStorepass: store, keystoreKeypass: key}
   podLabels: {team: kind-test}
   podAnnotations: {example.com/test: "true"}
-  extraEnv:
-    - name: MP_DATABASE_PASSWORD
-      valueFrom: {secretKeyRef: {name: ext-db, key: password}}
   extraVolumes: [{name: plugins, persistentVolumeClaim: {claimName: bridgelink-plugins, readOnly: true}}]
   extraVolumeMounts: [{name: plugins, mountPath: /opt/bridgelink/custom-extensions, readOnly: true}]
   nodeSelector: {kubernetes.io/os: linux}
@@ -583,13 +601,23 @@ PG_OBJS="$(kr get deploy,svc,pvc,configmap -l app.kubernetes.io/instance=ext -o 
 [ "$PG_OBJS" = "0" ] && ok "no bundled PostgreSQL deployed with postgres.enabled=false" \
   || bad "$PG_OBJS bundled PostgreSQL objects deployed with postgres.enabled=false"
 SQL() { k exec deploy/rds-standin -- psql -U blext -d blext -tAc "$1" 2>&1; }
-# The schema exists only if BridgeLink logged in, which only the extraEnv password from the Secret allows.
+# The schema exists only if BridgeLink logged in, which only the password from ext-credentials allows.
 TABLES="$(SQL "select count(*) from information_schema.tables where table_schema='public'")"
-[ "${TABLES:-0}" -gt 0 ] 2>/dev/null && ok "BridgeLink logged in with the extraEnv password and created its schema ($TABLES tables)" \
+[ "${TABLES:-0}" -gt 0 ] 2>/dev/null && ok "BridgeLink logged in with the password from credentials.existingSecret and created its schema ($TABLES tables)" \
   || bad "no BridgeLink tables in the external database: $TABLES"
 APPS="$(SQL "select count(*) from pg_stat_activity where application_name='bl-chart-test'")"
 [ "${APPS:-0}" -gt 0 ] 2>/dev/null && ok "URL parameters reached the driver unchanged ($APPS connections named bl-chart-test)" \
   || bad "no connections carry the ApplicationName from the URL: $APPS"
+LEAKED=""
+OBJS="$(kr get deploy,configmap -l app.kubernetes.io/instance=ext -o yaml)"
+for pw in "$EXT_DB_PW" "$STOREPASS" "$KEYPASS"; do
+  printf '%s' "$OBJS" | grep -qF -- "$pw" && LEAKED="$LEAKED ${pw:0:3}..."
+done
+[ -z "$LEAKED" ] && ok "no password in any Deployment or ConfigMap of release ext" \
+  || bad "passwords in plain text in a Deployment or ConfigMap:$LEAKED"
+kr get secret ext-bridgelink-credentials >/dev/null 2>&1 \
+  && bad "the chart created its own Secret although credentials.existingSecret supplies every password" \
+  || ok "no chart Secret: credentials.existingSecret supplies every password"
 # Installed as the restricted policy requires: non-root, all capabilities dropped, claim read-only.
 forward ext "$NS_R"
 CODE="$(login)"

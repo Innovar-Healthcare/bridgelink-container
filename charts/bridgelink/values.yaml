@@ -82,11 +82,32 @@ bridgelink:
     # also lives in appdata and needs more.
     size: 1Gi
 
+  # Passwords never appear in the pod spec: each one is read from a Secret. Without `existingSecret`,
+  # the chart creates `<release>-bridgelink-credentials` from the values under `environment` (and
+  # `postgres.credentials`). See the README's "Passwords and Secrets" section.
+  credentials:
+    # -- Name of a Secret of your own holding the database password and the keystore passwords, for
+    # example one created by External Secrets from AWS Secrets Manager. When set, those passwords
+    # are read from it and the chart stores none of them; the bundled PostgreSQL, if enabled, reads
+    # the database password from it too. It takes precedence over `keystore.existingSecret` for the
+    # keystore passwords; an `extraEnv` entry of the same name takes precedence over both.
+    existingSecret: ""
+    # Key names in `existingSecret`. An empty name leaves that password to the chart, which reads it
+    # from `keystore.existingSecret` or the values below, as if `existingSecret` were not set.
+    keys:
+      # -- Key holding the database password (`MP_DATABASE_PASSWORD`). Not read for Derby.
+      databasePassword: database.password
+      # -- Key holding the keystore store password (`MP_KEYSTORE_STOREPASS`)
+      keystoreStorepass: keystore.storepass
+      # -- Key holding the keystore key password (`MP_KEYSTORE_KEYPASS`)
+      keystoreKeypass: keystore.keypass
+
   keystore:
     # -- Name of a Secret holding a keystore and its passwords, under the keys `keystore.jks`,
     # `keystore.storepass` and `keystore.keypass`. When set, the keystore is copied into appdata at
     # every start (the Secret wins over what is on the volume) and the passwords replace
-    # `MP_KEYSTORE_STOREPASS` and `MP_KEYSTORE_KEYPASS`. Works with or without `persistence`. The
+    # `MP_KEYSTORE_STOREPASS` and `MP_KEYSTORE_KEYPASS`, unless `credentials.existingSecret`
+    # supplies them. Works with or without `persistence`. The
     # keystore must come from a BridgeLink server's appdata, so it already holds the data-encryption
     # key: one with only a TLS certificate gets a new key at every start. See the README.
     existingSecret: ""
@@ -249,8 +270,9 @@ bridgelink:
   podLabels: {}
 
   # -- Extra environment variables for the BridgeLink container, as Kubernetes EnvVar entries, so
-  # `valueFrom` works (for example a password from a Secret). An entry here replaces any variable of
-  # the same name the chart sets, including `environment` and the database settings.
+  # `valueFrom` works. An entry here replaces any variable of the same name the chart sets, including
+  # `environment`, the database settings and the passwords. For passwords, `credentials.existingSecret`
+  # is usually simpler.
   extraEnv: []
   # -- Extra volumes for the BridgeLink pod, e.g. an EFS claim for file-based channels, or a claim
   # holding plugin zips (see Plugins in the README)
@@ -270,7 +292,8 @@ bridgelink:
   # reads works here: an `MP_` variable sets the matching mirth.properties key (`MP_FOO_BAR` sets
   # `foo.bar`), and others such as `CUSTOM_PROPERTIES` or `BL_HEALTH_ALWAYS_STATUS` are read by the
   # image itself. Quote numbers (`"3000000"`): the schema rejects unquoted ones, because Helm would
-  # render a large one as `3e+06`. For values from a Secret, use `extraEnv`.
+  # render a large one as `3e+06`. The three passwords below are not set as plain variables: the chart
+  # stores them in its own Secret (see `credentials`). For other values from a Secret, use `extraEnv`.
   environment:
     # -- Database type (postgres, mysql, oracle, sqlserver)
     MP_DATABASE: "postgres"
@@ -282,7 +305,9 @@ bridgelink:
     MP_DATABASE_URL: ""
     # -- Database username. Leave empty to use `postgres.credentials.username` with the bundled PostgreSQL.
     MP_DATABASE_USERNAME: ""
-    # -- Database password. Leave empty to use `postgres.credentials.password` with the bundled PostgreSQL.
+    # -- Database password. Leave empty to use `postgres.credentials.password` with the bundled
+    # PostgreSQL. Stored in the chart's Secret, not the pod spec; ignored when
+    # `credentials.existingSecret` supplies it.
     MP_DATABASE_PASSWORD: ""
     # -- Server ID, a UUID. Required on a new install: the install fails without it and prints a
     # freshly generated one to use. Record it: BridgeLink licenses are issued against it. Keep it for
@@ -291,9 +316,11 @@ bridgelink:
     # empty keeps `7d760af2-680a-4a19-b9a2-c4685df61ebc`, the ID every install shared before chart
     # 0.9.0. See the README's "Server ID" section.
     SERVER_ID: ""
-    # -- Keystore key password
+    # -- Keystore key password. Stored in the chart's Secret, not the pod spec. Never change it after
+    # the first start: the server could no longer open its keystore.
     MP_KEYSTORE_KEYPASS: bridgelinkKeystore
-    # -- Keystore store password
+    # -- Keystore store password. Stored in the chart's Secret, not the pod spec. Never change it
+    # after the first start.
     MP_KEYSTORE_STOREPASS: bridgelinkKeypass
     # -- Configuration map location
     MP_CONFIGURATIONMAP_LOCATION: database
@@ -328,7 +355,8 @@ postgres:
   credentials:
     # -- PostgreSQL username
     username: bridgelinktest
-    # -- PostgreSQL password
+    # -- PostgreSQL password. Stored in the chart's Secret; ignored when
+    # `bridgelink.credentials.existingSecret` supplies the database password.
     password: bridgelinktest
     # -- PostgreSQL database name
     database: bridgelinkdb

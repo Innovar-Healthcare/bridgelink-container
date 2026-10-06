@@ -2,11 +2,11 @@
 #
 # Prepares the test cluster for BridgeLink, after `eksctl create cluster` and the RDS stack (see the
 # README): the gp3 StorageClass, the AWS Load Balancer Controller, the namespace that enforces the
-# "restricted" Pod Security Standard, and the two Secrets the example values read. Safe to re-run.
+# "restricted" Pod Security Standard, and the Secret the example values read. Safe to re-run.
 #
 # Passwords never reach a command line or the terminal: the RDS master password goes from Secrets
 # Manager straight into a Secret, and BridgeLink's database password and the keystore passwords are
-# generated into theirs.
+# generated into bridgelink-credentials, under the key names the chart expects by default.
 #
 # Usage: charts/test/eks/setup.sh <env file>
 # Requires: aws, kubectl, helm, jq, openssl, and the files render.sh wrote into OUT_DIR.
@@ -52,10 +52,14 @@ awsr secretsmanager get-secret-value --secret-id "$SECRET_ARN" --query SecretStr
 # BridgeLink connects as its own user, not the master: the usual practice, and it keeps the
 # RDS-generated master password (which can contain any punctuation) out of BridgeLink. Rocky images
 # built before the entrypoint escaped "|" drop any MP_* value containing one.
-echo "== database user $DB_USER, and Secret bridgelink-db with its generated password"
-if ! kubectl -n "$NS" get secret bridgelink-db >/dev/null 2>&1; then
-  kubectl -n "$NS" create secret generic bridgelink-db \
-    --from-file=password=<(openssl rand -hex 24 | tr -d '\n')
+# The keystore passwords are generated once and kept on re-runs: an existing keystore opens only
+# with the passwords it was created with.
+echo "== Secret bridgelink-credentials (generated once, kept on re-runs), and database user $DB_USER"
+if ! kubectl -n "$NS" get secret bridgelink-credentials >/dev/null 2>&1; then
+  kubectl -n "$NS" create secret generic bridgelink-credentials \
+    --from-file=database.password=<(openssl rand -hex 24 | tr -d '\n') \
+    --from-file=keystore.storepass=<(openssl rand -hex 24 | tr -d '\n') \
+    --from-file=keystore.keypass=<(openssl rand -hex 24 | tr -d '\n')
 fi
 kubectl -n "$NS" delete pod dbinit --ignore-not-found --wait=true >/dev/null
 cat <<EOF | kubectl -n "$NS" apply -f - >/dev/null
@@ -76,7 +80,7 @@ spec:
         - name: PGPASSWORD
           valueFrom: {secretKeyRef: {name: rds-master, key: password}}
         - name: APP_PASSWORD
-          valueFrom: {secretKeyRef: {name: bridgelink-db, key: password}}
+          valueFrom: {secretKeyRef: {name: bridgelink-credentials, key: database.password}}
       command:
         - sh
         - -c
@@ -100,11 +104,5 @@ kubectl -n "$NS" logs dbinit || true
 kubectl -n "$NS" delete pod dbinit --wait=false >/dev/null || true
 [ "$phase" = "Succeeded" ] || { echo "creating database user $DB_USER failed"; exit 1; }
 
-echo "== Secret bridgelink-keystore-passwords (generated once, kept on re-runs)"
-if ! kubectl -n "$NS" get secret bridgelink-keystore-passwords >/dev/null 2>&1; then
-  kubectl -n "$NS" create secret generic bridgelink-keystore-passwords \
-    --from-file=storepass=<(openssl rand -hex 24 | tr -d '\n') \
-    --from-file=keypass=<(openssl rand -hex 24 | tr -d '\n')
-fi
 
 echo "setup done"
