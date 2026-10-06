@@ -181,6 +181,12 @@ bridgelink:
       # -- Memory limit for BridgeLink pods
       memory: 2Gi
 
+  # -- Maximum Java heap, as a percentage of `resources.limits.memory`: 75 gives 1536 MB in 2Gi. The
+  # rest is for the JVM's own memory and, if you turn them on, the exec probes. Ignored when
+  # `MP_VMOPTIONS` sets the heap itself or `CUSTOM_VMOPTIONS` is set. Set to null to keep the image's
+  # default of 256 MB.
+  heapPercentage: 75
+
   # Probes. Before this the chart shipped NONE, and could not: deployment.yaml templated
   # liveness and readiness, but no values defined them and values.schema.json forbade extra keys, so
   # the templates were unreachable and `--set bridgelink.readinessProbe...` was schema-rejected.
