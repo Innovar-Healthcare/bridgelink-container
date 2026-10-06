@@ -24,8 +24,8 @@
 # What the cluster needs first:
 #   - The AWS Load Balancer Controller, for the internal NLB. Without it, a LoadBalancer Service on
 #     EKS becomes an internet-facing Classic ELB.
-#   - The Amazon EBS CSI driver and a StorageClass named gp3 (below). EKS has no default
-#     StorageClass, so an empty storageClass leaves the claim Pending.
+#   - The Amazon EBS CSI driver and a StorageClass named gp3 (below). A cluster created on EKS 1.30
+#     or later has no default StorageClass, so an empty storageClass leaves the claim Pending.
 #   - Outbound access from the nodes to Docker Hub for the BridgeLink image (or a mirror in Amazon
 #     ECR, set under bridgelink.image), and to RDS on 5432.
 #
@@ -47,6 +47,12 @@ postgres:
   enabled: false
 
 bridgelink:
+  # To pull from your own Amazon ECR mirror instead of Docker Hub (see "Mirroring images to Amazon
+  # ECR" in the README):
+  # image:
+  #   repository: <account>.dkr.ecr.<region>.amazonaws.com/bridgelink
+  #   tag: "<BridgeLink version>"
+
   environment:
     # Required, and set on the command line above. Empty here on purpose.
     SERVER_ID: ""
@@ -97,9 +103,17 @@ bridgelink:
       # Only if your subnets are not tagged kubernetes.io/role/internal-elb=1:
       # service.beta.kubernetes.io/aws-load-balancer-subnets: <subnet-a>,<subnet-b>
     # The networks that send MLLP. An internal NLB is reachable only inside the VPC and from networks
-    # routed to it. By default it closes a connection idle for 350 seconds (the listener attribute
-    # tcp.idle_timeout.seconds), so a sender that keeps its connection open must send within that
-    # time, reconnect, or have the timeout raised.
+    # routed to it. By default it drops a connection idle for 350 seconds, so a sender that keeps its
+    # connection open must send within that time or reconnect. To keep it open from BridgeLink, turn
+    # on Keep Connection Open in the channel's TCP Listener and lower the pod's first keepalive below
+    # 350 seconds (Kubernetes 1.29 and later), in bridgelink: above:
+    #
+    #   podSecurityContext:
+    #     sysctls:
+    #       - name: net.ipv4.tcp_keepalive_time
+    #         value: "300"
+    #
+    # See "MLLP connections and the 350-second idle timeout" in the README for the other options.
     loadBalancerSourceRanges:
       - <sender CIDR>
 

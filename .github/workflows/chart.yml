@@ -771,6 +771,61 @@ jobs:
           print('both plugin routes render as documented')
           PY
 
+      - name: Every values block in the README renders
+        # The README once documented tls, persistence, ingress, metrics and an admin-password Secret
+        # that the chart never had, so an install that followed it failed on the schema. Render every
+        # yaml block in the README template as a values file, so a documented key that does not exist
+        # fails here instead of at a customer's install. Only Kubernetes manifests (apiVersion) are
+        # skipped: selecting blocks by known top-level keys would skip exactly the invented ones.
+        run: |
+          set -euo pipefail
+          python3 -c "import yaml" 2>/dev/null || python3 -m pip install --quiet pyyaml
+          python3 - <<'PY'
+          import os, re, shlex, subprocess, sys, tempfile, yaml
+          chart = 'charts/bridgelink'
+          meta = yaml.safe_load(open(f'{chart}/Chart.yaml'))
+          src = open(f'{chart}/README.md.gotmpl').read()
+          # Undo helm-docs templating the way helm-docs would render it.
+          for k, v in {'{{ .AppVersion }}': meta['appVersion'], '{{ .Version }}': meta['version'],
+                       '{{"{{"}}': '{{', '{{"}}"}}': '}}'}.items():
+              src = src.replace(k, str(v))
+          lines = src.split('\n')
+          blocks, i = [], 0
+          while i < len(lines):
+              # Fences may be indented (inside a list item) or quoted (inside a "> " blockquote).
+              m = re.match(r'^((?:>\s?)?\s*)```ya?ml\s*$', lines[i])
+              if not m:
+                  i += 1
+                  continue
+              indent, start, body = m.group(1), i + 1, []
+              i += 1
+              while not re.match(rf'^{re.escape(indent)}```\s*$', lines[i]):
+                  body.append(lines[i][len(indent):])
+                  i += 1
+              blocks.append((start, '\n'.join(body)))
+              i += 1
+          fences = len(re.findall(r'```ya?ml\b', src))
+          assert len(blocks) == fences, f'{fences} yaml fences but {len(blocks)} parsed; a fence this step cannot read?'
+          sid = shlex.split(os.environ['SID'])
+          checked, failed = 0, []
+          for line, body in blocks:
+              doc = yaml.safe_load(body)
+              if isinstance(doc, dict) and 'apiVersion' in doc:
+                  continue   # a Kubernetes manifest, not values
+              checked += 1
+              with tempfile.NamedTemporaryFile('w', suffix='.yaml', delete=False) as f:
+                  f.write(body)
+              r = subprocess.run(['helm', 'template', 'bl', chart, *sid, '-f', f.name],
+                                 capture_output=True, text=True)
+              if r.returncode:
+                  failed.append(line)
+                  print(f'::error file={chart}/README.md.gotmpl,line={line}::values block does not render: {r.stderr.strip()}')
+          assert checked >= 10, f'only {checked} values blocks found; did the README format change?'
+          if failed:
+              sys.exit(1)
+          print(f'{checked} README values blocks render')
+          PY
+
       - name: Services expose listener ports and stay inside the cluster by default
         run: |
           set -euo pipefail
