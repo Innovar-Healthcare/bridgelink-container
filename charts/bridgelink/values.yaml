@@ -253,9 +253,11 @@ bridgelink:
   # `valueFrom` works (for example a password from a Secret). An entry here replaces any variable of
   # the same name the chart sets, including `environment` and the database settings.
   extraEnv: []
-  # -- Extra volumes for the BridgeLink pod, e.g. an EFS claim for file-based channels
+  # -- Extra volumes for the BridgeLink pod, e.g. an EFS claim for file-based channels, or a claim
+  # holding plugin zips (see Plugins in the README)
   extraVolumes: []
-  # -- Extra volume mounts for the BridgeLink container
+  # -- Extra volume mounts for the BridgeLink container. Plugin zips are installed from
+  # `/opt/bridgelink/custom-extensions`
   extraVolumeMounts: []
 
   # -- Node selector for BridgeLink pods
