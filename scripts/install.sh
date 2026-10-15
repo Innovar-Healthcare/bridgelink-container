@@ -3,24 +3,24 @@
 # Fail a pipeline on the first failing command, not just the last. Without this, `curl ... | tee`
 # and `tar ... | tee` report tee's exit status (~always 0), which silently defeated the download
 # retry loop and the extraction-failure check below (IRT-1387). NOT using `set -e` (it would abort
-# the retry loop on the first failed download) or `set -u` ($LOG_FILE is referenced before it is set).
+# the retry loop on the first failed download).
 set -o pipefail
 
-# BINARY_URL must be provided at build time via --build-arg
-# Supports both s3:// (uses aws s3 cp) and https:// (uses curl)
+# Destination folder path and log file. The defaults are what the image uses; the overrides let
+# test/install-test.sh run this script outside a container.
+DESTINATION_FOLDER="${DESTINATION_FOLDER:-/opt}"
+LOG_FILE="${LOG_FILE:-/opt/scripts/download_and_extract.log}"
+
+# BINARY_URL must be provided at build time via --build-arg.
+# Supports s3:// (uses aws s3 cp), and https:// or file:// (uses curl). The tarball may be a
+# release (rooted at BridgeLink/) or Core's ant layout (rooted at bridgelink/).
 if [ -z "$BINARY_URL" ]; then
   echo "ERROR: BINARY_URL build arg is not set" | tee -a "$LOG_FILE"
   exit 1
 fi
 
-# Destination folder path
-DESTINATION_FOLDER="/opt"
-
 # Name of the downloaded file
 FILE_NAME="BridgeLink_unix_26_9_0.tar.gz"
-
-# Log file for debugging
-LOG_FILE="/opt/scripts/download_and_extract.log"
 
 # Start logging
 echo "Starting download and extract script" | tee -a "$LOG_FILE"
@@ -60,12 +60,18 @@ if [ $? -ne 0 ]; then
   exit 1
 fi
 
-# Rename the extracted folder to "connect"
-echo "Renaming folder to 'bridgelink'..." | tee -a "$LOG_FILE"
-mv "$DESTINATION_FOLDER/BridgeLink" "$DESTINATION_FOLDER/bridgelink"
-if [ $? -ne 0 ]; then
-  echo "Rename failed" | tee -a "$LOG_FILE"
-  rm -rf "$TEMP_DIR"
+# A release tarball is rooted at BridgeLink/ and is renamed; Core's ant layout is already rooted at
+# bridgelink/ and is used as it is.
+if [ -d "$DESTINATION_FOLDER/BridgeLink" ]; then
+  echo "Renaming folder to 'bridgelink'..." | tee -a "$LOG_FILE"
+  if ! mv "$DESTINATION_FOLDER/BridgeLink" "$DESTINATION_FOLDER/bridgelink"; then
+    echo "Rename failed" | tee -a "$LOG_FILE"
+    exit 1
+  fi
+elif [ -d "$DESTINATION_FOLDER/bridgelink" ]; then
+  echo "Tarball is rooted at bridgelink/ (Core's ant layout); no rename needed" | tee -a "$LOG_FILE"
+else
+  echo "Tarball has neither a BridgeLink/ nor a bridgelink/ root" | tee -a "$LOG_FILE"
   exit 1
 fi
 
