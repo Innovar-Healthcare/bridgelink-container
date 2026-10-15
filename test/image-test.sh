@@ -27,6 +27,8 @@
 #                   DOCKERFILE=Dockerfile to build and test an image of Core's ant layout
 #                   (server/setup, packaged with a bridgelink/ root); tests 2d-2f and test 3 then
 #                   check how it launches.
+#   LOCAL_TARBALL_DIR  a folder handed to the build as its `local-tarball` context, mounted at
+#                   /build-context, for a file:///build-context/<file> BINARY_URL.
 #
 # Usage:
 #   # DHI (defaults):
@@ -41,9 +43,9 @@
 #   # A 26.6.1-or-later release built on Java 17 (no usable embedded Derby):
 #   IMAGE=innovarhealthcare/bridgelink:26.9.0-dhi-jdk17 SKIP_BUILD=1 EXPECTED_JAVA=17 \
 #     DEFAULT_DB=postgres EXPECT_DERBY_EXIT=1 test/image-test.sh
-#   # Rocky, from a tarball of Core's ant layout saved in the checkout:
-#   BINARY_URL=file:///build-context/bridgelink.tar.gz BUILD_TARGET=raw DOCKERFILE=Dockerfile \
-#     EXPECTED_UID=1000 CHECK_NO_SHELL=0 IMAGE=bridgelink:raw-test test/image-test.sh
+#   # Rocky, from a tarball of Core's ant layout in /tmp/bl:
+#   LOCAL_TARBALL_DIR=/tmp/bl BINARY_URL=file:///build-context/bridgelink.tar.gz BUILD_TARGET=raw \
+#     DOCKERFILE=Dockerfile EXPECTED_UID=1000 CHECK_NO_SHELL=0 IMAGE=bridgelink:raw-test test/image-test.sh
 #
 # Requires: docker (with buildx), python3, curl. Building the DHI image needs `docker login dhi.io`.
 set -u
@@ -56,6 +58,7 @@ CHECK_NO_SHELL="${CHECK_NO_SHELL:-1}"
 DEFAULT_DB="${DEFAULT_DB:-derby}"
 EXPECT_DERBY_EXIT="${EXPECT_DERBY_EXIT:-0}"
 BUILD_TARGET="${BUILD_TARGET:-}"
+LOCAL_TARBALL_DIR="${LOCAL_TARBALL_DIR:-}"
 # Fixture for the default-backend containers in DEFAULT_DB=postgres mode. Deliberately NOT the `pg`
 # fixture test 6 starts: test 6c stops that one to prove the healthcheck's behaviour during a
 # database outage and never restarts it, so anything sharing it would lose its backend mid-suite.
@@ -316,6 +319,7 @@ if [ "$SKIP_BUILD" != "1" ]; then
     --build-arg BINARY_URL="$BINARY_URL" \
     ${JAVA_MAJOR:+--build-arg JAVA_MAJOR=$JAVA_MAJOR} \
     ${BUILD_TARGET:+--target $BUILD_TARGET} \
+    ${LOCAL_TARBALL_DIR:+--build-context local-tarball=$LOCAL_TARBALL_DIR} \
     ${AWS_CREDENTIALS_FILE:+--secret id=aws_credentials,src=$AWS_CREDENTIALS_FILE} \
     -t "$IMAGE" "$REPO_ROOT" || { echo "BUILD FAILED"; exit 1; }
 fi
@@ -430,6 +434,7 @@ if [ "$BUILD_TARGET" = "raw" ] && [ "$SKIP_BUILD" != "1" ]; then
        --build-arg BINARY_URL="$BINARY_URL" \
        ${JAVA_MAJOR:+--build-arg JAVA_MAJOR=$JAVA_MAJOR} \
        ${AWS_CREDENTIALS_FILE:+--secret id=aws_credentials,src=$AWS_CREDENTIALS_FILE} \
+       ${LOCAL_TARBALL_DIR:+--build-context local-tarball=$LOCAL_TARBALL_DIR} \
        --target final -t "$IMAGE-final-refused" "$REPO_ROOT" >"$WORK/build-final.log" 2>&1; then
     bad "the default target built from Core's ant layout"
     docker rmi "$IMAGE-final-refused" >/dev/null 2>&1 || true

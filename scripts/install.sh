@@ -61,15 +61,17 @@ if [ $? -ne 0 ]; then
 fi
 
 # A release tarball is rooted at BridgeLink/ and is renamed; Core's ant layout is already rooted at
-# bridgelink/ and is used as it is.
-if [ -d "$DESTINATION_FOLDER/BridgeLink" ]; then
+# bridgelink/ and is used as it is. bridgelink/ is tested first: on a case-insensitive filesystem,
+# such as macOS's by default, the two names are one folder.
+if [ -d "$DESTINATION_FOLDER/bridgelink" ] && [ -n "$(cd "$DESTINATION_FOLDER" && find . -maxdepth 1 -name bridgelink -type d)" ]; then
+  echo "Tarball is rooted at bridgelink/ (Core's ant layout); no rename needed" | tee -a "$LOG_FILE"
+elif [ -d "$DESTINATION_FOLDER/BridgeLink" ]; then
   echo "Renaming folder to 'bridgelink'..." | tee -a "$LOG_FILE"
-  if ! mv "$DESTINATION_FOLDER/BridgeLink" "$DESTINATION_FOLDER/bridgelink"; then
+  if ! mv "$DESTINATION_FOLDER/BridgeLink" "$DESTINATION_FOLDER/bridgelink.tmp" \
+      || ! mv "$DESTINATION_FOLDER/bridgelink.tmp" "$DESTINATION_FOLDER/bridgelink"; then
     echo "Rename failed" | tee -a "$LOG_FILE"
     exit 1
   fi
-elif [ -d "$DESTINATION_FOLDER/bridgelink" ]; then
-  echo "Tarball is rooted at bridgelink/ (Core's ant layout); no rename needed" | tee -a "$LOG_FILE"
 else
   echo "Tarball has neither a BridgeLink/ nor a bridgelink/ root" | tee -a "$LOG_FILE"
   exit 1

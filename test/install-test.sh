@@ -92,7 +92,10 @@ show_output() { printf '%s\n' "$OUT" | grep -v '^[^ ]*/' | tail -8 | sed 's/^/  
 info "install.sh: release tarball rooted at BridgeLink/"
 make_tarball release BridgeLink blserver blmanager blcommand mirth-server-launcher.jar
 run_install release
-if [ "$RC" -eq 0 ] && [ -f "$WORK/dest-release/bridgelink/blserver" ] && [ ! -e "$WORK/dest-release/BridgeLink" ]; then
+# find matches the stored name exactly, so this holds on a case-insensitive filesystem too, where
+# -e BridgeLink would find bridgelink.
+if [ "$RC" -eq 0 ] && [ -f "$WORK/dest-release/bridgelink/blserver" ] \
+    && [ -z "$(cd "$WORK/dest-release" && find . -maxdepth 1 -name BridgeLink)" ]; then
   ok "BridgeLink/ tarball installed as bridgelink/"
 else
   bad "BridgeLink/ tarball not installed as bridgelink/ (exit $RC)"; show_output

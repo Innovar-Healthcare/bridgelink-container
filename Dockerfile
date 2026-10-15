@@ -4,6 +4,12 @@
 # the JDK it runs on. Declared before the first FROM so both stages see the same value.
 ARG JAVA_MAJOR=21
 
+# A tarball to build from a local file, mounted at /build-context in the builder. Empty by default;
+# point it at a folder with `--build-context local-tarball=<dir>` and pass
+# BINARY_URL=file:///build-context/<file>. A named context, not the whole build context, so a
+# release build's cache never depends on unrelated files in the checkout.
+FROM scratch AS local-tarball
+
 # ============================================================
 # Stage 1: Builder
 # ============================================================
@@ -35,7 +41,7 @@ RUN ARCH=$(uname -m) && \
 RUN useradd -u 1000 bridgelink
 
 # Binary download URL — passed at build time (s3:// for internal, https:// for public release, or
-# file:///build-context/<file> for a tarball saved in this checkout, such as one of Core's ant layout)
+# file:///build-context/<file> for a local tarball, such as one of Core's ant layout; see local-tarball)
 ARG BINARY_URL
 ENV BINARY_URL=${BINARY_URL}
 
@@ -55,7 +61,7 @@ RUN ls -l /opt/scripts/
 # Run the installation script which sets up your application under /opt/bridgelink
 # AWS credentials are injected via build secret (never baked into the image)
 RUN --mount=type=secret,id=aws_credentials,target=/root/.aws/credentials \
-    --mount=type=bind,target=/build-context \
+    --mount=type=bind,from=local-tarball,target=/build-context \
     /opt/scripts/install.sh
 
 # Compile the healthcheck probe that backs the HEALTHCHECK below (IRT-2015). Deliberately the SAME

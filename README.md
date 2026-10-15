@@ -7,6 +7,7 @@
 * [What is BridgeLink](#what-is-BridgeLink)
 * [Hardened (DHI) image](#hardened-dhi-image)
   * [Running WebAdmin alongside](#running-webadmin)
+* [Building from Core's ant layout](#building-from-core)
 * [Image security scanning](#image-security-scanning)
 * [How to use this image](#how-to-use)
   * [Start a BridgeLink instance](#start-bridgelink)
@@ -261,34 +262,6 @@ docker build \
 > Note: this image contains BridgeLink **Core** without the Swing client — it does **not** bundle the
 > WebAdmin/WebUI itself, which ships as its own separate container.
 
-### Building from Core's ant layout
-
-To run a Core branch that has not been released, the Rocky `Dockerfile` can also package Core's own
-ant build output (`server/setup`) instead of a release tarball. Make a tarball of it rooted at
-`bridgelink/`, after an ant build of Core (GNU tar; with macOS's tar, use `-s '|^setup|bridgelink|'`
-in place of `--transform`):
-
-```
-tar czf bridgelink.tar.gz -C server setup --transform 's|^setup|bridgelink|'
-```
-
-Save it in this checkout as `bridgelink.tar.gz` (it is ignored by git), and build the `raw` target:
-
-```
-docker build --target raw \
-  --build-arg BINARY_URL=file:///build-context/bridgelink.tar.gz \
-  -t bridgelink:dev .
-```
-
-The `raw` image launches the server with `java @blserver.vmoptions -jar mirth-server-launcher.jar`.
-Its `blserver.vmoptions` starts as Core's own `docs/mcservice-java9+.vmoptions`, so the heap and
-JVM settings below apply to it as they do to a release. It is for testing, is not published, and
-is Rocky only. It carries only what that ant build produced, so plugins that build separately,
-such as Lookup Manager, are not in it.
-
-Building a release tarball with `--target raw`, or Core's ant layout without it, fails the build
-and names the target to use.
-
 <a name="running-webadmin"></a>
 **Running WebAdmin alongside.** WebAdmin runs as a second container next to BridgeLink
 (`innovarhealthcare/bridgelink-webadmin`). Both compose files in this repo and the Helm chart can
@@ -360,9 +333,9 @@ IMAGE=innovarhealthcare/bridgelink:26.9.0-dhi SKIP_BUILD=1 test/image-test.sh   
 BINARY_URL="<release tarball>" IMAGE=innovarhealthcare/bridgelink:26.9.0 \
   DOCKERFILE=Dockerfile EXPECTED_UID=1000 CHECK_NO_SHELL=0 test/image-test.sh
 
-# Rocky image from Core's ant layout (bridgelink.tar.gz saved in this checkout):
-BINARY_URL=file:///build-context/bridgelink.tar.gz BUILD_TARGET=raw IMAGE=bridgelink:raw-test \
-  DOCKERFILE=Dockerfile EXPECTED_UID=1000 CHECK_NO_SHELL=0 test/image-test.sh
+# Rocky image from Core's ant layout (bridgelink.tar.gz in /tmp/bl, as above):
+LOCAL_TARBALL_DIR=/tmp/bl BINARY_URL=file:///build-context/bridgelink.tar.gz BUILD_TARGET=raw \
+  IMAGE=bridgelink:raw-test DOCKERFILE=Dockerfile EXPECTED_UID=1000 CHECK_NO_SHELL=0 test/image-test.sh
 
 # WebAdmin-only (slim) image — also assert the Swing Administrator was stripped:
 IMAGE=innovarhealthcare/bridgelink:26.9.0-dhi-slim SKIP_BUILD=1 \
@@ -377,6 +350,42 @@ IMAGE=innovarhealthcare/bridgelink:26.9.0-dhi-jdk17 SKIP_BUILD=1 EXPECTED_JAVA=1
 In `DEFAULT_DB=postgres` mode the suite starts its own throwaway Postgres and gives each container
 its own database on it, so the boot, config-injection, download, healthcheck, shutdown and
 persistence checks all still run — only the backend changes.
+
+------------
+
+<a name="building-from-core"></a>
+# Building from Core's ant layout [↑](#top)
+
+To run a Core branch that has not been released, the Rocky `Dockerfile` can also package Core's own
+ant build output (`server/setup`) instead of a release tarball. After an ant build of Core, make a
+tarball of it rooted at `bridgelink/`, from Core's `server` folder:
+
+```
+# GNU tar (Linux):
+tar czf /tmp/bl/bridgelink.tar.gz --transform 's|^setup|bridgelink|' setup
+# macOS tar: -s first, and no macOS metadata, which would extract as ._* files:
+COPYFILE_DISABLE=1 tar czf /tmp/bl/bridgelink.tar.gz -s '|^setup|bridgelink|' --no-mac-metadata setup
+```
+
+Then build the `raw` target, handing the tarball's folder to the build as `local-tarball`:
+
+```
+docker build --target raw \
+  --build-context local-tarball=/tmp/bl \
+  --build-arg BINARY_URL=file:///build-context/bridgelink.tar.gz \
+  -t bridgelink:dev .
+```
+
+The `raw` image launches the server with `java @blserver.vmoptions -jar mirth-server-launcher.jar`.
+Its `blserver.vmoptions` starts as Core's own `docs/mcservice-java9+.vmoptions`, so the heap and
+JVM settings in [Environment Variables](#environment-variables) apply to it as they do to a
+release. That file sets no `-Xmx`, so set one (`MP_VMOPTIONS=-Xmx2g`, for example) or the JVM's
+default heap applies. The image is for testing, is not published, and is Rocky only. It carries only
+what that ant build produced, so plugins that build separately, such as Lookup Manager, are not in
+it.
+
+Building a release tarball with `--target raw`, or Core's ant layout without it, fails the build
+and names the target to use.
 
 ------------
 
