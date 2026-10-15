@@ -34,7 +34,8 @@ RUN ARCH=$(uname -m) && \
 # Create the bridgelink user with UID 1000
 RUN useradd -u 1000 bridgelink
 
-# Binary download URL — passed at build time (s3:// for internal, https:// for public release)
+# Binary download URL — passed at build time (s3:// for internal, https:// for public release, or
+# file:///build-context/<file> for a tarball saved in this checkout, such as one of Core's ant layout)
 ARG BINARY_URL
 ENV BINARY_URL=${BINARY_URL}
 
@@ -54,6 +55,7 @@ RUN ls -l /opt/scripts/
 # Run the installation script which sets up your application under /opt/bridgelink
 # AWS credentials are injected via build secret (never baked into the image)
 RUN --mount=type=secret,id=aws_credentials,target=/root/.aws/credentials \
+    --mount=type=bind,target=/build-context \
     /opt/scripts/install.sh
 
 # Compile the healthcheck probe that backs the HEALTHCHECK below (IRT-2015). Deliberately the SAME
@@ -73,8 +75,16 @@ RUN mkdir -p /opt/bridgelink/appdata && chown bridgelink:bridgelink /opt/bridgel
 # ClassNotFoundException at runtime (see issue #13).
 # The Swing Administrator (client-lib jars + the public_html webstart landing page) is stripped when
 # INCLUDE_ADMIN_CLIENT=false, producing a WebAdmin-only image (see the ARG note above).
+# Core's ant layout (server/setup, for the raw target below) has no blmanager or blcommand launcher
+# scripts and no blserver.vmoptions, so the removal tolerates missing files, and that layout gets a
+# blserver.vmoptions copied from the module flags Core ships, so MP_VMOPTIONS, CUSTOM_VMOPTIONS and
+# the blserver_vmoptions secret all find the file they edit, as on a release.
 WORKDIR /opt/bridgelink
-RUN rm -r mirth-cli-launcher.jar mirth-manager-launcher.jar blmanager blcommand cli-lib manager-lib && \
+RUN rm -rf mirth-cli-launcher.jar mirth-manager-launcher.jar blmanager blcommand cli-lib manager-lib && \
+    if [ ! -f blserver.vmoptions ] && [ -f "docs/mcservice-java9+.vmoptions" ]; then \
+      echo "Core ant layout: seeding blserver.vmoptions from docs/mcservice-java9+.vmoptions"; \
+      cp "docs/mcservice-java9+.vmoptions" blserver.vmoptions; \
+    fi && \
     if [ "$INCLUDE_ADMIN_CLIENT" != "true" ]; then \
       echo "INCLUDE_ADMIN_CLIENT=$INCLUDE_ADMIN_CLIENT — stripping Swing Administrator (client-lib, public_html)"; \
       rm -rf client-lib public_html; \
@@ -87,7 +97,7 @@ RUN chmod 755 /opt/scripts/entrypoint.sh && \
 # ============================================================
 # Stage 2: Runtime
 # ============================================================
-FROM rockylinux:9 AS final
+FROM rockylinux:9 AS runtime
 ARG JAVA_MAJOR
 
 # Patch base OS packages (the base image ships stale packages; without this the runtime image keeps
@@ -155,4 +165,20 @@ HEALTHCHECK --interval=15s --timeout=5s --start-period=300s --retries=3 \
 
 # Entrypoint
 ENTRYPOINT ["/opt/scripts/entrypoint.sh"]
+
+# ============================================================
+# Targets. `final`, last, is what a build with no --target produces: a release, launched by
+# ./blserver. `raw` packages Core's ant layout (server/setup), which has no ./blserver, and launches
+# the server as that layout expects. Each refuses the other's tarball, naming the right target.
+# ============================================================
+FROM runtime AS raw
+RUN if [ -e /opt/bridgelink/blserver ]; then \
+      echo "This tarball is a release, with ./blserver; build it without --target raw"; exit 1; \
+    fi
+CMD ["java", "@blserver.vmoptions", "-jar", "mirth-server-launcher.jar"]
+
+FROM runtime AS final
+RUN if [ ! -e /opt/bridgelink/blserver ]; then \
+      echo "This tarball is Core's ant layout, with no ./blserver; build it with --target raw"; exit 1; \
+    fi
 CMD ["./blserver"]
