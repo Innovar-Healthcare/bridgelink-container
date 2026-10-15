@@ -59,6 +59,10 @@ PGPASS="bridgelinktest"
 BOOT_TIMEOUT=90
 NET="bl-test-net-$$"
 WORK="$(mktemp -d)"
+# mktemp makes it 0700. A rootless Docker daemon run as another user (as some CI setups do, to
+# keep containers away from the invoking user's files) then cannot read the secrets and fixtures
+# the tests bind-mount from here. Nothing in it is a real secret.
+chmod 0755 "$WORK"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 PASS=0 FAIL=0
