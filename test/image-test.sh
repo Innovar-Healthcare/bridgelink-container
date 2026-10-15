@@ -61,7 +61,8 @@ NET="bl-test-net-$$"
 WORK="$(mktemp -d)"
 # mktemp makes it 0700. A rootless Docker daemon run as another user (as some CI setups do, to
 # keep containers away from the invoking user's files) then cannot read the secrets and fixtures
-# the tests bind-mount from here. Nothing in it is a real secret.
+# the tests bind-mount from here, so it and the two files written 0600 below are opened to
+# reading. Nothing in it is a real secret.
 chmod 0755 "$WORK"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
@@ -589,6 +590,8 @@ if command -v openssl >/dev/null; then
   mkdir -p "$WORK/tls"
   openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj "/CN=fileserver-https" \
     -keyout "$WORK/tls/key.pem" -out "$WORK/tls/cert.pem" >/dev/null 2>&1
+  # OpenSSL writes the key 0600 whatever the umask; nginx reads it through a bind mount (see WORK).
+  chmod a+r "$WORK/tls/key.pem" 2>/dev/null || true
   cat > "$WORK/tls/default.conf" <<'NG'
 server {
   listen 443 ssl;
@@ -1019,6 +1022,8 @@ if wait_for_log bl-persist; then
   docker cp bl-persist:/opt/bridgelink/appdata/keystore.jks "$WORK/ksA" >/dev/null 2>&1
   docker cp bl-persist:/opt/bridgelink/appdata/keystore-passwords.properties "$WORK/kpwA" >/dev/null 2>&1 \
     && ok "keystore passwords saved in appdata" || bad "appdata/keystore-passwords.properties not written"
+  # docker cp keeps the image's 0600; 8c reads this copy back through a bind mount (see WORK).
+  chmod a+r "$WORK/kpwA" 2>/dev/null || true
   docker rm -f bl-persist >/dev/null
   run bl-persist "${PERSIST_ARGS[@]}"
   if wait_for_log bl-persist; then
