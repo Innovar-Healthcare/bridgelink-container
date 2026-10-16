@@ -23,6 +23,12 @@
 #                   and gives each container its own database on it.
 #   EXPECT_DERBY_EXIT  1 = additionally assert that the shipped Derby default is REFUSED on this
 #                   image (test 3b). Pairs with DEFAULT_DB=postgres; default 0.
+#   BUILD_TARGET    Dockerfile stage to build (empty = the Dockerfile's last stage). Set `raw` with
+#                   DOCKERFILE=Dockerfile to build and test an image of Core's ant layout
+#                   (server/setup, packaged with a bridgelink/ root); tests 2d-2f and test 3 then
+#                   check how it launches.
+#   LOCAL_TARBALL_DIR  a folder handed to the build as its `local-tarball` context, mounted at
+#                   /build-context, for a file:///build-context/<file> BINARY_URL.
 #
 # Usage:
 #   # DHI (defaults):
@@ -37,6 +43,9 @@
 #   # A 26.6.1-or-later release built on Java 17 (no usable embedded Derby):
 #   IMAGE=innovarhealthcare/bridgelink:26.9.0-dhi-jdk17 SKIP_BUILD=1 EXPECTED_JAVA=17 \
 #     DEFAULT_DB=postgres EXPECT_DERBY_EXIT=1 test/image-test.sh
+#   # Rocky, from a tarball of Core's ant layout in /tmp/bl:
+#   LOCAL_TARBALL_DIR=/tmp/bl BINARY_URL=file:///build-context/bridgelink.tar.gz BUILD_TARGET=raw \
+#     DOCKERFILE=Dockerfile EXPECTED_UID=1000 CHECK_NO_SHELL=0 IMAGE=bridgelink:raw-test test/image-test.sh
 #
 # Requires: docker (with buildx), python3, curl. Building the DHI image needs `docker login dhi.io`.
 set -u
@@ -48,6 +57,8 @@ EXPECTED_UID="${EXPECTED_UID:-65532}"
 CHECK_NO_SHELL="${CHECK_NO_SHELL:-1}"
 DEFAULT_DB="${DEFAULT_DB:-derby}"
 EXPECT_DERBY_EXIT="${EXPECT_DERBY_EXIT:-0}"
+BUILD_TARGET="${BUILD_TARGET:-}"
+LOCAL_TARBALL_DIR="${LOCAL_TARBALL_DIR:-}"
 # Fixture for the default-backend containers in DEFAULT_DB=postgres mode. Deliberately NOT the `pg`
 # fixture test 6 starts: test 6c stops that one to prove the healthcheck's behaviour during a
 # database outage and never restarts it, so anything sharing it would lose its backend mid-suite.
@@ -307,6 +318,8 @@ if [ "$SKIP_BUILD" != "1" ]; then
   docker build -f "$REPO_ROOT/$DOCKERFILE" --load \
     --build-arg BINARY_URL="$BINARY_URL" \
     ${JAVA_MAJOR:+--build-arg JAVA_MAJOR=$JAVA_MAJOR} \
+    ${BUILD_TARGET:+--target $BUILD_TARGET} \
+    ${LOCAL_TARBALL_DIR:+--build-context local-tarball=$LOCAL_TARBALL_DIR} \
     ${AWS_CREDENTIALS_FILE:+--secret id=aws_credentials,src=$AWS_CREDENTIALS_FILE} \
     -t "$IMAGE" "$REPO_ROOT" || { echo "BUILD FAILED"; exit 1; }
 fi
@@ -331,6 +344,16 @@ if command -v javac >/dev/null && command -v java >/dev/null; then
   fi
 else
   echo "  SKIP: no host JDK — parse unit cases not run"
+fi
+
+# ---- 0b. Unit: install.sh accepts either tarball root (host-side, no container) -----------------
+# The build-stage extract both Dockerfiles share, run against tiny tarballs with no Docker: a release
+# rooted at BridgeLink/, Core's ant layout rooted at bridgelink/, and one with neither.
+info "0b. install.sh tarball roots (unit)"
+if bash "$SCRIPT_DIR/install-test.sh"; then
+  ok "install.sh installs either root as bridgelink/ and rejects anything else"
+else
+  bad "install.sh tarball-root cases failed (see above)"
 fi
 
 # ---- 1. Hardening: no shell / no bash in the runtime (DHI only) -------------------------------
@@ -376,6 +399,67 @@ if [ -n "${EXPECTED_JAVA:-}" ]; then
   JV="$(docker run --rm --entrypoint java "$IMAGE" -XshowSettings:properties -version 2>&1 \
         | sed -n 's/^ *java\.specification\.version = //p' | tr -d '[:space:]')"
   [ "$JV" = "$EXPECTED_JAVA" ] && ok "runtime reports Java $JV" || bad "runtime reports Java '${JV:-?}' (expected $EXPECTED_JAVA)"
+fi
+
+# ---- 2d. Launch command matches the layout ----------------------------------------------------
+# The Rocky Dockerfile builds two images: by default the install4j distribution, launched by its
+# ./blserver; with --target raw, Core's ant layout, which has no ./blserver and is launched by java
+# with the vmoptions file. Read from the image config, so nothing has to run.
+if [ "$DOCKERFILE" = "Dockerfile" ]; then
+  info "2d. Launch command (${BUILD_TARGET:-default} target)"
+  CMDJ="$(docker image inspect --format '{{json .Config.Cmd}}' "$IMAGE")"
+  if [ "$BUILD_TARGET" = "raw" ]; then
+    if printf '%s' "$CMDJ" | grep -qF '"@blserver.vmoptions"' && printf '%s' "$CMDJ" | grep -qF '"mirth-server-launcher.jar"'; then
+      ok "raw image launches java @blserver.vmoptions -jar mirth-server-launcher.jar ($CMDJ)"
+    else
+      bad "raw image Cmd is $CMDJ (expected java @blserver.vmoptions -jar mirth-server-launcher.jar)"
+    fi
+  else
+    if [ "$CMDJ" = '["./blserver"]' ]; then
+      ok "default image launches ./blserver"
+    else
+      bad "default image Cmd is $CMDJ (expected [\"./blserver\"])"
+    fi
+  fi
+fi
+
+# ---- 2e. Building the default target from Core's ant layout fails, and says why ------------------
+# The default target is the install4j image, launched by ./blserver, which Core's ant layout lacks.
+# Building it from that layout must fail at build time, naming the target that fits, rather than
+# producing an image that cannot start. Only when this run built the raw target, so the same
+# arguments are known to work with --target raw.
+if [ "$BUILD_TARGET" = "raw" ] && [ "$SKIP_BUILD" != "1" ]; then
+  info "2e. Default target refuses Core's ant layout"
+  if docker build -f "$REPO_ROOT/$DOCKERFILE" \
+       --build-arg BINARY_URL="$BINARY_URL" \
+       ${JAVA_MAJOR:+--build-arg JAVA_MAJOR=$JAVA_MAJOR} \
+       ${AWS_CREDENTIALS_FILE:+--secret id=aws_credentials,src=$AWS_CREDENTIALS_FILE} \
+       ${LOCAL_TARBALL_DIR:+--build-context local-tarball=$LOCAL_TARBALL_DIR} \
+       --target final -t "$IMAGE-final-refused" "$REPO_ROOT" >"$WORK/build-final.log" 2>&1; then
+    bad "the default target built from Core's ant layout"
+    docker rmi "$IMAGE-final-refused" >/dev/null 2>&1 || true
+  elif grep -qF -- '--target raw' "$WORK/build-final.log"; then
+    ok "the default target fails on Core's ant layout and names --target raw"
+  else
+    bad "the default target failed on Core's ant layout without naming --target raw"
+    tail -20 "$WORK/build-final.log"
+  fi
+fi
+
+# ---- 2f. The raw image's vmoptions file is the one Core ships ----------------------------------
+# Core's layout has no blserver.vmoptions; the build seeds it from docs/mcservice-java9+.vmoptions
+# so MP_VMOPTIONS, CUSTOM_VMOPTIONS and the blserver_vmoptions secret all have a file to edit. Read
+# with the entrypoint bypassed, so this is the file as built, before any setting is applied.
+if [ "$BUILD_TARGET" = "raw" ]; then
+  info "2f. Raw image's blserver.vmoptions is Core's mcservice-java9+.vmoptions"
+  if docker run --rm --entrypoint cat "$IMAGE" /opt/bridgelink/blserver.vmoptions >"$WORK/raw-vmo" 2>&1 \
+     && docker run --rm --entrypoint cat "$IMAGE" /opt/bridgelink/docs/mcservice-java9+.vmoptions >"$WORK/raw-core-vmo" 2>&1 \
+     && cmp -s "$WORK/raw-vmo" "$WORK/raw-core-vmo"; then
+    ok "blserver.vmoptions is a copy of docs/mcservice-java9+.vmoptions"
+  else
+    bad "blserver.vmoptions missing or not a copy of docs/mcservice-java9+.vmoptions"
+    head -5 "$WORK/raw-vmo" "$WORK/raw-core-vmo" 2>/dev/null
+  fi
 fi
 
 # ---- 3-pre. Shared external database (DEFAULT_DB=postgres only) --------------------------------
@@ -463,6 +547,18 @@ if wait_for_log bl-boot; then
   # add-opens must appear exactly once (dedup)
   N="$(vmopt_count bl-boot 'add-opens=java.base/java.util=ALL-UNNAMED')"
   [ "$N" = "1" ] && ok "add-opens dedup (x1)" || bad "add-opens appears x$N"
+  # Core's ant layout has no ./blserver: the server must be the java process the entrypoint execs,
+  # reading the vmoptions file the two checks above inspected. One argument per line.
+  if [ "$BUILD_TARGET" = "raw" ]; then
+    docker exec bl-boot cat /proc/1/cmdline 2>/dev/null | tr '\0' '\n' > "$WORK/boot-cmdline"
+    if grep -qxF 'mirth-server-launcher.jar' "$WORK/boot-cmdline" \
+       && grep -qxF '@blserver.vmoptions' "$WORK/boot-cmdline" \
+       && ! grep -qE '(^|/)blserver$' "$WORK/boot-cmdline"; then
+      ok "raw image runs java @blserver.vmoptions -jar mirth-server-launcher.jar, not ./blserver"
+    else
+      bad "raw image process is not java @blserver.vmoptions -jar mirth-server-launcher.jar: $(tr '\n' ' ' < "$WORK/boot-cmdline")"
+    fi
+  fi
 else
   bad "server did not start ($DEFAULT_DB)"; docker logs bl-boot 2>&1 | tail -20
 fi
