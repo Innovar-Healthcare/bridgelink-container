@@ -497,9 +497,10 @@ jobs:
   # builds a throwaway local image for PR testing).
   dhi:
     needs: params
-    # Held for a maintainer's approval on pull requests opened by the sysadmin-innovar automation
-    # account; empty, so no environment, for everything else. chart.yml explains why.
-    environment: ${{ github.event.pull_request.user.login == 'sysadmin-innovar' && 'ai-lab-pr' || '' }}
+    # Held for a maintainer's approval on every pull request, since it logs in to dhi.io and Docker
+    # Hub before running the pull request's code; empty, so no environment, on schedule and
+    # dispatch. chart.yml explains the environment.
+    environment: ${{ github.event_name == 'pull_request' && 'registry-credentials' || '' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -814,8 +815,8 @@ jobs:
   # throwaway local image for PR testing; the Rocky image keeps being published by its own process.
   test-rocky:
     needs: params
-    # Held on the same pull requests as the dhi job; chart.yml explains why.
-    environment: ${{ github.event.pull_request.user.login == 'sysadmin-innovar' && 'ai-lab-pr' || '' }}
+    # Held on pull requests like the dhi job; chart.yml explains the environment.
+    environment: ${{ github.event_name == 'pull_request' && 'registry-credentials' || '' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
