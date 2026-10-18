@@ -30,6 +30,14 @@ on:
 permissions:
   contents: read
 
+# A pull request runs code no maintainer may have read yet. The kind job, the only one here that
+# holds a secret (the Docker Hub login), names the `registry-credentials` environment on every pull
+# request. That environment has required reviewers, so the job waits until a maintainer has read
+# the diff and approved the run; any listed reviewer may approve, the pull request's author
+# included. On push the name is empty and the job runs as before. The environment must exist with
+# reviewers before this lands: a job naming an environment that does not exist creates it,
+# unprotected. build-images.yml does the same.
+
 jobs:
   chart:
     runs-on: ubuntu-latest
@@ -1129,6 +1137,7 @@ jobs:
     # upgrade. A separate job because it takes several minutes, so
     # the template checks above still report in under one. charts/test/kind-test.sh has the detail.
     needs: chart
+    environment: ${{ github.event_name == 'pull_request' && 'registry-credentials' || '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
