@@ -36,7 +36,8 @@ permissions:
 # maintainer has read the diff and approved the run. On any other pull request, and on push, the
 # name is empty and the job runs as before. The environment must exist with reviewers before such
 # a pull request is opened: a job naming an environment that does not exist creates it,
-# unprotected. build-images.yml does the same.
+# unprotected. The hold also rests on that account's pull requests never changing a workflow file.
+# build-images.yml does the same.
 
 jobs:
   chart:
