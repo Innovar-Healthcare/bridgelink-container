@@ -13,15 +13,26 @@
 #   Secrets:
 #     DOCKERHUB_USERNAME / DOCKERHUB_TOKEN   push target (innovarhealthcare/bridgelink)
 #     DHI_USERNAME       / DHI_TOKEN         free Docker account, to pull the DHI base from dhi.io
-#     AWS_CREDENTIALS                        contents of an ~/.aws/credentials file (only needed
-#                                            when a BINARY_URL is an s3:// URL; harmless otherwise)
+#     AWS_PUBLISH_ROLE_ARN                   OIDC role (bridgelink-publish) for a private entry: it
+#                                            carries the ECR push policy and the read of the private
+#                                            release tarball. Assumable from the integration branch
+#                                            ONLY, so a private publish cannot be dispatched from a
+#                                            feature branch. Only needed once a "private" entry exists.
+#     RELEASE_BUCKET                         bucket holding the private release tarballs, without the
+#                                            s3:// scheme. A private entry carries no URL; the dhi job
+#                                            derives its tarball path from this secret, which the
+#                                            runner masks in every log line and job name. Only needed
+#                                            once a "private" entry exists.
 #     SLACK_WEBHOOK_URL   (optional)         Slack Incoming Webhook for the weekly scan summary
 #                                            (notify-slack job); if unset, that job skips silently
 #   Variables:
 #     MAINTAINED_VERSIONS  JSON array of every DHI release line kept alive by the weekly rebuild,
 #                          e.g. [{"version":"<ver>","binary_url":"https://...","latest":false},
-#                                {"version":"<ver>","binary_url":"s3://...","latest":true,
-#                                 "private":true}]
+#                                {"version":"<ver>","latest":true,"private":true}]
+#                          "binary_url": a public https:// URL. A "private" entry carries NONE: run
+#                          logs and job names are public and this variable is printed in them, so a
+#                          private tarball location must never be listed here. An entry that breaks
+#                          either rule is refused before anything is built, without printing the URL.
 #                          Exactly one UNQUALIFIED entry should have "latest": true — that's the one
 #                          that gets the rolling latest-dhi / latest-dhi-slim tags. An entry with a
 #                          tag_suffix has its own rolling pair (latest-dhi<suffix>), so "latest" is
@@ -61,9 +72,6 @@
 #                          DERIVED, not configured: in each (destination, minor) group, the newest
 #                          entry with no tag_suffix gets them. A qualified entry never does — its
 #                          tags name a specific JDK, and a floating tag cannot promise that.
-#     AWS_PUBLISH_ROLE_ARN OIDC role assumed for the ECR push (bridgelink-publish). Assumable from
-#                          the integration branch ONLY, so a private publish cannot be dispatched
-#                          from a feature branch. Only needed once a "private" entry exists.
 #     DEFAULT_VERSION      / DEFAULT_BINARY_URL   single version used only to gate PRs (dhi /
 #                          test-rocky on pull_request) — pin these to the current newest release.
 #     DEFAULT_JAVA         the JDK the PR gate builds that version on. Optional; unset means 21.
@@ -81,6 +89,8 @@
 
 name: build-images
 
+run-name: ${{ github.event_name == 'workflow_dispatch' && format('build-images {0}{1} {2}', inputs.version != '' && inputs.version || 'all-maintained', inputs.tag_suffix, inputs.push && 'push' || 'dry-run') || github.event_name == 'schedule' && 'build-images weekly rebuild' || '' }}
+
 on:
   workflow_dispatch:
     inputs:
@@ -88,7 +98,7 @@ on:
         description: "One-off: BridgeLink version tag to publish by itself (leave blank to rebuild every version in MAINTAINED_VERSIONS instead)"
         required: false
       binary_url:
-        description: "One-off: BINARY_URL for the release tarball (s3:// or https://) — required if version is set"
+        description: "One-off: https:// BINARY_URL for the release tarball — required if version is set, and not accepted when private is set (a private tarball path is derived from the release bucket)"
         required: false
       java:
         description: "One-off: Java major override. Optional — a version already in MAINTAINED_VERSIONS resolves to its pinned JDK; an unlisted new release defaults to 21. Set only to publish a brand-new release on a non-default JDK."
@@ -256,9 +266,23 @@ jobs:
               '[{version:$v, binary_url:$u, java:$j, latest:false, private:false, tag_suffix:"", derby_unsupported:false, minor:false}]')
             PUSH="false"
           elif [ "$EVENT_NAME" = "workflow_dispatch" ] && [ -n "$INPUT_VERSION" ]; then
-            if [ -z "$INPUT_BINARY_URL" ]; then
-              echo "::error::binary_url is required when version is set on a manual dispatch." >&2
-              exit 1
+            # A URL is never printed in an error: run logs are public. A private dispatch takes
+            # none, because the dhi job derives its tarball path from the release bucket secret;
+            # a public one needs an https URL.
+            if [ "$INPUT_PRIVATE" = "true" ]; then
+              if [ -n "$INPUT_BINARY_URL" ]; then
+                echo "::error::a private dispatch takes no binary_url; its tarball path is derived from the release bucket." >&2
+                exit 1
+              fi
+            else
+              if [ -z "$INPUT_BINARY_URL" ]; then
+                echo "::error::binary_url is required when version is set on a manual dispatch." >&2
+                exit 1
+              fi
+              if ! [[ "$INPUT_BINARY_URL" == https://* ]]; then
+                echo "::error::binary_url must be an https:// URL." >&2
+                exit 1
+              fi
             fi
             # Same shape rule as the weekly path. The uniqueness gate never sees a one-off, so this
             # is what stops a "26.6" dispatch publishing its version tag over the 26.6-dhi floating tag.
@@ -410,8 +434,25 @@ jobs:
                 <<<"$MAINTAINED_VERSIONS_RAW" >&2 || true
               exit 1
             fi
+            # A private entry carries no binary_url, and every binary_url is a public https URL.
+            # Run logs and job names are public and this variable is printed in them, so a private
+            # tarball location listed here would be published on the next run: the dhi job derives
+            # it from the release bucket secret instead. Only the version and suffix are printed.
+            BAD_PRIVATE="$(jq -r '[.[] | select((.private // false) == true and ((.binary_url // "") != "")) | .version + ((.tag_suffix // "") | tostring)] | join(", ")' \
+                             <<<"$MAINTAINED_VERSIONS_RAW")"
+            if [ -n "$BAD_PRIVATE" ]; then
+              echo "::error::MAINTAINED_VERSIONS: a private entry carries no binary_url, but $BAD_PRIVATE has one. Its tarball path is derived from the release bucket." >&2
+              exit 1
+            fi
+            BAD_URL="$(jq -r '[.[] | select(((.binary_url // "") | tostring) as $u | $u != "" and ($u | startswith("https://") | not)) | .version + ((.tag_suffix // "") | tostring)] | join(", ")' \
+                         <<<"$MAINTAINED_VERSIONS_RAW")"
+            if [ -n "$BAD_URL" ]; then
+              echo "::error::MAINTAINED_VERSIONS: the binary_url of $BAD_URL is not an https:// URL." >&2
+              exit 1
+            fi
             MATRIX=$(jq -c --arg re "$VERSION_RE" "$MINOR_JQ"'
                           map(.private = (.private // false)
+                              | .binary_url = (.binary_url // "")
                               | .java = ((.java // 17) | tostring)
                               | .tag_suffix = (.tag_suffix // "")
                               | .derby_unsupported = (.derby_unsupported // false))
@@ -419,6 +460,16 @@ jobs:
               <<<"$MAINTAINED_VERSIONS_RAW")
             if [ "$(jq 'length' <<<"$MATRIX")" -eq 0 ]; then
               echo "::error::MAINTAINED_VERSIONS repo variable parsed to an empty array — nothing to rebuild." >&2
+              exit 1
+            fi
+            # One (version, tag_suffix) publishes to one registry only, whatever the entries' private
+            # flags: the two would otherwise be told apart by registry and repository and pass the
+            # gate below, and a release lives in one registry. It also keeps the digest artifact
+            # names unique, because they are keyed on version and suffix. Only the version and
+            # suffix are printed, never a URL.
+            REPEATED="$(jq -r '[.[] | .version + .tag_suffix] | group_by(.) | map(select(length > 1) | .[0]) | join(", ")' <<<"$MATRIX")"
+            if [ -n "$REPEATED" ]; then
+              echo "::error::MAINTAINED_VERSIONS lists $REPEATED more than once; one version and tag_suffix publish to one registry only." >&2
               exit 1
             fi
             # THE anti-overwrite gate. Two entries that publish the same tag would have the weekly
@@ -482,10 +533,29 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
           echo "push=$PUSH" >> "$GITHUB_OUTPUT"
-          echo "rocky_version=${INPUT_VERSION:-$DEFAULT_VERSION}" >> "$GITHUB_OUTPUT"
-          echo "rocky_binary_url=${INPUT_BINARY_URL:-$DEFAULT_BINARY_URL}" >> "$GITHUB_OUTPUT"
-          echo "rocky_java=$ROCKY_JAVA" >> "$GITHUB_OUTPUT"
-          echo "rocky_derby_unsupported=$ROCKY_DERBY" >> "$GITHUB_OUTPUT"
+          # The Rocky gate builds from a public https URL only. A private one-off has no tarball of
+          # its own for it (the dhi job derives that path from a secret), and the gate tests the
+          # Dockerfile rather than the release, so it takes the pull-request gate's version, URL
+          # and JDK, exactly as a pull request does.
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ -n "$INPUT_VERSION" ] && [ "$INPUT_PRIVATE" = "true" ]; then
+            GATE_VERSION="$DEFAULT_VERSION"
+            GATE_URL="$DEFAULT_BINARY_URL"
+            GATE_JAVA="${DEFAULT_JAVA:-21}"
+            GATE_DERBY="false"
+            if ! [[ "$GATE_JAVA" =~ ^[0-9]+$ ]]; then
+              echo "::error::DEFAULT_JAVA must be a bare major version such as 17 or 21." >&2
+              exit 1
+            fi
+          else
+            GATE_VERSION="${INPUT_VERSION:-$DEFAULT_VERSION}"
+            GATE_URL="${INPUT_BINARY_URL:-$DEFAULT_BINARY_URL}"
+            GATE_JAVA="$ROCKY_JAVA"
+            GATE_DERBY="$ROCKY_DERBY"
+          fi
+          echo "rocky_version=$GATE_VERSION" >> "$GITHUB_OUTPUT"
+          echo "rocky_binary_url=$GATE_URL" >> "$GITHUB_OUTPUT"
+          echo "rocky_java=$GATE_JAVA" >> "$GITHUB_OUTPUT"
+          echo "rocky_derby_unsupported=$GATE_DERBY" >> "$GITHUB_OUTPUT"
 
   # Test + publish the hardened (DHI) image, one job run per matrix version (see params for what
   # populates the matrix). Test and publish are steps of the SAME job run so a failure in one
@@ -496,6 +566,7 @@ jobs:
   # pushed here — it keeps being published by its own existing process (test-rocky below only
   # builds a throwaway local image for PR testing).
   dhi:
+    name: dhi ${{ matrix.version }}${{ matrix.tag_suffix }}
     needs: params
     # Held for a maintainer's approval on every pull request, since it logs in to dhi.io and Docker
     # Hub before running the pull request's code; empty, so no environment, on schedule and
@@ -528,6 +599,68 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
+      # A private entry carries no URL: its tarball is read from the private release bucket with a
+      # short-lived OIDC session, and only on trusted (non-PR) events, so PR-branch code never sees
+      # a credential. The session below is staged as a credentials file for the in-build s3:// fetch.
+      # bridgelink-publish is trusted for refs/heads/main ONLY, because the tags it pushes are
+      # mutable: push access is the ability to replace an already-released image. The weekly
+      # schedule runs on main, so it is unaffected; a private run dispatched from a feature branch
+      # fails to assume the role, which is intended. Use push: false for a feature-branch dry run.
+      - name: Configure AWS credentials (OIDC)
+        if: github.event_name != 'pull_request' && matrix.private
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_PUBLISH_ROLE_ARN }}
+          mask-aws-account-id: true
+          aws-region: us-east-2
+          # 3h, the MaxSessionDuration of the role: the tests, scans and the first multi-arch
+          # stages run on this session before it is re-assumed below.
+          role-duration-seconds: 10800
+
+      # The bucket comes from a secret, so the runner masks it in every log line, step header and
+      # job name; a repo variable would be printed. Guarded rather than defaulted: an unset secret
+      # would otherwise build `s3:///bridgelink/...`, which fails deep inside the Docker build with
+      # an error that does not name the cause.
+      - name: Resolve private BINARY_URL
+        if: github.event_name != 'pull_request' && matrix.private
+        id: src
+        env:
+          RELEASE_BUCKET: ${{ secrets.RELEASE_BUCKET }}
+          VERSION: ${{ matrix.version }}
+        run: |
+          set -euo pipefail
+          : "${RELEASE_BUCKET:?RELEASE_BUCKET repo secret is unset — set it in Settings > Secrets and variables > Actions}"
+          if ! [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::version must be a plain <major>.<minor>.<patch>, got '$VERSION'." >&2
+            exit 1
+          fi
+          VERSION_US="${VERSION//./_}"
+          echo "binary_url=s3://${RELEASE_BUCKET}/bridgelink/${VERSION}/official-release/BridgeLink_unix_${VERSION_US}.tar.gz" >> "$GITHUB_OUTPUT"
+
+      # The Dockerfile fetches a private tarball during the build via a mounted aws_credentials
+      # secret. Always written, so every build can mount it: empty for a public entry and on pull
+      # requests, which use an https URL and need no credentials. The region is the BUCKET's, not
+      # the session's.
+      - name: Stage AWS credentials for the build
+        env:
+          PRIVATE: ${{ matrix.private }}
+          EVENT_NAME: ${{ github.event_name }}
+          S3_REGION: us-east-1
+        run: |
+          set -euo pipefail
+          umask 077
+          if [ "$PRIVATE" = "true" ] && [ "$EVENT_NAME" != "pull_request" ]; then
+            {
+              echo "[default]"
+              echo "aws_access_key_id=${AWS_ACCESS_KEY_ID}"
+              echo "aws_secret_access_key=${AWS_SECRET_ACCESS_KEY}"
+              echo "aws_session_token=${AWS_SESSION_TOKEN}"
+              echo "region=${S3_REGION}"
+            } > "${RUNNER_TEMP}/aws_credentials"
+          else
+            : > "${RUNNER_TEMP}/aws_credentials"
+          fi
+
       # Build a local (native-arch) test image — not pushed.
       - name: Build DHI test image
         uses: docker/build-push-action@v6
@@ -538,13 +671,10 @@ jobs:
           push: false
           tags: innovarhealthcare/bridgelink:dhi-test-${{ matrix.version }}${{ matrix.tag_suffix }}
           build-args: |
-            BINARY_URL=${{ matrix.binary_url }}
+            BINARY_URL=${{ matrix.private && steps.src.outputs.binary_url || matrix.binary_url }}
             JAVA_MAJOR=${{ matrix.java }}
-          # Only pass AWS creds on trusted (non-PR) events — needed for s3:// tarballs. On
-          # pull_request the build uses the public-https default, so pass empty to avoid exposing
-          # the secret to PR-branch code.
-          secrets: |
-            aws_credentials=${{ github.event_name != 'pull_request' && secrets.AWS_CREDENTIALS || '' }}
+          secret-files: |
+            aws_credentials=${{ runner.temp }}/aws_credentials
       - name: Run acceptance tests
         # DHI defaults (EXPECTED_UID=65532, CHECK_NO_SHELL=1, DOCKERFILE=Dockerfile.dhi) are implicit.
         # EXPECTED_JAVA makes the suite prove the runtime is on the JDK this matrix entry asked for.
@@ -572,11 +702,11 @@ jobs:
           push: false
           tags: innovarhealthcare/bridgelink:dhi-slim-test-${{ matrix.version }}${{ matrix.tag_suffix }}
           build-args: |
-            BINARY_URL=${{ matrix.binary_url }}
+            BINARY_URL=${{ matrix.private && steps.src.outputs.binary_url || matrix.binary_url }}
             JAVA_MAJOR=${{ matrix.java }}
             INCLUDE_ADMIN_CLIENT=false
-          secrets: |
-            aws_credentials=${{ github.event_name != 'pull_request' && secrets.AWS_CREDENTIALS || '' }}
+          secret-files: |
+            aws_credentials=${{ runner.temp }}/aws_credentials
       - name: Run acceptance tests (slim)
         env:
           DEFAULT_DB: ${{ matrix.derby_unsupported && 'postgres' || 'derby' }}
@@ -640,25 +770,36 @@ jobs:
       # buildx pushes with whatever auth the daemon already holds, so what actually decides
       # the destination is the tag list computed below.
       #
-      # OIDC -> temporary AWS creds for the ECR push. Same role the s3:// binary fetch already uses
-      # (vars.AWS_ROLE_ARN), so no new long-lived credentials — it carries the bridgelink-ecr-push
-      # policy. Region is us-east-2 (the registry); the in-build s3:// fetch keeps its own region
-      # from the AWS_CREDENTIALS secret and is unaffected.
-      # bridgelink-publish is trusted for refs/heads/main ONLY, because these tags are mutable:
-      # push access is the ability to replace an already-released image. The weekly schedule runs
-      # on main, so it is unaffected; a private publish dispatched from a feature branch will fail
-      # to assume the role, which is intended. Use push: false for a feature-branch dry run.
-      - name: Configure AWS credentials (OIDC)
+      # Re-assume before the release builds. The credentials file staged above carries a session
+      # token that expires on its own clock, and everything between then and here (two test
+      # builds, two acceptance suites, two scans) runs first. The multi-arch builds then re-read
+      # the tarball from S3 inside the emulated arm64 stage, which is the slowest part of the job
+      # and the last thing to need those credentials.
+      - name: Re-assume AWS credentials for the release build (OIDC)
         if: github.event_name != 'pull_request' && matrix.private
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars.AWS_PUBLISH_ROLE_ARN }}
+          role-to-assume: ${{ secrets.AWS_PUBLISH_ROLE_ARN }}
+          mask-aws-account-id: true
           aws-region: us-east-2
-          # The session is used ONLY for the ECR login here — the in-build s3:// fetch uses the
-          # AWS_CREDENTIALS secret, and the long multi-arch build rides the 12h ECR token, so
-          # this duration does not have to cover the build.
-          role-duration-seconds: 3600
+          role-duration-seconds: 10800
 
+      - name: Re-stage AWS credentials for the release build
+        if: github.event_name != 'pull_request' && matrix.private
+        env:
+          S3_REGION: us-east-1
+        run: |
+          set -euo pipefail
+          umask 077
+          {
+            echo "[default]"
+            echo "aws_access_key_id=${AWS_ACCESS_KEY_ID}"
+            echo "aws_secret_access_key=${AWS_SECRET_ACCESS_KEY}"
+            echo "aws_session_token=${AWS_SESSION_TOKEN}"
+            echo "region=${S3_REGION}"
+          } > "${RUNNER_TEMP}/aws_credentials"
+
+      # After the re-assume above, so the login token is fresh too (it lasts 12h regardless).
       - name: Log in to Amazon ECR (private push target)
         if: github.event_name != 'pull_request' && matrix.private
         id: ecr
@@ -710,35 +851,43 @@ jobs:
             fi
             MINOR_TAG="${VERSION%.*}"
           fi
+          # The registry-free refs come first: they are what the digest file names. A private
+          # entry's push list is the same refs with the registry host in front; a public entry's is
+          # the refs unchanged.
           if [ "$PRIVATE" = "true" ]; then
             if [ -z "$REGISTRY" ]; then
               echo "::error::ECR login produced no registry — cannot publish $VERSION privately." >&2
               exit 1
             fi
-            T="$REGISTRY/innovarhealthcare/bridgelink-dhi:${VERSION}-dhi${SUFFIX}"
-            S="$REGISTRY/innovarhealthcare/bridgelink-dhi-slim:${VERSION}-dhi-slim${SUFFIX}"
-            if [ "$LATEST" = "true" ]; then
-              T="$T"$'\n'"$REGISTRY/innovarhealthcare/bridgelink-dhi:latest-dhi${SUFFIX}"
-              S="$S"$'\n'"$REGISTRY/innovarhealthcare/bridgelink-dhi-slim:latest-dhi-slim${SUFFIX}"
-            fi
-            if [ -n "$MINOR_TAG" ]; then
-              T="$T"$'\n'"$REGISTRY/innovarhealthcare/bridgelink-dhi:${MINOR_TAG}-dhi"
-              S="$S"$'\n'"$REGISTRY/innovarhealthcare/bridgelink-dhi-slim:${MINOR_TAG}-dhi-slim"
-            fi
+            F="innovarhealthcare/bridgelink-dhi"
+            SF="innovarhealthcare/bridgelink-dhi-slim"
           else
-            T="innovarhealthcare/bridgelink:${VERSION}-dhi${SUFFIX}"
-            S="innovarhealthcare/bridgelink:${VERSION}-dhi-slim${SUFFIX}"
-            if [ "$LATEST" = "true" ]; then
-              T="$T"$'\n'"innovarhealthcare/bridgelink:latest-dhi${SUFFIX}"
-              S="$S"$'\n'"innovarhealthcare/bridgelink:latest-dhi-slim${SUFFIX}"
-            fi
-            if [ -n "$MINOR_TAG" ]; then
-              T="$T"$'\n'"innovarhealthcare/bridgelink:${MINOR_TAG}-dhi"
-              S="$S"$'\n'"innovarhealthcare/bridgelink:${MINOR_TAG}-dhi-slim"
-            fi
+            F="innovarhealthcare/bridgelink"
+            SF="innovarhealthcare/bridgelink"
           fi
-          { echo "list<<EOF"; echo "$T"; echo "EOF"; } >> "$GITHUB_OUTPUT"
-          { echo "slim<<EOF"; echo "$S"; echo "EOF"; } >> "$GITHUB_OUTPUT"
+          T="$F:${VERSION}-dhi${SUFFIX}"
+          S="$SF:${VERSION}-dhi-slim${SUFFIX}"
+          if [ "$LATEST" = "true" ]; then
+            T="$T"$'\n'"$F:latest-dhi${SUFFIX}"
+            S="$S"$'\n'"$SF:latest-dhi-slim${SUFFIX}"
+          fi
+          if [ -n "$MINOR_TAG" ]; then
+            T="$T"$'\n'"$F:${MINOR_TAG}-dhi"
+            S="$S"$'\n'"$SF:${MINOR_TAG}-dhi-slim"
+          fi
+          if [ "$PRIVATE" = "true" ]; then
+            PUSH_T="$(while IFS= read -r ref; do echo "$REGISTRY/$ref"; done <<<"$T")"
+            PUSH_S="$(while IFS= read -r ref; do echo "$REGISTRY/$ref"; done <<<"$S")"
+          else
+            PUSH_T="$T"
+            PUSH_S="$S"
+          fi
+          {
+            echo "refs<<EOF"; echo "$T"; echo "EOF"
+            echo "slim_refs<<EOF"; echo "$S"; echo "EOF"
+            echo "list<<EOF"; echo "$PUSH_T"; echo "EOF"
+            echo "slim<<EOF"; echo "$PUSH_S"; echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Build & push DHI image
         if: github.event_name != 'pull_request'
@@ -750,11 +899,11 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: ${{ needs.params.outputs.push == 'true' }}
           build-args: |
-            BINARY_URL=${{ matrix.binary_url }}
+            BINARY_URL=${{ matrix.private && steps.src.outputs.binary_url || matrix.binary_url }}
             JAVA_MAJOR=${{ matrix.java }}
           # Mounted at /root/.aws/credentials for s3:// pulls (Dockerfile.dhi: --mount=type=secret,id=aws_credentials).
-          secrets: |
-            aws_credentials=${{ secrets.AWS_CREDENTIALS }}
+          secret-files: |
+            aws_credentials=${{ runner.temp }}/aws_credentials
           tags: ${{ steps.tags.outputs.list }}
 
       # WebAdmin-only variant: same image with the Swing Administrator stripped (INCLUDE_ADMIN_CLIENT=false).
@@ -768,11 +917,11 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: ${{ needs.params.outputs.push == 'true' }}
           build-args: |
-            BINARY_URL=${{ matrix.binary_url }}
+            BINARY_URL=${{ matrix.private && steps.src.outputs.binary_url || matrix.binary_url }}
             JAVA_MAJOR=${{ matrix.java }}
             INCLUDE_ADMIN_CLIENT=false
-          secrets: |
-            aws_credentials=${{ secrets.AWS_CREDENTIALS }}
+          secret-files: |
+            aws_credentials=${{ runner.temp }}/aws_credentials
           tags: ${{ steps.tags.outputs.slim }}
 
       # Tags in these repositories are MUTABLE by design — the weekly rebuild re-pushes
@@ -810,6 +959,109 @@ jobs:
             echo "Tags are mutable; pin by digest for an immutable reference."
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # Hands the pushed digests to the release pipeline as a run artifact, on pushes only like the
+      # summary above. One file per matrix entry holds both the dhi and the dhi-slim digests. Every
+      # line is checked against an allow-list before the file is moved into the upload directory,
+      # so a registry host, an account id or an unknown repository cannot reach the artifact. The
+      # file is not printed to the log: the masker would show the organisation name as ***.
+      - name: Write digest file for the release pipeline
+        id: digests
+        if: github.event_name != 'pull_request' && needs.params.outputs.push == 'true'
+        env:
+          ARTIFACT: image-digests-build-images-${{ matrix.version }}${{ matrix.tag_suffix }}
+          VERSION: ${{ matrix.version }}
+          SUFFIX: ${{ matrix.tag_suffix }}
+          JAVA: ${{ matrix.java }}
+          PRIVATE: ${{ matrix.private }}
+          REFS: ${{ steps.tags.outputs.refs }}
+          SLIM_REFS: ${{ steps.tags.outputs.slim_refs }}
+          DHI_DIGEST: ${{ steps.dhi.outputs.digest }}
+          SLIM_DIGEST: ${{ steps.slim.outputs.digest }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          export LC_ALL=C
+          digest_re='^sha256:[0-9a-f]{64}$'
+          artifact_re='^image-digests-(publish-ecr|publish-dockerhub|build-images)-(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[a-z0-9][a-z0-9._-]*)?$'
+          value_re='^[A-Za-z0-9._-]+$'
+          suffix_re='^[A-Za-z0-9._-]*$'
+          for d in "$DHI_DIGEST" "$SLIM_DIGEST"; do
+            if ! [[ "$d" =~ $digest_re ]]; then
+              echo "::error::a push step produced no valid digest; not writing the digest file." >&2
+              exit 1
+            fi
+          done
+          if ! [[ "$ARTIFACT" =~ $artifact_re ]]; then
+            echo "::error::artifact name '$ARTIFACT' is outside the image-digests-<workflow>-<version><suffix> pattern." >&2
+            exit 1
+          fi
+          if [ "$ARTIFACT" != "image-digests-build-images-${VERSION}${SUFFIX}" ]; then
+            echo "::error::artifact name '$ARTIFACT' does not match the version and suffix being recorded." >&2
+            exit 1
+          fi
+          for v in "$VERSION" "$JAVA" "$HEAD_SHA"; do
+            if ! [[ "$v" =~ $value_re ]]; then
+              echo "::error::a header value is empty or holds a character outside [A-Za-z0-9._-]; not writing the digest file." >&2
+              exit 1
+            fi
+          done
+          if ! [[ "$SUFFIX" =~ $suffix_re ]]; then
+            echo "::error::the tag suffix holds a character outside [A-Za-z0-9._-]; not writing the digest file." >&2
+            exit 1
+          fi
+          case "$PRIVATE" in
+            true) DESTINATION="ecr" ;;
+            false) DESTINATION="dockerhub" ;;
+            *)
+              echo "::error::the private flag is neither true nor false; not writing the digest file." >&2
+              exit 1
+              ;;
+          esac
+
+          F="$RUNNER_TEMP/image-digests.tmp"
+          {
+            echo "workflow=build-images"
+            echo "version=$VERSION"
+            echo "tag_suffix=$SUFFIX"
+            echo "java=$JAVA"
+            echo "destination=$DESTINATION"
+            echo "head_sha=$HEAD_SHA"
+          } > "$F"
+          n_dhi=0
+          while IFS= read -r ref; do
+            [ -n "$ref" ] || continue
+            echo "digest.${ref}=${DHI_DIGEST}" >> "$F"
+            n_dhi=$((n_dhi + 1))
+          done <<<"$REFS"
+          n_slim=0
+          while IFS= read -r ref; do
+            [ -n "$ref" ] || continue
+            echo "digest.${ref}=${SLIM_DIGEST}" >> "$F"
+            n_slim=$((n_slim + 1))
+          done <<<"$SLIM_REFS"
+          if [ "$n_dhi" -eq 0 ] || [ "$n_slim" -eq 0 ]; then
+            echo "::error::no tags to record for the dhi or the dhi-slim image; not writing the digest file." >&2
+            exit 1
+          fi
+
+          # Every line is a known header or a digest line for one of the three repositories.
+          head_re='^(workflow|version|tag_suffix|java|destination|head_sha)=[A-Za-z0-9._-]*$'
+          dig_re='^digest\.innovarhealthcare/bridgelink(-dhi|-dhi-slim)?:[A-Za-z0-9._-]+=sha256:[0-9a-f]{64}$'
+          if grep -Evq "(${head_re})|(${dig_re})" "$F"; then
+            echo "::error::digest file holds a line outside the allow-list; not uploading." >&2
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/image-digests"
+          mv "$F" "$RUNNER_TEMP/image-digests/$ARTIFACT.txt"
+
+      - name: Upload digests for the release pipeline
+        if: github.event_name != 'pull_request' && needs.params.outputs.push == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-digests-build-images-${{ matrix.version }}${{ matrix.tag_suffix }}
+          path: ${{ runner.temp }}/image-digests/
+          if-no-files-found: error
+
   # Gate: build the Rocky image single-arch, run the same acceptance suite (UID 1000, shell present),
   # then scan it (IRT-1391). Mirrors the dhi job's test steps. Rocky PUBLISHING is unaffected — this only builds a
   # throwaway local image for PR testing; the Rocky image keeps being published by its own process.
@@ -842,9 +1094,6 @@ jobs:
           build-args: |
             BINARY_URL=${{ needs.params.outputs.rocky_binary_url }}
             JAVA_MAJOR=${{ needs.params.outputs.rocky_java }}
-          # Only pass AWS creds on trusted (non-PR) events — see the dhi job's test steps for the rationale.
-          secrets: |
-            aws_credentials=${{ github.event_name != 'pull_request' && secrets.AWS_CREDENTIALS || '' }}
       - name: Run acceptance tests
         # Rocky runs as UID 1000 and ships a shell, so the no-shell assertion is skipped for it.
         #
