@@ -13,15 +13,26 @@
 #   Secrets:
 #     DOCKERHUB_USERNAME / DOCKERHUB_TOKEN   push target (innovarhealthcare/bridgelink)
 #     DHI_USERNAME       / DHI_TOKEN         free Docker account, to pull the DHI base from dhi.io
-#     AWS_CREDENTIALS                        contents of an ~/.aws/credentials file (only needed
-#                                            when a BINARY_URL is an s3:// URL; harmless otherwise)
+#     AWS_PUBLISH_ROLE_ARN                   OIDC role (bridgelink-publish) for a private entry: it
+#                                            carries the ECR push policy and the read of the private
+#                                            release tarball. Assumable from the integration branch
+#                                            ONLY, so a private publish cannot be dispatched from a
+#                                            feature branch. Only needed once a "private" entry exists.
+#     RELEASE_BUCKET                         bucket holding the private release tarballs, without the
+#                                            s3:// scheme. A private entry carries no URL; the dhi job
+#                                            derives its tarball path from this secret, which the
+#                                            runner masks in every log line and job name. Only needed
+#                                            once a "private" entry exists.
 #     SLACK_WEBHOOK_URL   (optional)         Slack Incoming Webhook for the weekly scan summary
 #                                            (notify-slack job); if unset, that job skips silently
 #   Variables:
 #     MAINTAINED_VERSIONS  JSON array of every DHI release line kept alive by the weekly rebuild,
 #                          e.g. [{"version":"<ver>","binary_url":"https://...","latest":false},
-#                                {"version":"<ver>","binary_url":"s3://...","latest":true,
-#                                 "private":true}]
+#                                {"version":"<ver>","latest":true,"private":true}]
+#                          "binary_url": a public https:// URL. A "private" entry carries NONE: run
+#                          logs and job names are public and this variable is printed in them, so a
+#                          private tarball location must never be listed here. An entry that breaks
+#                          either rule is refused before anything is built, without printing the URL.
 #                          Exactly one UNQUALIFIED entry should have "latest": true — that's the one
 #                          that gets the rolling latest-dhi / latest-dhi-slim tags. An entry with a
 #                          tag_suffix has its own rolling pair (latest-dhi<suffix>), so "latest" is
@@ -61,9 +72,6 @@
 #                          DERIVED, not configured: in each (destination, minor) group, the newest
 #                          entry with no tag_suffix gets them. A qualified entry never does — its
 #                          tags name a specific JDK, and a floating tag cannot promise that.
-#     AWS_PUBLISH_ROLE_ARN OIDC role assumed for the ECR push (bridgelink-publish). Assumable from
-#                          the integration branch ONLY, so a private publish cannot be dispatched
-#                          from a feature branch. Only needed once a "private" entry exists.
 #     DEFAULT_VERSION      / DEFAULT_BINARY_URL   single version used only to gate PRs (dhi /
 #                          test-rocky on pull_request) — pin these to the current newest release.
 #     DEFAULT_JAVA         the JDK the PR gate builds that version on. Optional; unset means 21.
@@ -90,7 +98,7 @@ on:
         description: "One-off: BridgeLink version tag to publish by itself (leave blank to rebuild every version in MAINTAINED_VERSIONS instead)"
         required: false
       binary_url:
-        description: "One-off: BINARY_URL for the release tarball (s3:// or https://) — required if version is set"
+        description: "One-off: https:// BINARY_URL for the release tarball — required if version is set, and not accepted when private is set (a private tarball path is derived from the release bucket)"
         required: false
       java:
         description: "One-off: Java major override. Optional — a version already in MAINTAINED_VERSIONS resolves to its pinned JDK; an unlisted new release defaults to 21. Set only to publish a brand-new release on a non-default JDK."
@@ -258,9 +266,23 @@ jobs:
               '[{version:$v, binary_url:$u, java:$j, latest:false, private:false, tag_suffix:"", derby_unsupported:false, minor:false}]')
             PUSH="false"
           elif [ "$EVENT_NAME" = "workflow_dispatch" ] && [ -n "$INPUT_VERSION" ]; then
-            if [ -z "$INPUT_BINARY_URL" ]; then
-              echo "::error::binary_url is required when version is set on a manual dispatch." >&2
-              exit 1
+            # A URL is never printed in an error: run logs are public. A private dispatch takes
+            # none, because the dhi job derives its tarball path from the release bucket secret;
+            # a public one needs an https URL.
+            if [ "$INPUT_PRIVATE" = "true" ]; then
+              if [ -n "$INPUT_BINARY_URL" ]; then
+                echo "::error::a private dispatch takes no binary_url; its tarball path is derived from the release bucket." >&2
+                exit 1
+              fi
+            else
+              if [ -z "$INPUT_BINARY_URL" ]; then
+                echo "::error::binary_url is required when version is set on a manual dispatch." >&2
+                exit 1
+              fi
+              if ! [[ "$INPUT_BINARY_URL" == https://* ]]; then
+                echo "::error::binary_url must be an https:// URL." >&2
+                exit 1
+              fi
             fi
             # Same shape rule as the weekly path. The uniqueness gate never sees a one-off, so this
             # is what stops a "26.6" dispatch publishing its version tag over the 26.6-dhi floating tag.
@@ -412,8 +434,25 @@ jobs:
                 <<<"$MAINTAINED_VERSIONS_RAW" >&2 || true
               exit 1
             fi
+            # A private entry carries no binary_url, and every binary_url is a public https URL.
+            # Run logs and job names are public and this variable is printed in them, so a private
+            # tarball location listed here would be published on the next run: the dhi job derives
+            # it from the release bucket secret instead. Only the version and suffix are printed.
+            BAD_PRIVATE="$(jq -r '[.[] | select((.private // false) == true and ((.binary_url // "") != "")) | .version + ((.tag_suffix // "") | tostring)] | join(", ")' \
+                             <<<"$MAINTAINED_VERSIONS_RAW")"
+            if [ -n "$BAD_PRIVATE" ]; then
+              echo "::error::MAINTAINED_VERSIONS: a private entry carries no binary_url, but $BAD_PRIVATE has one. Its tarball path is derived from the release bucket." >&2
+              exit 1
+            fi
+            BAD_URL="$(jq -r '[.[] | select(((.binary_url // "") | tostring) as $u | $u != "" and ($u | startswith("https://") | not)) | .version + ((.tag_suffix // "") | tostring)] | join(", ")' \
+                         <<<"$MAINTAINED_VERSIONS_RAW")"
+            if [ -n "$BAD_URL" ]; then
+              echo "::error::MAINTAINED_VERSIONS: the binary_url of $BAD_URL is not an https:// URL." >&2
+              exit 1
+            fi
             MATRIX=$(jq -c --arg re "$VERSION_RE" "$MINOR_JQ"'
                           map(.private = (.private // false)
+                              | .binary_url = (.binary_url // "")
                               | .java = ((.java // 17) | tostring)
                               | .tag_suffix = (.tag_suffix // "")
                               | .derby_unsupported = (.derby_unsupported // false))
@@ -494,10 +533,29 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
           echo "push=$PUSH" >> "$GITHUB_OUTPUT"
-          echo "rocky_version=${INPUT_VERSION:-$DEFAULT_VERSION}" >> "$GITHUB_OUTPUT"
-          echo "rocky_binary_url=${INPUT_BINARY_URL:-$DEFAULT_BINARY_URL}" >> "$GITHUB_OUTPUT"
-          echo "rocky_java=$ROCKY_JAVA" >> "$GITHUB_OUTPUT"
-          echo "rocky_derby_unsupported=$ROCKY_DERBY" >> "$GITHUB_OUTPUT"
+          # The Rocky gate builds from a public https URL only. A private one-off has no tarball of
+          # its own for it (the dhi job derives that path from a secret), and the gate tests the
+          # Dockerfile rather than the release, so it takes the pull-request gate's version, URL
+          # and JDK, exactly as a pull request does.
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ -n "$INPUT_VERSION" ] && [ "$INPUT_PRIVATE" = "true" ]; then
+            GATE_VERSION="$DEFAULT_VERSION"
+            GATE_URL="$DEFAULT_BINARY_URL"
+            GATE_JAVA="${DEFAULT_JAVA:-21}"
+            GATE_DERBY="false"
+            if ! [[ "$GATE_JAVA" =~ ^[0-9]+$ ]]; then
+              echo "::error::DEFAULT_JAVA must be a bare major version such as 17 or 21." >&2
+              exit 1
+            fi
+          else
+            GATE_VERSION="${INPUT_VERSION:-$DEFAULT_VERSION}"
+            GATE_URL="${INPUT_BINARY_URL:-$DEFAULT_BINARY_URL}"
+            GATE_JAVA="$ROCKY_JAVA"
+            GATE_DERBY="$ROCKY_DERBY"
+          fi
+          echo "rocky_version=$GATE_VERSION" >> "$GITHUB_OUTPUT"
+          echo "rocky_binary_url=$GATE_URL" >> "$GITHUB_OUTPUT"
+          echo "rocky_java=$GATE_JAVA" >> "$GITHUB_OUTPUT"
+          echo "rocky_derby_unsupported=$GATE_DERBY" >> "$GITHUB_OUTPUT"
 
   # Test + publish the hardened (DHI) image, one job run per matrix version (see params for what
   # populates the matrix). Test and publish are steps of the SAME job run so a failure in one
@@ -541,6 +599,68 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
+      # A private entry carries no URL: its tarball is read from the private release bucket with a
+      # short-lived OIDC session, and only on trusted (non-PR) events, so PR-branch code never sees
+      # a credential. The session below is staged as a credentials file for the in-build s3:// fetch.
+      # bridgelink-publish is trusted for refs/heads/main ONLY, because the tags it pushes are
+      # mutable: push access is the ability to replace an already-released image. The weekly
+      # schedule runs on main, so it is unaffected; a private run dispatched from a feature branch
+      # fails to assume the role, which is intended. Use push: false for a feature-branch dry run.
+      - name: Configure AWS credentials (OIDC)
+        if: github.event_name != 'pull_request' && matrix.private
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_PUBLISH_ROLE_ARN }}
+          mask-aws-account-id: true
+          aws-region: us-east-2
+          # 3h, the MaxSessionDuration of the role: the tests, scans and the first multi-arch
+          # stages run on this session before it is re-assumed below.
+          role-duration-seconds: 10800
+
+      # The bucket comes from a secret, so the runner masks it in every log line, step header and
+      # job name; a repo variable would be printed. Guarded rather than defaulted: an unset secret
+      # would otherwise build `s3:///bridgelink/...`, which fails deep inside the Docker build with
+      # an error that does not name the cause.
+      - name: Resolve private BINARY_URL
+        if: github.event_name != 'pull_request' && matrix.private
+        id: src
+        env:
+          RELEASE_BUCKET: ${{ secrets.RELEASE_BUCKET }}
+          VERSION: ${{ matrix.version }}
+        run: |
+          set -euo pipefail
+          : "${RELEASE_BUCKET:?RELEASE_BUCKET repo secret is unset — set it in Settings > Secrets and variables > Actions}"
+          if ! [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::version must be a plain <major>.<minor>.<patch>, got '$VERSION'." >&2
+            exit 1
+          fi
+          VERSION_US="${VERSION//./_}"
+          echo "binary_url=s3://${RELEASE_BUCKET}/bridgelink/${VERSION}/official-release/BridgeLink_unix_${VERSION_US}.tar.gz" >> "$GITHUB_OUTPUT"
+
+      # The Dockerfile fetches a private tarball during the build via a mounted aws_credentials
+      # secret. Always written, so every build can mount it: empty for a public entry and on pull
+      # requests, which use an https URL and need no credentials. The region is the BUCKET's, not
+      # the session's.
+      - name: Stage AWS credentials for the build
+        env:
+          PRIVATE: ${{ matrix.private }}
+          EVENT_NAME: ${{ github.event_name }}
+          S3_REGION: us-east-1
+        run: |
+          set -euo pipefail
+          umask 077
+          if [ "$PRIVATE" = "true" ] && [ "$EVENT_NAME" != "pull_request" ]; then
+            {
+              echo "[default]"
+              echo "aws_access_key_id=${AWS_ACCESS_KEY_ID}"
+              echo "aws_secret_access_key=${AWS_SECRET_ACCESS_KEY}"
+              echo "aws_session_token=${AWS_SESSION_TOKEN}"
+              echo "region=${S3_REGION}"
+            } > "${RUNNER_TEMP}/aws_credentials"
+          else
+            : > "${RUNNER_TEMP}/aws_credentials"
+          fi
+
       # Build a local (native-arch) test image — not pushed.
       - name: Build DHI test image
         uses: docker/build-push-action@v6
@@ -551,13 +671,10 @@ jobs:
           push: false
           tags: innovarhealthcare/bridgelink:dhi-test-${{ matrix.version }}${{ matrix.tag_suffix }}
           build-args: |
-            BINARY_URL=${{ matrix.binary_url }}
+            BINARY_URL=${{ matrix.private && steps.src.outputs.binary_url || matrix.binary_url }}
             JAVA_MAJOR=${{ matrix.java }}
-          # Only pass AWS creds on trusted (non-PR) events — needed for s3:// tarballs. On
-          # pull_request the build uses the public-https default, so pass empty to avoid exposing
-          # the secret to PR-branch code.
-          secrets: |
-            aws_credentials=${{ github.event_name != 'pull_request' && secrets.AWS_CREDENTIALS || '' }}
+          secret-files: |
+            aws_credentials=${{ runner.temp }}/aws_credentials
       - name: Run acceptance tests
         # DHI defaults (EXPECTED_UID=65532, CHECK_NO_SHELL=1, DOCKERFILE=Dockerfile.dhi) are implicit.
         # EXPECTED_JAVA makes the suite prove the runtime is on the JDK this matrix entry asked for.
@@ -585,11 +702,11 @@ jobs:
           push: false
           tags: innovarhealthcare/bridgelink:dhi-slim-test-${{ matrix.version }}${{ matrix.tag_suffix }}
           build-args: |
-            BINARY_URL=${{ matrix.binary_url }}
+            BINARY_URL=${{ matrix.private && steps.src.outputs.binary_url || matrix.binary_url }}
             JAVA_MAJOR=${{ matrix.java }}
             INCLUDE_ADMIN_CLIENT=false
-          secrets: |
-            aws_credentials=${{ github.event_name != 'pull_request' && secrets.AWS_CREDENTIALS || '' }}
+          secret-files: |
+            aws_credentials=${{ runner.temp }}/aws_credentials
       - name: Run acceptance tests (slim)
         env:
           DEFAULT_DB: ${{ matrix.derby_unsupported && 'postgres' || 'derby' }}
@@ -653,25 +770,36 @@ jobs:
       # buildx pushes with whatever auth the daemon already holds, so what actually decides
       # the destination is the tag list computed below.
       #
-      # OIDC -> temporary AWS creds for the ECR push. Same role the s3:// binary fetch already uses
-      # (vars.AWS_ROLE_ARN), so no new long-lived credentials — it carries the bridgelink-ecr-push
-      # policy. Region is us-east-2 (the registry); the in-build s3:// fetch keeps its own region
-      # from the AWS_CREDENTIALS secret and is unaffected.
-      # bridgelink-publish is trusted for refs/heads/main ONLY, because these tags are mutable:
-      # push access is the ability to replace an already-released image. The weekly schedule runs
-      # on main, so it is unaffected; a private publish dispatched from a feature branch will fail
-      # to assume the role, which is intended. Use push: false for a feature-branch dry run.
-      - name: Configure AWS credentials (OIDC)
+      # Re-assume before the release builds. The credentials file staged above carries a session
+      # token that expires on its own clock, and everything between then and here (two test
+      # builds, two acceptance suites, two scans) runs first. The multi-arch builds then re-read
+      # the tarball from S3 inside the emulated arm64 stage, which is the slowest part of the job
+      # and the last thing to need those credentials.
+      - name: Re-assume AWS credentials for the release build (OIDC)
         if: github.event_name != 'pull_request' && matrix.private
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars.AWS_PUBLISH_ROLE_ARN }}
+          role-to-assume: ${{ secrets.AWS_PUBLISH_ROLE_ARN }}
+          mask-aws-account-id: true
           aws-region: us-east-2
-          # The session is used ONLY for the ECR login here — the in-build s3:// fetch uses the
-          # AWS_CREDENTIALS secret, and the long multi-arch build rides the 12h ECR token, so
-          # this duration does not have to cover the build.
-          role-duration-seconds: 3600
+          role-duration-seconds: 10800
 
+      - name: Re-stage AWS credentials for the release build
+        if: github.event_name != 'pull_request' && matrix.private
+        env:
+          S3_REGION: us-east-1
+        run: |
+          set -euo pipefail
+          umask 077
+          {
+            echo "[default]"
+            echo "aws_access_key_id=${AWS_ACCESS_KEY_ID}"
+            echo "aws_secret_access_key=${AWS_SECRET_ACCESS_KEY}"
+            echo "aws_session_token=${AWS_SESSION_TOKEN}"
+            echo "region=${S3_REGION}"
+          } > "${RUNNER_TEMP}/aws_credentials"
+
+      # After the re-assume above, so the login token is fresh too (it lasts 12h regardless).
       - name: Log in to Amazon ECR (private push target)
         if: github.event_name != 'pull_request' && matrix.private
         id: ecr
@@ -771,11 +899,11 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: ${{ needs.params.outputs.push == 'true' }}
           build-args: |
-            BINARY_URL=${{ matrix.binary_url }}
+            BINARY_URL=${{ matrix.private && steps.src.outputs.binary_url || matrix.binary_url }}
             JAVA_MAJOR=${{ matrix.java }}
           # Mounted at /root/.aws/credentials for s3:// pulls (Dockerfile.dhi: --mount=type=secret,id=aws_credentials).
-          secrets: |
-            aws_credentials=${{ secrets.AWS_CREDENTIALS }}
+          secret-files: |
+            aws_credentials=${{ runner.temp }}/aws_credentials
           tags: ${{ steps.tags.outputs.list }}
 
       # WebAdmin-only variant: same image with the Swing Administrator stripped (INCLUDE_ADMIN_CLIENT=false).
@@ -789,11 +917,11 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: ${{ needs.params.outputs.push == 'true' }}
           build-args: |
-            BINARY_URL=${{ matrix.binary_url }}
+            BINARY_URL=${{ matrix.private && steps.src.outputs.binary_url || matrix.binary_url }}
             JAVA_MAJOR=${{ matrix.java }}
             INCLUDE_ADMIN_CLIENT=false
-          secrets: |
-            aws_credentials=${{ secrets.AWS_CREDENTIALS }}
+          secret-files: |
+            aws_credentials=${{ runner.temp }}/aws_credentials
           tags: ${{ steps.tags.outputs.slim }}
 
       # Tags in these repositories are MUTABLE by design — the weekly rebuild re-pushes
@@ -966,9 +1094,6 @@ jobs:
           build-args: |
             BINARY_URL=${{ needs.params.outputs.rocky_binary_url }}
             JAVA_MAJOR=${{ needs.params.outputs.rocky_java }}
-          # Only pass AWS creds on trusted (non-PR) events — see the dhi job's test steps for the rationale.
-          secrets: |
-            aws_credentials=${{ github.event_name != 'pull_request' && secrets.AWS_CREDENTIALS || '' }}
       - name: Run acceptance tests
         # Rocky runs as UID 1000 and ships a shell, so the no-shell assertion is skipped for it.
         #
