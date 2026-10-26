@@ -81,6 +81,8 @@
 
 name: build-images
 
+run-name: ${{ github.event_name == 'workflow_dispatch' && format('build-images {0}{1} {2}', inputs.version != '' && inputs.version || 'all-maintained', inputs.tag_suffix, inputs.push && 'push' || 'dry-run') || github.event_name == 'schedule' && 'build-images weekly rebuild' || '' }}
+
 on:
   workflow_dispatch:
     inputs:
@@ -421,6 +423,16 @@ jobs:
               echo "::error::MAINTAINED_VERSIONS repo variable parsed to an empty array — nothing to rebuild." >&2
               exit 1
             fi
+            # One (version, tag_suffix) publishes to one registry only, whatever the entries' private
+            # flags: the two would otherwise be told apart by registry and repository and pass the
+            # gate below, and a release lives in one registry. It also keeps the digest artifact
+            # names unique, because they are keyed on version and suffix. Only the version and
+            # suffix are printed, never a URL.
+            REPEATED="$(jq -r '[.[] | .version + .tag_suffix] | group_by(.) | map(select(length > 1) | .[0]) | join(", ")' <<<"$MATRIX")"
+            if [ -n "$REPEATED" ]; then
+              echo "::error::MAINTAINED_VERSIONS lists $REPEATED more than once; one version and tag_suffix publish to one registry only." >&2
+              exit 1
+            fi
             # THE anti-overwrite gate. Two entries that publish the same tag would have the weekly
             # rebuild replace one already-released image with the other, on a green run and with
             # nothing in the log saying so. This runs before any build, so a duplicate stops the
@@ -496,6 +508,7 @@ jobs:
   # pushed here — it keeps being published by its own existing process (test-rocky below only
   # builds a throwaway local image for PR testing).
   dhi:
+    name: dhi ${{ matrix.version }}${{ matrix.tag_suffix }}
     needs: params
     # Held for a maintainer's approval on every pull request, since it logs in to dhi.io and Docker
     # Hub before running the pull request's code; empty, so no environment, on schedule and
@@ -710,35 +723,43 @@ jobs:
             fi
             MINOR_TAG="${VERSION%.*}"
           fi
+          # The registry-free refs come first: they are what the digest file names. A private
+          # entry's push list is the same refs with the registry host in front; a public entry's is
+          # the refs unchanged.
           if [ "$PRIVATE" = "true" ]; then
             if [ -z "$REGISTRY" ]; then
               echo "::error::ECR login produced no registry — cannot publish $VERSION privately." >&2
               exit 1
             fi
-            T="$REGISTRY/innovarhealthcare/bridgelink-dhi:${VERSION}-dhi${SUFFIX}"
-            S="$REGISTRY/innovarhealthcare/bridgelink-dhi-slim:${VERSION}-dhi-slim${SUFFIX}"
-            if [ "$LATEST" = "true" ]; then
-              T="$T"$'\n'"$REGISTRY/innovarhealthcare/bridgelink-dhi:latest-dhi${SUFFIX}"
-              S="$S"$'\n'"$REGISTRY/innovarhealthcare/bridgelink-dhi-slim:latest-dhi-slim${SUFFIX}"
-            fi
-            if [ -n "$MINOR_TAG" ]; then
-              T="$T"$'\n'"$REGISTRY/innovarhealthcare/bridgelink-dhi:${MINOR_TAG}-dhi"
-              S="$S"$'\n'"$REGISTRY/innovarhealthcare/bridgelink-dhi-slim:${MINOR_TAG}-dhi-slim"
-            fi
+            F="innovarhealthcare/bridgelink-dhi"
+            SF="innovarhealthcare/bridgelink-dhi-slim"
           else
-            T="innovarhealthcare/bridgelink:${VERSION}-dhi${SUFFIX}"
-            S="innovarhealthcare/bridgelink:${VERSION}-dhi-slim${SUFFIX}"
-            if [ "$LATEST" = "true" ]; then
-              T="$T"$'\n'"innovarhealthcare/bridgelink:latest-dhi${SUFFIX}"
-              S="$S"$'\n'"innovarhealthcare/bridgelink:latest-dhi-slim${SUFFIX}"
-            fi
-            if [ -n "$MINOR_TAG" ]; then
-              T="$T"$'\n'"innovarhealthcare/bridgelink:${MINOR_TAG}-dhi"
-              S="$S"$'\n'"innovarhealthcare/bridgelink:${MINOR_TAG}-dhi-slim"
-            fi
+            F="innovarhealthcare/bridgelink"
+            SF="innovarhealthcare/bridgelink"
           fi
-          { echo "list<<EOF"; echo "$T"; echo "EOF"; } >> "$GITHUB_OUTPUT"
-          { echo "slim<<EOF"; echo "$S"; echo "EOF"; } >> "$GITHUB_OUTPUT"
+          T="$F:${VERSION}-dhi${SUFFIX}"
+          S="$SF:${VERSION}-dhi-slim${SUFFIX}"
+          if [ "$LATEST" = "true" ]; then
+            T="$T"$'\n'"$F:latest-dhi${SUFFIX}"
+            S="$S"$'\n'"$SF:latest-dhi-slim${SUFFIX}"
+          fi
+          if [ -n "$MINOR_TAG" ]; then
+            T="$T"$'\n'"$F:${MINOR_TAG}-dhi"
+            S="$S"$'\n'"$SF:${MINOR_TAG}-dhi-slim"
+          fi
+          if [ "$PRIVATE" = "true" ]; then
+            PUSH_T="$(while IFS= read -r ref; do echo "$REGISTRY/$ref"; done <<<"$T")"
+            PUSH_S="$(while IFS= read -r ref; do echo "$REGISTRY/$ref"; done <<<"$S")"
+          else
+            PUSH_T="$T"
+            PUSH_S="$S"
+          fi
+          {
+            echo "refs<<EOF"; echo "$T"; echo "EOF"
+            echo "slim_refs<<EOF"; echo "$S"; echo "EOF"
+            echo "list<<EOF"; echo "$PUSH_T"; echo "EOF"
+            echo "slim<<EOF"; echo "$PUSH_S"; echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Build & push DHI image
         if: github.event_name != 'pull_request'
@@ -809,6 +830,109 @@ jobs:
             echo
             echo "Tags are mutable; pin by digest for an immutable reference."
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # Hands the pushed digests to the release pipeline as a run artifact, on pushes only like the
+      # summary above. One file per matrix entry holds both the dhi and the dhi-slim digests. Every
+      # line is checked against an allow-list before the file is moved into the upload directory,
+      # so a registry host, an account id or an unknown repository cannot reach the artifact. The
+      # file is not printed to the log: the masker would show the organisation name as ***.
+      - name: Write digest file for the release pipeline
+        id: digests
+        if: github.event_name != 'pull_request' && needs.params.outputs.push == 'true'
+        env:
+          ARTIFACT: image-digests-build-images-${{ matrix.version }}${{ matrix.tag_suffix }}
+          VERSION: ${{ matrix.version }}
+          SUFFIX: ${{ matrix.tag_suffix }}
+          JAVA: ${{ matrix.java }}
+          PRIVATE: ${{ matrix.private }}
+          REFS: ${{ steps.tags.outputs.refs }}
+          SLIM_REFS: ${{ steps.tags.outputs.slim_refs }}
+          DHI_DIGEST: ${{ steps.dhi.outputs.digest }}
+          SLIM_DIGEST: ${{ steps.slim.outputs.digest }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          export LC_ALL=C
+          digest_re='^sha256:[0-9a-f]{64}$'
+          artifact_re='^image-digests-(publish-ecr|publish-dockerhub|build-images)-(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[a-z0-9][a-z0-9._-]*)?$'
+          value_re='^[A-Za-z0-9._-]+$'
+          suffix_re='^[A-Za-z0-9._-]*$'
+          for d in "$DHI_DIGEST" "$SLIM_DIGEST"; do
+            if ! [[ "$d" =~ $digest_re ]]; then
+              echo "::error::a push step produced no valid digest; not writing the digest file." >&2
+              exit 1
+            fi
+          done
+          if ! [[ "$ARTIFACT" =~ $artifact_re ]]; then
+            echo "::error::artifact name '$ARTIFACT' is outside the image-digests-<workflow>-<version><suffix> pattern." >&2
+            exit 1
+          fi
+          if [ "$ARTIFACT" != "image-digests-build-images-${VERSION}${SUFFIX}" ]; then
+            echo "::error::artifact name '$ARTIFACT' does not match the version and suffix being recorded." >&2
+            exit 1
+          fi
+          for v in "$VERSION" "$JAVA" "$HEAD_SHA"; do
+            if ! [[ "$v" =~ $value_re ]]; then
+              echo "::error::a header value is empty or holds a character outside [A-Za-z0-9._-]; not writing the digest file." >&2
+              exit 1
+            fi
+          done
+          if ! [[ "$SUFFIX" =~ $suffix_re ]]; then
+            echo "::error::the tag suffix holds a character outside [A-Za-z0-9._-]; not writing the digest file." >&2
+            exit 1
+          fi
+          case "$PRIVATE" in
+            true) DESTINATION="ecr" ;;
+            false) DESTINATION="dockerhub" ;;
+            *)
+              echo "::error::the private flag is neither true nor false; not writing the digest file." >&2
+              exit 1
+              ;;
+          esac
+
+          F="$RUNNER_TEMP/image-digests.tmp"
+          {
+            echo "workflow=build-images"
+            echo "version=$VERSION"
+            echo "tag_suffix=$SUFFIX"
+            echo "java=$JAVA"
+            echo "destination=$DESTINATION"
+            echo "head_sha=$HEAD_SHA"
+          } > "$F"
+          n_dhi=0
+          while IFS= read -r ref; do
+            [ -n "$ref" ] || continue
+            echo "digest.${ref}=${DHI_DIGEST}" >> "$F"
+            n_dhi=$((n_dhi + 1))
+          done <<<"$REFS"
+          n_slim=0
+          while IFS= read -r ref; do
+            [ -n "$ref" ] || continue
+            echo "digest.${ref}=${SLIM_DIGEST}" >> "$F"
+            n_slim=$((n_slim + 1))
+          done <<<"$SLIM_REFS"
+          if [ "$n_dhi" -eq 0 ] || [ "$n_slim" -eq 0 ]; then
+            echo "::error::no tags to record for the dhi or the dhi-slim image; not writing the digest file." >&2
+            exit 1
+          fi
+
+          # Every line is a known header or a digest line for one of the three repositories.
+          head_re='^(workflow|version|tag_suffix|java|destination|head_sha)=[A-Za-z0-9._-]*$'
+          dig_re='^digest\.innovarhealthcare/bridgelink(-dhi|-dhi-slim)?:[A-Za-z0-9._-]+=sha256:[0-9a-f]{64}$'
+          if grep -Evq "(${head_re})|(${dig_re})" "$F"; then
+            echo "::error::digest file holds a line outside the allow-list; not uploading." >&2
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/image-digests"
+          mv "$F" "$RUNNER_TEMP/image-digests/$ARTIFACT.txt"
+
+      - name: Upload digests for the release pipeline
+        if: github.event_name != 'pull_request' && needs.params.outputs.push == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-digests-build-images-${{ matrix.version }}${{ matrix.tag_suffix }}
+          path: ${{ runner.temp }}/image-digests/
+          if-no-files-found: error
 
   # Gate: build the Rocky image single-arch, run the same acceptance suite (UID 1000, shell present),
   # then scan it (IRT-1391). Mirrors the dhi job's test steps. Rocky PUBLISHING is unaffected — this only builds a

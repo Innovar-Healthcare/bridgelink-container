@@ -18,6 +18,8 @@
 
 name: publish-dockerhub
 
+run-name: publish-dockerhub ${{ inputs.version }}${{ inputs.tag_suffix }} ${{ inputs.push && 'push' || 'dry-run' }}
+
 on:
   workflow_dispatch:
     inputs:
@@ -381,3 +383,87 @@ jobs:
             echo
             echo "Tags are mutable; pin by digest for an immutable reference."
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # Hands the pushed digests to the release pipeline as a run artifact, on pushes only like the
+      # summary above. Every line is checked against an allow-list before the file is moved into
+      # the upload directory, so a registry host, an account id or an unknown repository cannot
+      # reach the artifact. The file is not printed to the log: the masker would show the
+      # organisation name as ***.
+      - name: Write digest file for the release pipeline
+        id: digests
+        if: github.event.inputs.push == 'true'
+        env:
+          ARTIFACT: image-digests-publish-dockerhub-${{ github.event.inputs.version }}${{ steps.url.outputs.suffix }}
+          VERSION: ${{ github.event.inputs.version }}
+          SUFFIX: ${{ steps.url.outputs.suffix }}
+          JAVA: ${{ steps.url.outputs.java }}
+          REFS: ${{ steps.tags.outputs.list }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          export LC_ALL=C
+          digest_re='^sha256:[0-9a-f]{64}$'
+          artifact_re='^image-digests-(publish-ecr|publish-dockerhub|build-images)-(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[a-z0-9][a-z0-9._-]*)?$'
+          value_re='^[A-Za-z0-9._-]+$'
+          suffix_re='^[A-Za-z0-9._-]*$'
+          if ! [[ "$DIGEST" =~ $digest_re ]]; then
+            echo "::error::the push step produced no valid digest; not writing the digest file." >&2
+            exit 1
+          fi
+          if ! [[ "$ARTIFACT" =~ $artifact_re ]]; then
+            echo "::error::artifact name '$ARTIFACT' is outside the image-digests-<workflow>-<version><suffix> pattern." >&2
+            exit 1
+          fi
+          if [ "$ARTIFACT" != "image-digests-publish-dockerhub-${VERSION}${SUFFIX}" ]; then
+            echo "::error::artifact name '$ARTIFACT' does not match the version and suffix being recorded." >&2
+            exit 1
+          fi
+          for v in "$VERSION" "$JAVA" "$HEAD_SHA"; do
+            if ! [[ "$v" =~ $value_re ]]; then
+              echo "::error::a header value is empty or holds a character outside [A-Za-z0-9._-]; not writing the digest file." >&2
+              exit 1
+            fi
+          done
+          if ! [[ "$SUFFIX" =~ $suffix_re ]]; then
+            echo "::error::the tag suffix holds a character outside [A-Za-z0-9._-]; not writing the digest file." >&2
+            exit 1
+          fi
+
+          F="$RUNNER_TEMP/image-digests.tmp"
+          {
+            echo "workflow=publish-dockerhub"
+            echo "version=$VERSION"
+            echo "tag_suffix=$SUFFIX"
+            echo "java=$JAVA"
+            echo "destination=dockerhub"
+            echo "head_sha=$HEAD_SHA"
+          } > "$F"
+          n=0
+          while IFS= read -r ref; do
+            [ -n "$ref" ] || continue
+            echo "digest.${ref}=${DIGEST}" >> "$F"
+            n=$((n + 1))
+          done <<<"$REFS"
+          if [ "$n" -eq 0 ]; then
+            echo "::error::no tags to record; not writing the digest file." >&2
+            exit 1
+          fi
+
+          # Every line is a known header or a digest line for one of the three repositories.
+          head_re='^(workflow|version|tag_suffix|java|destination|head_sha)=[A-Za-z0-9._-]*$'
+          dig_re='^digest\.innovarhealthcare/bridgelink(-dhi|-dhi-slim)?:[A-Za-z0-9._-]+=sha256:[0-9a-f]{64}$'
+          if grep -Evq "(${head_re})|(${dig_re})" "$F"; then
+            echo "::error::digest file holds a line outside the allow-list; not uploading." >&2
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/image-digests"
+          mv "$F" "$RUNNER_TEMP/image-digests/$ARTIFACT.txt"
+
+      - name: Upload digests for the release pipeline
+        if: github.event.inputs.push == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-digests-publish-dockerhub-${{ github.event.inputs.version }}${{ steps.url.outputs.suffix }}
+          path: ${{ runner.temp }}/image-digests/
+          if-no-files-found: error
