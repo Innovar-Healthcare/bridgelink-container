@@ -16,16 +16,17 @@
 # Manual-only (workflow_dispatch). Fetches the release tarball from a private s3:// location via
 # OIDC — no long-lived AWS credentials.
 #
-# Required repo config:
-#   Variables:
+# Required repo config (all Secrets; this repo's run logs are public, and the runner masks a secret
+# in every log line while it prints a variable):
+#   Secrets:
 #     AWS_PUBLISH_ROLE_ARN   the bridgelink-publish role. It carries both the ECR push policy and
 #                            the s3:// release read, and is assumable from the integration branch
 #                            ONLY — these tags are mutable, so push access is the ability to
-#                            replace an already-released image.
+#                            replace an already-released image. Both credential steps also set
+#                            mask-aws-account-id, so the account id is masked wherever it appears.
 #     RELEASE_BUCKET         bucket holding the release tarballs, without the s3:// scheme. The
 #                            Compute BINARY_URL step fails fast if it is unset rather than
 #                            building a wrong URL.
-#   Secrets:
 #     DOCKERHUB_USERNAME / DOCKERHUB_TOKEN   authenticated base-image pulls only, never a push
 #                            target here — avoids the anonymous pull-rate limit on shared runners.
 #
@@ -33,6 +34,8 @@
 # is IAM-only.
 
 name: publish-ecr
+
+run-name: publish-ecr ${{ inputs.version }} ${{ inputs.push && 'push' || 'dry-run' }}
 
 on:
   workflow_dispatch:
@@ -85,23 +88,25 @@ jobs:
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars.AWS_PUBLISH_ROLE_ARN }}
+          role-to-assume: ${{ secrets.AWS_PUBLISH_ROLE_ARN }}
+          mask-aws-account-id: true
           aws-region: ${{ env.ECR_REGION }}
           role-duration-seconds: ${{ env.SESSION_SECONDS }}
 
-      # RELEASE_BUCKET is a repo variable rather than a literal. Guarded rather than defaulted:
-      # an unset variable would otherwise build `s3:///bridgelink/...`, which fails deep inside
-      # the Docker build with an error that does not name the cause.
+      # RELEASE_BUCKET is a repo secret rather than a literal, so the runner masks it in every log
+      # line. Guarded rather than defaulted: an unset secret would otherwise build
+      # `s3:///bridgelink/...`, which fails deep inside the Docker build with an error that does
+      # not name the cause.
       - name: Compute BINARY_URL and JDK
         id: url
         env:
           VERSION: ${{ github.event.inputs.version }}
           JAVA_INPUT: ${{ github.event.inputs.java }}
-          RELEASE_BUCKET: ${{ vars.RELEASE_BUCKET }}
+          RELEASE_BUCKET: ${{ secrets.RELEASE_BUCKET }}
           MAINTAINED_VERSIONS_RAW: ${{ vars.MAINTAINED_VERSIONS }}
         run: |
           set -euo pipefail
-          : "${RELEASE_BUCKET:?RELEASE_BUCKET repo variable is unset — set it in Settings > Secrets and variables > Actions}"
+          : "${RELEASE_BUCKET:?RELEASE_BUCKET repo secret is unset — set it in Settings > Secrets and variables > Actions}"
 
           # The floating minor tag is cut from the version, and a two-part version such as "26.6"
           # would publish its version tag straight over the 26.6 floating tag.
@@ -278,7 +283,8 @@ jobs:
       - name: Re-assume AWS credentials for the release build (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars.AWS_PUBLISH_ROLE_ARN }}
+          role-to-assume: ${{ secrets.AWS_PUBLISH_ROLE_ARN }}
+          mask-aws-account-id: true
           aws-region: ${{ env.ECR_REGION }}
           role-duration-seconds: ${{ env.SESSION_SECONDS }}
 
@@ -312,9 +318,11 @@ jobs:
             echo "::error::ECR login produced no registry — refusing to publish with an unqualified tag." >&2
             exit 1
           fi
-          T="$REGISTRY/$ECR_REPOSITORY:${VERSION}"
+          # The registry-free refs come first: they are what the digest file names. The push list
+          # is the same refs with the registry host in front.
+          R="$ECR_REPOSITORY:${VERSION}"
           if [ "$LATEST" = "true" ]; then
-            T="$T"$'\n'"$REGISTRY/$ECR_REPOSITORY:latest"
+            R="$R"$'\n'"$ECR_REPOSITORY:latest"
           fi
           if [ -n "$MINOR_TAG" ]; then
             # Last-gate re-check: it must be the <major>.<minor> of this very version.
@@ -322,9 +330,13 @@ jobs:
               echo "::error::refusing to move floating tag '$MINOR_TAG' from '$VERSION'." >&2
               exit 1
             fi
-            T="$T"$'\n'"$REGISTRY/$ECR_REPOSITORY:${MINOR_TAG}"
+            R="$R"$'\n'"$ECR_REPOSITORY:${MINOR_TAG}"
           fi
-          { echo "list<<EOF"; echo "$T"; echo "EOF"; } >> "$GITHUB_OUTPUT"
+          T="$(while IFS= read -r ref; do echo "$REGISTRY/$ref"; done <<<"$R")"
+          {
+            echo "refs<<EOF"; echo "$R"; echo "EOF"
+            echo "list<<EOF"; echo "$T"; echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Build & push image to ECR
         id: build
@@ -362,3 +374,81 @@ jobs:
             echo
             echo "Tags are mutable; pin by digest for an immutable reference."
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # Hands the pushed digests to the release pipeline as a run artifact, on pushes only like the
+      # summary above. Every line is checked against an allow-list before the file is moved into
+      # the upload directory, so a registry host, an account id or an unknown repository cannot
+      # reach the artifact. The file is not printed to the log: the masker would show the
+      # organisation name as ***.
+      - name: Write digest file for the release pipeline
+        id: digests
+        if: github.event.inputs.push == 'true'
+        env:
+          ARTIFACT: image-digests-publish-ecr-${{ github.event.inputs.version }}
+          VERSION: ${{ github.event.inputs.version }}
+          JAVA: ${{ steps.url.outputs.java }}
+          REFS: ${{ steps.tags.outputs.refs }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          export LC_ALL=C
+          digest_re='^sha256:[0-9a-f]{64}$'
+          artifact_re='^image-digests-(publish-ecr|publish-dockerhub|build-images)-(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[a-z0-9][a-z0-9._-]*)?$'
+          value_re='^[A-Za-z0-9._-]+$'
+          if ! [[ "$DIGEST" =~ $digest_re ]]; then
+            echo "::error::the push step produced no valid digest; not writing the digest file." >&2
+            exit 1
+          fi
+          if ! [[ "$ARTIFACT" =~ $artifact_re ]]; then
+            echo "::error::artifact name '$ARTIFACT' is outside the image-digests-<workflow>-<version><suffix> pattern." >&2
+            exit 1
+          fi
+          if [ "$ARTIFACT" != "image-digests-publish-ecr-${VERSION}" ]; then
+            echo "::error::artifact name '$ARTIFACT' does not match the version being recorded." >&2
+            exit 1
+          fi
+          for v in "$VERSION" "$JAVA" "$HEAD_SHA"; do
+            if ! [[ "$v" =~ $value_re ]]; then
+              echo "::error::a header value is empty or holds a character outside [A-Za-z0-9._-]; not writing the digest file." >&2
+              exit 1
+            fi
+          done
+
+          F="$RUNNER_TEMP/image-digests.tmp"
+          {
+            echo "workflow=publish-ecr"
+            echo "version=$VERSION"
+            echo "tag_suffix="
+            echo "java=$JAVA"
+            echo "destination=ecr"
+            echo "head_sha=$HEAD_SHA"
+          } > "$F"
+          n=0
+          while IFS= read -r ref; do
+            [ -n "$ref" ] || continue
+            echo "digest.${ref}=${DIGEST}" >> "$F"
+            n=$((n + 1))
+          done <<<"$REFS"
+          if [ "$n" -eq 0 ]; then
+            echo "::error::no tags to record; not writing the digest file." >&2
+            exit 1
+          fi
+
+          # Every line is a known header or a digest line for one of the three repositories.
+          head_re='^(workflow|version|tag_suffix|java|destination|head_sha)=[A-Za-z0-9._-]*$'
+          dig_re='^digest\.innovarhealthcare/bridgelink(-dhi|-dhi-slim)?:[A-Za-z0-9._-]+=sha256:[0-9a-f]{64}$'
+          if grep -Evq "(${head_re})|(${dig_re})" "$F"; then
+            echo "::error::digest file holds a line outside the allow-list; not uploading." >&2
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/image-digests"
+          mv "$F" "$RUNNER_TEMP/image-digests/$ARTIFACT.txt"
+
+      - name: Upload digests for the release pipeline
+        if: github.event.inputs.push == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-digests-publish-ecr-${{ github.event.inputs.version }}
+          path: ${{ runner.temp }}/image-digests/
+          if-no-files-found: error
