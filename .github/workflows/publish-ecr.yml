@@ -210,6 +210,11 @@ jobs:
       # build below reuses the same layers from the buildx cache.
       - name: Build Rocky test image
         uses: docker/build-push-action@v6
+        env:
+          # Build records are downloadable artifacts on this public repo and carry the build args;
+          # the job summary lists the build inputs and links to the record. Produce neither.
+          DOCKER_BUILD_RECORD_UPLOAD: "false"
+          DOCKER_BUILD_SUMMARY: "false"
         with:
           context: .
           file: Dockerfile
@@ -341,6 +346,11 @@ jobs:
       - name: Build & push image to ECR
         id: build
         uses: docker/build-push-action@v6
+        env:
+          # Build records are downloadable artifacts on this public repo and carry the build args;
+          # the job summary lists the build inputs and links to the record. Produce neither.
+          DOCKER_BUILD_RECORD_UPLOAD: "false"
+          DOCKER_BUILD_SUMMARY: "false"
         with:
           context: .
           file: Dockerfile

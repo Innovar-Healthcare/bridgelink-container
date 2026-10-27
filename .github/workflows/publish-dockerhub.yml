@@ -233,6 +233,11 @@ jobs:
       # same release on its own JDK, and is not once a version can be published on two.
       - name: Build Rocky test image
         uses: docker/build-push-action@v6
+        env:
+          # Build records are downloadable artifacts on this public repo and carry the build args;
+          # the job summary lists the build inputs and links to the record. Produce neither.
+          DOCKER_BUILD_RECORD_UPLOAD: "false"
+          DOCKER_BUILD_SUMMARY: "false"
         with:
           context: .
           file: Dockerfile
@@ -350,6 +355,11 @@ jobs:
       - name: Build & push image to Docker Hub
         id: build
         uses: docker/build-push-action@v6
+        env:
+          # Build records are downloadable artifacts on this public repo and carry the build args;
+          # the job summary lists the build inputs and links to the record. Produce neither.
+          DOCKER_BUILD_RECORD_UPLOAD: "false"
+          DOCKER_BUILD_SUMMARY: "false"
         with:
           context: .
           file: Dockerfile

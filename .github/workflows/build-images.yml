@@ -664,6 +664,11 @@ jobs:
       # Build a local (native-arch) test image — not pushed.
       - name: Build DHI test image
         uses: docker/build-push-action@v6
+        env:
+          # Build records are downloadable artifacts on this public repo and carry the build args;
+          # the job summary lists the build inputs and links to the record. Produce neither.
+          DOCKER_BUILD_RECORD_UPLOAD: "false"
+          DOCKER_BUILD_SUMMARY: "false"
         with:
           context: .
           file: Dockerfile.dhi
@@ -695,6 +700,11 @@ jobs:
       # boots/serves /api without client-lib/public_html.
       - name: Build DHI slim test image (INCLUDE_ADMIN_CLIENT=false)
         uses: docker/build-push-action@v6
+        env:
+          # Build records are downloadable artifacts on this public repo and carry the build args;
+          # the job summary lists the build inputs and links to the record. Produce neither.
+          DOCKER_BUILD_RECORD_UPLOAD: "false"
+          DOCKER_BUILD_SUMMARY: "false"
         with:
           context: .
           file: Dockerfile.dhi
@@ -893,6 +903,11 @@ jobs:
         if: github.event_name != 'pull_request'
         id: dhi
         uses: docker/build-push-action@v6
+        env:
+          # Build records are downloadable artifacts on this public repo and carry the build args;
+          # the job summary lists the build inputs and links to the record. Produce neither.
+          DOCKER_BUILD_RECORD_UPLOAD: "false"
+          DOCKER_BUILD_SUMMARY: "false"
         with:
           context: .
           file: Dockerfile.dhi
@@ -911,6 +926,11 @@ jobs:
         id: slim
         if: github.event_name != 'pull_request'
         uses: docker/build-push-action@v6
+        env:
+          # Build records are downloadable artifacts on this public repo and carry the build args;
+          # the job summary lists the build inputs and links to the record. Produce neither.
+          DOCKER_BUILD_RECORD_UPLOAD: "false"
+          DOCKER_BUILD_SUMMARY: "false"
         with:
           context: .
           file: Dockerfile.dhi
@@ -1085,6 +1105,11 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
       - name: Build Rocky test image
         uses: docker/build-push-action@v6
+        env:
+          # Build records are downloadable artifacts on this public repo and carry the build args;
+          # the job summary lists the build inputs and links to the record. Produce neither.
+          DOCKER_BUILD_RECORD_UPLOAD: "false"
+          DOCKER_BUILD_SUMMARY: "false"
         with:
           context: .
           file: Dockerfile
