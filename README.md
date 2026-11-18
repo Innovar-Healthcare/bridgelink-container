@@ -16,6 +16,7 @@
     * [Other mirth.properties options](#other-mirth-properties-options)
   * [Using Docker Secrets](#using-docker-secrets)
   * [Security Options](#security-options)
+    * [The default admin login, and upgrading to 26.12](#default-admin-login)
   * [Using Volumes](#using-volumes)
     * [The appdata folder](#the-appdata-folder)
     * [Additional extensions](#additional-extensions)
@@ -708,6 +709,38 @@ services:
 ```
 
 > **Note:** This option is recommended for production deployments. Verify that all extensions and startup scripts function correctly with this flag enabled before rolling it out, as some tooling that requires privilege escalation during initialization may be affected.
+
+<a name="default-admin-login"></a>
+### The default admin login, and upgrading to 26.12
+
+From 26.12.0, the default `admin`/`admin` login on a new server can only read its own user and
+change its own password. Every other API call that needs a login answers HTTP 403, over a login
+session or Basic authentication, until the password is changed. The setting behind it is
+`password.restrictgracesessions = true` in `mirth.properties`, and it applies to any account whose
+password does not meet the password requirements or has expired, not only `admin`. Images for
+earlier releases are not affected.
+
+Change the password with WebAdmin 26.9.0 or later, the Administrator, or the API: read the user's
+`id` from `GET /api/users/current`, then send the new password to `PUT /api/users/{id}/password`
+as a `text/plain` body. A 204 means it was accepted; a 200 lists the requirements it did not meet.
+The command-line interface cannot change a restricted password.
+
+```bash
+curl -k -u admin:admin -H 'X-Requested-With: XMLHttpRequest' -H 'Accept: application/json' \
+  https://localhost:8443/api/users/current
+curl -k -u admin:admin -H 'X-Requested-With: XMLHttpRequest' -H 'Content-Type: text/plain' \
+  -X PUT --data-binary '<new password>' https://localhost:8443/api/users/<id>/password
+```
+
+**Upgrading an existing container.** The installers keep a server's existing `mirth.properties`
+on upgrade, but this image does not: `conf/` comes from the image, not from a volume. So a
+container recreated on a 26.12 image gets `password.restrictgracesessions = true`, even though its
+database comes from an earlier release, and every account whose stored password does not meet the
+requirements or has expired, automation and integration accounts included, gets 403 until that
+password is changed. Since 26.9, a login with such a password raises a "Password does not meet requirements"
+server event, which identifies those accounts; one that only uses Basic authentication raises
+none, so check those by hand. To keep the earlier behaviour while you change those passwords, set
+`MP_PASSWORD_RESTRICTGRACESESSIONS=false`, and remove it once they are done.
 
 ------------
 
