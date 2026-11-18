@@ -96,7 +96,10 @@ outside the repo and fill it in.
    ```
 
    The test leaves the release installed for inspection. Reach the admin API with
-   `kubectl -n bl-eks port-forward svc/bl-bridgelink-bl 8443`.
+   `kubectl -n bl-eks port-forward svc/bl-bridgelink-bl 8443`. The test changes the admin
+   password on its first login, so log in as `admin` with `BL_ADMIN_PASSWORD` (default
+   `Chart1!test`, set in `charts/test/lib/bl-api.sh`), not `admin`. Five refused logins lock the
+   account for an hour.
 
 ## Teardown
 
